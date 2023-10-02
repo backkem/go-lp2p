@@ -3,25 +3,69 @@ package lp2p
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/backkem/go-lp2p/ospc"
 )
 
 // Data channel supports simple message passing over WebTransport.
 type DataChannel struct {
-	ch *ospc.DataChannel
+	dc *ospc.DataChannel
+
+	mu          sync.Mutex
+	cbOnOpen    func(e OnOpenEvent)
+	cbOnMessage func(e OnMessageEvent)
+}
+
+// DataChannelInit can be used to configure properties of the underlying
+// channel.
+type DataChannelInit struct {
+	Protocol string
+	ID       uint64
 }
 
 // CreateDataChannel creates a new data channel
-func (c *LP2PConnection) CreateDataChannel() (*DataChannel, error) {
-	dc, err := c.conn.CreateDataChannel(context.Background())
+func (c *LP2PConnection) CreateDataChannel(label string, opts *DataChannelInit) (*DataChannel, error) {
+	props := ospc.DataChannelParameters{
+		Label: label,
+	}
+	if opts != nil {
+		props.Protocol = opts.Protocol
+		props.ID = opts.ID
+	}
+	oDc, err := c.conn.OpenDataChannel(context.Background(), props)
 	if err != nil {
 		return nil, err
 	}
 
-	return &DataChannel{
-		ch: ch,
-	}, nil
+	dc := &DataChannel{
+		mu: sync.Mutex{},
+		dc: oDc,
+	}
+
+	dc.run()
+
+	return dc, nil
+}
+
+func (c *LP2PConnection) run() {
+	go func() {
+		for {
+			oDc, err := c.conn.AcceptDataChannel(context.Background())
+			if err != nil {
+				return
+			}
+
+			dc := &DataChannel{
+				mu: sync.Mutex{},
+				dc: oDc,
+			}
+
+			dc.run()
+
+			c.onDataChannel(dc)
+		}
+	}()
 }
 
 type OnDataChannelEvent struct {
@@ -30,15 +74,67 @@ type OnDataChannelEvent struct {
 
 // OnDataChannel fires when a data channel is opened.
 func (c *LP2PConnection) OnDataChannel(callback func(e OnDataChannelEvent)) {
-	// TODO: event wiring
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.cbOnDataChannel = callback
+}
+
+func (c *LP2PConnection) onDataChannel(dc *DataChannel) {
+	e := OnDataChannelEvent{
+		Channel: dc,
+	}
+	c.mu.Lock()
+	cb := c.cbOnDataChannel
+	c.mu.Unlock()
+
+	cb(e)
+}
+
+func (c *DataChannel) run() {
+	go func() {
+		for {
+			data, enc, err := c.dc.ReceiveMessageWithEncoding()
+			if err != nil {
+				return
+			}
+
+			c.onMessage(data, enc)
+		}
+	}()
 }
 
 type OnMessageEvent struct {
-	Payload Payload // TODO: Just use interface instead?
+	Payload Payload
 }
 
 func (c *DataChannel) OnMessage(callback func(e OnMessageEvent)) {
-	// TODO: Event wiring
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.cbOnMessage = callback
+}
+
+func (c *DataChannel) onMessage(data []byte, encoding ospc.DataEncoding) {
+	var payload Payload
+	switch encoding {
+	case ospc.DataEncodingBinary:
+		payload = PayloadBinary{
+			Data: data,
+		}
+	case ospc.DataEncodingString:
+		payload = PayloadString{
+			Data: data,
+		}
+	}
+	e := OnMessageEvent{
+		Payload: payload,
+	}
+	c.mu.Lock()
+	cb := c.cbOnMessage
+	c.mu.Unlock()
+
+	cb(e)
 }
 
 // Send a message to the other peer
@@ -51,11 +147,28 @@ func (c *DataChannel) SendText(data string) error {
 	return c.dc.SendMessageWithEncoding([]byte(data), ospc.DataEncodingString)
 }
 
-type OnDataChannelOpenEvent struct {
+type OnOpenEvent struct {
+	Channel *DataChannel
 }
 
-func (c *DataChannel) OnOpen(callback func(e OnDataChannelOpenEvent)) {
-	// TODO: Event wiring
+func (c *DataChannel) OnOpen(callback func(e OnOpenEvent)) {
+	c.mu.Lock()
+	c.cbOnOpen = callback
+	c.mu.Unlock()
+
+	// Just call right away for now.
+	c.onOpen()
+}
+
+func (c *DataChannel) onOpen() {
+	e := OnOpenEvent{
+		Channel: c,
+	}
+	c.mu.Lock()
+	cb := c.cbOnOpen
+	c.mu.Unlock()
+
+	cb(e)
 }
 
 // TODO: teardown

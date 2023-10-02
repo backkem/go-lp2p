@@ -28,9 +28,9 @@ func (c *Connection) RemoteConfig() AgentConfig {
 }
 
 // Handoff the underlying quick connection for use by another protocol.
-func (c *Connection) Handoff() (quic.Connection, error) {
-	return c.base.Handoff()
-}
+// func (c *Connection) Handoff() (quic.Connection, error) {
+// 	return c.base.Handoff()
+// }
 
 // Close the connection and all associated steams.
 func (c *Connection) Close() error {
@@ -108,18 +108,33 @@ type baseConnection struct {
 	remoteInfo               *AgentInfo
 	remoteAuthenticationInfo *AgentAuthenticationInfo
 
-	exchangeInfoState *exchangeInfoState
+	exchangeInfoState  *exchangeInfoState
+	authenticationRole AuthenticationRole
 
 	authNotify          chan struct{}
 	authenticationState *authenticationState
-	isAuthenticated     bool
 
-	connectedState
+	connectedState *connectedState
 
 	acceptCancel context.CancelFunc
 	close        chan struct{}
 	closeErr     error
 	done         chan struct{}
+}
+
+func newBaseConnection(conn quic.Connection, localConfig AgentConfig, role AgentRole) *baseConnection {
+	bConn := &baseConnection{
+		mu:         sync.Mutex{},
+		agentRole:  role,
+		agentState: newAgentState(), // TODO: reconnect
+		localInfo:  localConfig,
+		conn:       conn,
+		authNotify: make(chan struct{}),
+		close:      make(chan struct{}),
+		done:       make(chan struct{}),
+	}
+
+	return bConn
 }
 
 func (c *baseConnection) RemoteConfig() AgentConfig {
@@ -157,11 +172,10 @@ func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInf
 		return nil
 	}
 
-	stream, err := c.conn.OpenStreamSync(ctx)
+	stream, err := c.openStream(ctx)
 	if err != nil {
 		return err
 	}
-	c.handleStream(stream)
 
 	// Auth Info
 	authMsg := &msgAuthCapabilities{
@@ -194,6 +208,19 @@ func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInf
 	return nil
 }
 
+func (c *baseConnection) openStream(ctx context.Context) (quic.Stream, error) {
+	stream, err := c.conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	bStream := newBaseStream(stream, c.handleMessage)
+
+	c.handleStream(bStream)
+
+	return stream, nil
+}
+
 func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest, stream quic.Stream) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -219,8 +246,6 @@ func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest, stream
 func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse, stream quic.Stream) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	fmt.Println("handleAgentInfoResponse")
 
 	if c.exchangeInfoState == nil {
 		fmt.Println("ignoring unsolicited AgentInfoResponse")
@@ -261,17 +286,13 @@ func (c *baseConnection) handleAuthCapabilities(msg *msgAuthCapabilities, stream
 
 // caller should hold connection lock.
 func (c *baseConnection) checkAgentInfoComplete() {
-	fmt.Println("checkAgentInfoComplete",
-		c.exchangeInfoState != nil,
-		c.remoteInfo != nil,
-		c.remoteAuthenticationInfo != nil,
-	)
-
 	if c.exchangeInfoState != nil &&
 		c.remoteInfo != nil &&
 		c.remoteAuthenticationInfo != nil {
 
 		state := c.exchangeInfoState
+		c.determineAuthenticationRole()
+
 		result := exchangeInfoResult{
 			conn: c,
 		}
@@ -303,13 +324,21 @@ func (t AuthenticationRole) String() string {
 }
 
 // GetAuthenticationRole determines if the agent should act as presenter or consumer of the PSK.
+// Only correct after auth-capabilities exchange.
 func (c *baseConnection) GetAuthenticationRole() AuthenticationRole {
-	// Since the Connection is only emitted after
-	// agent info exchange, this should not be nil.
-	if c.remoteAuthenticationInfo == nil {
-		panic("missing remote peer authentication info")
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	return c.authenticationRole
+}
+
+// Caller should hold connection lock.
+func (c *baseConnection) determineAuthenticationRole() {
+	c.authenticationRole = c.getAuthenticationRole()
+}
+
+// Caller should hold connection lock.
+func (c *baseConnection) getAuthenticationRole() AuthenticationRole {
 	if c.localInfo.PSKConfig.EaseOfInput == c.remoteAuthenticationInfo.PSKConfig.EaseOfInput {
 		if c.agentRole == AgentRoleServer {
 			return AuthenticationRolePresenter
@@ -350,8 +379,71 @@ func maxInt(a, b int) int {
 	return b
 }
 
+type authenticationStatus int
+
+const (
+	authStatusNew = iota + 1
+	authStatusRequested
+	authStatusAwaitPSK
+	authStatusAwaitHandshake
+	authStatusAwaitConfirmation
+	authStatusAwaitResult
+	authStatusDone
+)
+
+func (s authenticationStatus) String() string {
+	switch s {
+	case authStatusNew:
+		return "authStatus: New"
+	case authStatusRequested:
+		return "authStatus: Requested"
+	case authStatusAwaitPSK:
+		return "authStatus: AwaitPSK"
+	case authStatusAwaitHandshake:
+		return "authStatus: AwaitHandshake"
+	case authStatusAwaitConfirmation:
+		return "authStatus: AwaitConfirmation"
+	case authStatusAwaitResult:
+		return "authStatus: AwaitResult"
+	case authStatusDone:
+		return "authStatus: Done"
+	default:
+		return fmt.Sprintf("Invalid authStatus (%d)", s)
+	}
+}
+
 type authenticationState struct {
+	stream quic.Stream
+
+	status authenticationStatus
+
+	localPSK           []byte
+	spakeState         *spakeState
+	remotePublic       []byte
+	sharedSecret       *spakeSecret
+	remoteConfirmation []byte
+	remoteResult       msgResult
+
 	done chan struct{}
+}
+
+// Caller should hold connection lock
+func (c *baseConnection) newAuthenticationState(stream quic.Stream) (*authenticationState, error) {
+	if stream == nil {
+		var err error
+		stream, err = c.openStream(context.Background())
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	c.authenticationState = &authenticationState{
+		stream: stream,
+		status: authStatusNew,
+		done:   make(chan struct{}),
+	}
+
+	return c.authenticationState, nil
 }
 
 // AcceptAuthenticate is used to handle an incoming authentication request.
@@ -372,27 +464,380 @@ func (c *baseConnection) AcceptAuthenticate(ctx context.Context) (role Authentic
 	}
 }
 
-// RequestAuthenticatePSK is used to request authentication as an initiating
-// collector agent.
+// RequestAuthenticatePSK is used to request authentication.
+// As collecting agent it sends a auth-spake2-need-psk message.
+// As presenting agent it's a no-op.
 func (c *baseConnection) RequestAuthenticatePSK() error {
-	// TODO: send auth-spake2-need-psk
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	return nil
+	if c.authenticationRole == AuthenticationRolePresenter {
+		// No-op as presenter
+		return nil
+	}
+
+	authState := c.authenticationState
+	if authState != nil {
+		return errors.New("already authenticating")
+	}
+
+	return c.authenticatePSKProgress()
+}
+
+// Caller should hold connection lock
+func (c *baseConnection) doAuthNotify() {
+	// close := c.close
+	authNotify := c.authNotify
+
+	close(authNotify)
+}
+
+// Caller should hold connection lock.
+func (c *baseConnection) getAuthInitiationToken() (string, error) {
+	// TODO: wire up auth-initiation-token
+	// For an advertising agent, the at field in its mDNS TXT record must be used as the
+	// auth-initiation-token in the the first authentication message sent to or from that agent.
+	at := "todo"
+
+	return at, nil
+}
+
+// Caller should hold connection lock.
+func (c *baseConnection) validateAuthInitiationToken(token string) error {
+	// TODO: wire up auth-initiation-token
+	// Agents should discard any authentication message whose auth-initiation-token is set and
+	// does not match the at provided by the advertising agent.
+	if token == "todo" {
+		return nil
+	}
+
+	return errors.New("invalid auth-initiation-token")
 }
 
 // Authenticate is used to authenticate. It will block until authentication is complete
 // or the context is closed.
 func (c *baseConnection) AuthenticatePSK(ctx context.Context, psk []byte) (*Connection, error) {
-	// TODO
-	// https://github.com/niomon/spake2-go/blob/master/spake2_test.go
+	err := c.authenticatePSK(psk)
+	if err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	close := c.close
+	done := c.authenticationState.done
+	c.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-close:
+		return nil, c.err()
+	case <-done:
+		return c.finishAuthentication()
+	}
+}
+
+func (c *baseConnection) finishAuthentication() (*Connection, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.authenticationState.remoteResult != msgResultSuccess {
+		return nil, fmt.Errorf("authentication failed: %d", c.authenticationState.remoteResult)
+	}
+
+	// c.authenticationState = nil
+
+	c.connectedState = &connectedState{
+		accept: make(chan *DataChannel),
+	}
 
 	return &Connection{
 		base: c,
 	}, nil
 }
 
-type authenticatedState struct {
-	acceptCh chan *Connection
+func (c *baseConnection) authenticatePSK(psk []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if psk == nil {
+		return errors.New("no psk provided")
+	}
+
+	authState := c.authenticationState
+	if authState == nil {
+		var err error
+		authState, err = c.newAuthenticationState(nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	if authState.localPSK != nil {
+		return fmt.Errorf("already authenticating")
+	}
+
+	authState.localPSK = psk
+
+	return c.authenticatePSKProgress()
+}
+
+// Caller should hold connection lock
+func (c *baseConnection) authenticatePSKProgress() error {
+	authState := c.authenticationState
+	if authState == nil {
+		var err error
+		authState, err = c.newAuthenticationState(nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	// fmt.Printf("%s %s\n", c.localInfo.Nickname, c.authenticationState.status)
+
+	role := c.authenticationRole
+
+	if authState.status == authStatusNew {
+		if role == AuthenticationRolePresenter {
+			if authState.localPSK == nil {
+				c.doAuthNotify()
+			}
+		} else {
+			if authState.remotePublic == nil {
+				err := c.sendAuthSpake2NeedPsk()
+				if err != nil {
+					return err
+				}
+			} else if authState.localPSK == nil {
+				c.doAuthNotify()
+			}
+		}
+
+		authState.status = authStatusAwaitPSK
+	}
+
+	if authState.status == authStatusAwaitPSK {
+		if authState.localPSK == nil {
+			return nil // continue waiting
+		}
+		if role == AuthenticationRolePresenter {
+			client, err := newSpakeClient(authState.localPSK)
+			if err != nil {
+				return err
+			}
+			authState.spakeState = client
+		} else {
+			server, err := newSpakeServer(authState.localPSK)
+			if err != nil {
+				return err
+			}
+			authState.spakeState = server
+		}
+
+		err := c.sendAuthSpake2Handshake()
+		if err != nil {
+			return err
+		}
+
+		authState.status = authStatusAwaitHandshake
+	}
+
+	if authState.status == authStatusAwaitHandshake {
+		if authState.remotePublic == nil {
+			return nil // continue waiting
+		}
+		secret, err := authState.spakeState.DeriveSecret(authState.remotePublic)
+		if err != nil {
+			return err
+		}
+		authState.sharedSecret = secret
+
+		err = c.sendAuthSpake2Confirmation()
+		if err != nil {
+			return err
+		}
+
+		authState.status = authStatusAwaitConfirmation
+	}
+
+	if authState.status == authStatusAwaitConfirmation {
+		if authState.remoteConfirmation == nil {
+			return nil // continue waiting
+		}
+
+		err := authState.sharedSecret.Verify(authState.remoteConfirmation)
+		if err != nil {
+			return err
+		}
+
+		err = c.sendAuthStatus()
+		if err != nil {
+			return err
+		}
+
+		authState.status = authStatusAwaitResult
+	}
+
+	if authState.status == authStatusAwaitResult {
+		if authState.remoteResult == 0 {
+			return nil // continue waiting
+		}
+
+		close(authState.done)
+
+		authState.status = authStatusDone
+	}
+
+	if authState.status == authStatusDone {
+		return nil
+	}
+
+	return errors.New("invalid authentication status")
+}
+
+// Caller should hold connection lock
+func (c *baseConnection) sendAuthSpake2NeedPsk() error {
+	authState := c.authenticationState
+
+	at, err := c.getAuthInitiationToken()
+	if err != nil {
+		return err
+	}
+
+	msg := &msgAuthSpake2NeedPsk{
+		AuthInitiationToken: at,
+	}
+
+	err = writeMessage(msg, authState.stream)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Caller should hold connection lock
+func (c *baseConnection) sendAuthSpake2Handshake() error {
+	authState := c.authenticationState
+	publicValue := authState.spakeState.GetLocalPublic()
+
+	at, err := c.getAuthInitiationToken()
+	if err != nil {
+		return err
+	}
+
+	msg := &msgAuthSpake2Handshake{
+		AuthInitiationToken: at,
+		Payload:             publicValue,
+	}
+
+	err = writeMessage(msg, authState.stream)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Caller should hold connection lock
+func (c *baseConnection) sendAuthSpake2Confirmation() error {
+	authState := c.authenticationState
+	confirmation := authState.sharedSecret.DeriveConfirmation()
+
+	msg := &msgAuthSpake2Confirmation{
+		Payload: confirmation,
+	}
+
+	err := writeMessage(msg, authState.stream)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// Caller should hold connection lock
+func (c *baseConnection) sendAuthStatus() error {
+	authState := c.authenticationState
+
+	msg := &msgAuthStatus{
+		Result: msgResultSuccess,
+	}
+
+	err := writeMessage(msg, authState.stream)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *baseConnection) handleAuthSpake2NeedPsk(msg *msgAuthSpake2NeedPsk, stream quic.Stream) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.authenticationRole == AuthenticationRoleConsumer ||
+		c.authenticationState != nil {
+		fmt.Println("ignoring spake2-need-psk")
+		return nil
+	}
+
+	_, err := c.newAuthenticationState(stream)
+	if err != nil {
+		return err
+	}
+
+	return c.authenticatePSKProgress()
+}
+
+func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake, stream quic.Stream) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	err := c.validateAuthInitiationToken(msg.AuthInitiationToken)
+	if err != nil {
+		return err
+	}
+
+	authState := c.authenticationState
+	if authState == nil {
+		authState, err = c.newAuthenticationState(stream)
+		if err != nil {
+			return err
+		}
+	}
+
+	authState.remotePublic = msg.Payload
+
+	return c.authenticatePSKProgress()
+}
+
+func (c *baseConnection) handleAuthSpake2Confirmation(msg *msgAuthSpake2Confirmation, stream quic.Stream) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	authState := c.authenticationState
+	if authState == nil {
+		return errors.New("unsolicited auth-spake2-confirmation")
+	}
+
+	authState.remoteConfirmation = msg.Payload
+
+	return c.authenticatePSKProgress()
+}
+
+func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus, stream quic.Stream) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	authState := c.authenticationState
+	if authState == nil {
+		return errors.New("unsolicited auth-status")
+	}
+
+	authState.remoteResult = msg.Result
+
+	return c.authenticatePSKProgress()
 }
 
 func (c *baseConnection) run() {
@@ -404,47 +849,38 @@ func (c *baseConnection) run() {
 
 	// Steam accept loop
 	go func() {
-		s, err := c.conn.AcceptStream(acceptCtx)
-		if err != nil {
-			fmt.Printf("AcceptStream error: %s\n", err)
-			c.closeWithError(fmt.Errorf("acceptStream error: %v", err))
-			return
+		for {
+			s, err := c.conn.AcceptStream(acceptCtx)
+			if err != nil {
+				fmt.Printf("AcceptStream error: %s\n", err)
+				c.closeWithError(fmt.Errorf("acceptStream error: %v", err))
+				return
+			}
+
+			bStream := newBaseStream(s, c.handleMessage)
+			c.handleStream(bStream)
 		}
-
-		c.handleStream(s)
 	}()
-
-	// Logic loop
-	// Handle all streams
-	// Message handlers
-	// - Metadata FSM
-
-	// go func() {
-	// 	for {
-	// 		select {
-	// 		case <-closeCh: // Shutdown initiated
-	// 			c.conn.CloseWithError(1, "Closed")
-	//
-	// 			close(doneCh)
-	//
-	// 		case s <- streams:
-	//
-	// 		}
-	// 	}
-	// }()
 }
 
-func (c *baseConnection) handleStream(stream quic.Stream) {
+func (c *baseConnection) handleStream(stream *baseStream) {
 	go func() {
 		for {
-			msg, err := readMessage(stream)
-			if err != nil {
+			handler := stream.Handler()
+			if handler == nil {
+				return
+			}
+
+			msg, err := readMessage(stream.stream)
+			if err == quic.ErrServerClosed {
+				return
+			} else if err != nil {
 				fmt.Printf("failed to read message: %v\n", err)
 				// c.closeWithError(fmt.Errorf("failed to read message: %v", err))
 				return
 			}
 
-			err = c.handleMessage(msg, stream)
+			err = handler(msg, stream)
 			if err != nil {
 				fmt.Printf("failed to handle message: %v\n", err)
 				c.closeWithError(fmt.Errorf("failed to handle message: %v", err))
@@ -454,16 +890,31 @@ func (c *baseConnection) handleStream(stream quic.Stream) {
 	}()
 }
 
-func (c *baseConnection) handleMessage(msg interface{}, stream quic.Stream) (err error) {
+func (c *baseConnection) handleMessage(msg interface{}, stream *baseStream) (err error) {
 	switch typedMsg := msg.(type) {
 	case *msgAgentInfoRequest:
-		err = c.handleAgentInfoRequest(typedMsg, stream)
+		err = c.handleAgentInfoRequest(typedMsg, stream.stream)
 
 	case *msgAgentInfoResponse:
-		err = c.handleAgentInfoResponse(typedMsg, stream)
+		err = c.handleAgentInfoResponse(typedMsg, stream.stream)
 
 	case *msgAuthCapabilities:
-		err = c.handleAuthCapabilities(typedMsg, stream)
+		err = c.handleAuthCapabilities(typedMsg, stream.stream)
+
+	case *msgAuthSpake2NeedPsk:
+		err = c.handleAuthSpake2NeedPsk(typedMsg, stream.stream)
+
+	case *msgAuthSpake2Handshake:
+		err = c.handleAuthSpake2Handshake(typedMsg, stream.stream)
+
+	case *msgAuthSpake2Confirmation:
+		err = c.handleAuthSpake2Confirmation(typedMsg, stream.stream)
+
+	case *msgAuthStatus:
+		err = c.handleAuthStatus(typedMsg, stream.stream)
+
+	case *msgDataExchangeStartRequest:
+		err = c.handleDataExchangeStartRequest(typedMsg, stream)
 
 	default:
 		fmt.Printf("baseConnection: unhandled message type: %T\n", typedMsg)
@@ -476,21 +927,47 @@ func (c *baseConnection) handleMessage(msg interface{}, stream quic.Stream) (err
 }
 
 type connectedState struct {
-	acceptCh chan *DataChannel
+	accept chan *DataChannel
+}
+
+func (c *baseConnection) handleDataExchangeStartRequest(msg *msgDataExchangeStartRequest, stream *baseStream) error {
+	dc := &DataChannel{
+		DataChannelParameters: DataChannelParameters{
+			Label:    msg.Label,
+			ID:       msg.ExchangeId,
+			Protocol: msg.Protocol,
+		},
+		stream: stream.stream,
+	}
+	stream.SetHandler(nil)
+
+	// TODO: send data-exchange-start-response
+
+	c.mu.Lock()
+	close := c.close
+	accept := c.connectedState.accept
+	c.mu.Unlock()
+
+	select {
+	case <-close:
+		return c.err()
+	case accept <- dc:
+		return nil
+	}
 }
 
 // Handoff the underlying quick connection for use by another protocol.
-func (c *baseConnection) Handoff() (quic.Connection, error) {
-	c.mu.Lock()
-	c.acceptCancel() // Stop stream handling loop
-	done := c.done
-	c.closeErr = ErrHandedOff
-	c.mu.Unlock()
-
-	<-done
-
-	return c.conn, nil
-}
+// func (c *baseConnection) Handoff() (quic.Connection, error) {
+// 	c.mu.Lock()
+// 	c.acceptCancel() // Stop stream handling loop
+// 	done := c.done
+// 	c.closeErr = ErrHandedOff
+// 	c.mu.Unlock()
+//
+// 	<-done
+//
+// 	return c.conn, nil
+// }
 
 // Close the connection and all associated steams.
 func (c *baseConnection) Close() error {

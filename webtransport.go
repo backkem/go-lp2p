@@ -13,6 +13,9 @@ type LP2PQuicTransport struct {
 }
 
 // TODO: Rethink API vs DataChannel
+// https://w3c.github.io/p2p-webtransport/#dom-rtcquictransport-start
+// https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/
+// q2q: quick transport
 func NewLP2PQuicTransport(source *LP2PConnection) *LP2PQuicTransport {
 	return &LP2PQuicTransport{
 		source: source,

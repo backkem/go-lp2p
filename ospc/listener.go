@@ -214,15 +214,11 @@ func (l *Listener) run() error {
 				close(doneCh)
 
 			case qConn := <-qConns: // Incoming connection
-				bConn := &baseConnection{
-					mu:         sync.Mutex{},
-					agentRole:  AgentRoleServer,
-					agentState: newAgentState(), // TODO: reconnect
-					localInfo:  agentConfig,
-					conn:       qConn,
-					close:      make(chan struct{}),
-					done:       make(chan struct{}),
-				}
+				bConn := newBaseConnection(
+					qConn,
+					agentConfig,
+					AgentRoleServer,
+				)
 
 				bConn.run()
 				err := bConn.exchangeInfo(context.Background(), pendingCh)
@@ -352,8 +348,16 @@ func (c *UnauthenticatedConnection) AcceptAuthenticate(ctx context.Context) (rol
 // or the context is closed.
 func (c *UnauthenticatedConnection) AuthenticatePSK(ctx context.Context, psk []byte) (*Connection, error) {
 	base := c.base
+
+	conn, err := base.AuthenticatePSK(ctx, psk)
+	if err != nil {
+		return nil, err
+	}
+
+	// detach the UnauthenticatedConnection
 	c.base = nil
-	return base.AuthenticatePSK(ctx, psk)
+
+	return conn, nil
 }
 
 // Close the unauthenticated connection.

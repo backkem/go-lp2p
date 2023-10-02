@@ -80,6 +80,10 @@ const (
 	typeKeyAuthSpake2Handshake    TypeKey = 1003
 	typeKeyAuthSpake2Confirmation TypeKey = 1004
 	typeKeyAuthStatus             TypeKey = 1005
+
+	// DataExchange
+	typeKeyDataExchangeStartRequest  TypeKey = 1101
+	typeKeyDataExchangeStartResponse TypeKey = 1102
 )
 
 func readTypeKey(r io.Reader) (TypeKey, error) {
@@ -92,7 +96,6 @@ func writeTypeKey(v TypeKey, w io.Writer) error {
 }
 
 func readMessage(r io.Reader) (interface{}, error) {
-	// fmt.Println("   -start-read-message-")
 	// r = newDebugReadWriter(r)
 	typeKey, err := readTypeKey(r)
 	if err != nil {
@@ -112,6 +115,7 @@ func readMessage(r io.Reader) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	// fmt.Printf("<-- Read %T\n", msg)
 	return msg, nil
 
@@ -130,6 +134,24 @@ func newMessageByType(key TypeKey) (interface{}, error) {
 
 	case typeKeyAuthCapabilities:
 		return &msgAuthCapabilities{}, nil
+
+	case typeKeyAuthSpake2NeedPsk:
+		return &msgAuthSpake2NeedPsk{}, nil
+
+	case typeKeyAuthSpake2Handshake:
+		return &msgAuthSpake2Handshake{}, nil
+
+	case typeKeyAuthSpake2Confirmation:
+		return &msgAuthSpake2Confirmation{}, nil
+
+	case typeKeyAuthStatus:
+		return &msgAuthStatus{}, nil
+
+	case typeKeyDataExchangeStartRequest:
+		return &msgDataExchangeStartRequest{}, nil
+
+	case typeKeyDataExchangeStartResponse:
+		return &msgDataExchangeStartResponse{}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown type key: %d", key)
@@ -206,6 +228,24 @@ func typeKeyByMessage(msg interface{}) (TypeKey, error) {
 	case *msgAuthCapabilities:
 		return typeKeyAuthCapabilities, nil
 
+	case *msgAuthSpake2NeedPsk:
+		return typeKeyAuthSpake2NeedPsk, nil
+
+	case *msgAuthSpake2Handshake:
+		return typeKeyAuthSpake2Handshake, nil
+
+	case *msgAuthSpake2Confirmation:
+		return typeKeyAuthSpake2Confirmation, nil
+
+	case *msgAuthStatus:
+		return typeKeyAuthStatus, nil
+
+	case *msgDataExchangeStartRequest:
+		return typeKeyDataExchangeStartRequest, nil
+
+	case *msgDataExchangeStartResponse:
+		return typeKeyDataExchangeStartResponse, nil
+
 	default:
 		return 0, fmt.Errorf("unknown message type: %T", msg)
 	}
@@ -256,13 +296,6 @@ type msgDataFrame struct {
 	// SyncTime *MediaTime `codec:"5"`
 }
 
-// ; A separate group so it can be used in remote-playback-start-request
-// streaming-session-start-request-params = (
-//   1: uint; streaming-session-id
-//   2: [* media-stream-offer] ;  stream-offers
-//   3: microseconds ; desired-stats-interval
-// )
-
 type msgPskInputMethod uint64
 
 const (
@@ -277,6 +310,27 @@ type msgAuthCapabilities struct {
 	PskMinBitsOfEntropy uint64              `codec:"2"`
 }
 
+// auth-spake2-need-psk
+type msgAuthSpake2NeedPsk struct {
+	AuthInitiationToken string `codec:"0"`
+}
+
+// auth-spake2-handshake
+type msgAuthSpake2Handshake struct {
+	AuthInitiationToken string `codec:"0"`
+	Payload             []byte `codec:"1"`
+}
+
+// auth-spake2-confirmation
+type msgAuthSpake2Confirmation struct {
+	Payload []byte `codec:"1"`
+}
+
+// auth-status
+type msgAuthStatus struct {
+	Result msgResult `codec:"1"`
+}
+
 type msgResult uint64
 
 const (
@@ -289,20 +343,6 @@ const (
 	msgResultTerminating           msgResult = 103
 	msgResultUnknownError          msgResult = 199
 )
-
-// ; type key 1005
-// auth-status = {
-//   1 : auth-status-result ; result
-// }
-//
-// auth-status-result = &(
-//   authenticated: 0
-//   unknown-error: 1
-//   timeout: 2
-//   secret-unknown: 3
-//   validation-took-too-long : 4
-//   proof-invalid: 5
-// )
 
 ///
 // Below is a non-standard (yet) message for initiating exchange-data.

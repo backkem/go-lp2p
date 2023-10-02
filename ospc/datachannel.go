@@ -7,9 +7,16 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
+// DataChannelParameters
+type DataChannelParameters struct {
+	Label    string
+	Protocol string
+	ID       uint64
+}
+
 // OpenDataChannel opens a data channel
-func (c *Connection) OpenDataChannel(ctx context.Context) (*DataChannel, error) {
-	return c.base.OpenDataChannel(ctx)
+func (c *Connection) OpenDataChannel(ctx context.Context, params DataChannelParameters) (*DataChannel, error) {
+	return c.base.OpenDataChannel(ctx, params)
 }
 
 // AcceptStream accepts a data channel
@@ -17,17 +24,53 @@ func (c *Connection) AcceptDataChannel(ctx context.Context) (*DataChannel, error
 	return c.base.AcceptDataChannel(ctx)
 }
 
-func (c *baseConnection) OpenDataChannel(ctx context.Context) (*DataChannel, error) {
-	// TODO
-	return nil, nil
+func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannelParameters) (*DataChannel, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	msg := &msgDataExchangeStartRequest{
+		RequestID:  c.agentState.nextRequestID(),
+		ExchangeId: params.ID,
+		Label:      params.Label,
+		Protocol:   params.Protocol,
+	}
+
+	stream, err := c.conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	err = writeMessage(msg, stream)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: await data-exchange-start-response
+
+	return &DataChannel{
+		DataChannelParameters: params,
+		stream:                stream,
+	}, nil
 }
 
 func (c *baseConnection) AcceptDataChannel(ctx context.Context) (*DataChannel, error) {
-	// TODO
-	return nil, nil
+	c.mu.Lock()
+	close := c.close
+	accept := c.connectedState.accept
+	c.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-close:
+		return nil, c.err()
+	case dc := <-accept:
+		return dc, nil
+	}
 }
 
 type DataChannel struct {
+	DataChannelParameters
 	stream quic.Stream
 }
 
@@ -59,9 +102,9 @@ func (c *DataChannel) ReceiveMessageWithEncoding() ([]byte, DataEncoding, error)
 		return nil, 0, err
 	}
 
-	dataFrame, ok := msg.(msgDataFrame)
+	dataFrame, ok := msg.(*msgDataFrame)
 	if !ok {
-		return nil, 0, fmt.Errorf("unexpected message type")
+		return nil, 0, fmt.Errorf("unexpected message type: %T", msg)
 	}
 
 	return dataFrame.Payload, dataFrame.EncodingId, nil

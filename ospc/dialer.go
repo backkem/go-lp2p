@@ -6,8 +6,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
-	"sync"
 
 	mdns "github.com/grandcat/zeroconf"
 	"github.com/quic-go/quic-go"
@@ -77,21 +75,16 @@ func (r RemoteAgent) Dial(ctx context.Context, c AgentConfig) (*UnauthenticatedC
 	}
 	addr := fmt.Sprintf("%s:%d", getMdnsHost(r.info), r.info.Port)
 
-	fmt.Println("Remote addr:", addr)
 	qConn, err := quic.DialAddr(ctx, addr, tlsConfig, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	bConn := &baseConnection{
-		mu:         sync.Mutex{},
-		agentRole:  AgentRoleClient,
-		agentState: newAgentState(), // TODO: reconnect
-		localInfo:  c,
-		conn:       qConn,
-		close:      make(chan struct{}),
-		done:       make(chan struct{}),
-	}
+	bConn := newBaseConnection(
+		qConn,
+		c,
+		AgentRoleClient,
+	)
 
 	bConn.run()
 
@@ -117,14 +110,13 @@ func (r RemoteAgent) Dial(ctx context.Context, c AgentConfig) (*UnauthenticatedC
 
 func getMdnsHost(entry *mdns.ServiceEntry) string {
 	for _, ipv6 := range entry.AddrIPv6 {
-		log.Printf("Choosing IPv6 address [%s]\n", ipv6)
+		// log.Printf("Choosing IPv6 address [%s]\n", ipv6)
 		return fmt.Sprintf("[%s]", ipv6)
 	}
 	for _, ipv4 := range entry.AddrIPv4 {
-		log.Printf("Choosing IPv4 address %s\n", ipv4)
+		// log.Printf("Choosing IPv4 address %s\n", ipv4)
 		return ipv4.String()
 	}
-	// This shouldn't happen
-	log.Printf("No IP address found. Falling back to hostname %s\n", entry.HostName)
+	// log.Printf("No IP address found. Falling back to hostname %s\n", entry.HostName)
 	return entry.HostName
 }

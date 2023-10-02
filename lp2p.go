@@ -1,10 +1,16 @@
 package lp2p
 
 import (
+	"context"
+	"sync"
+
 	"github.com/backkem/go-lp2p/ospc"
 )
 
-var userAgent = &mockUserAgent{}
+var DefaultUserAgent = &mockUserAgent{
+	Consumer:  CLICollector,
+	Presenter: CLIPresenter,
+}
 
 type LP2PReceiverConfig struct {
 	Nickname string
@@ -14,22 +20,50 @@ type LP2PReceiverConfig struct {
 type LP2PReceiver struct {
 	config LP2PReceiverConfig
 	l      *uaPeerListener
+
+	mu sync.Mutex
+
+	cbOnConnection func(e OnConnectionEvent)
 }
 
 // NewLP2Receiver
 func NewLP2Receiver(config LP2PReceiverConfig) (*LP2PReceiver, error) {
-	return &LP2PReceiver{}, nil
+	return &LP2PReceiver{
+		config: config,
+	}, nil
 }
 
 // Start advertising and receiving peers.
 func (r *LP2PReceiver) Start() error {
 	var err error
-	r.l, err = userAgent.PeerManager().Listen(r.config.Nickname)
+	r.l, err = DefaultUserAgent.PeerManager().Listen(r.config.Nickname)
 	if err != nil {
 		return err
 	}
 
-	// TODO: event wiring
+	r.run()
+
+	return nil
+}
+
+func (r *LP2PReceiver) run() error {
+	go func() {
+		for {
+			oConn, err := r.l.Accept(context.Background())
+			if err != nil {
+				return
+			}
+
+			conn := &LP2PConnection{
+				mu:   sync.Mutex{},
+				conn: oConn,
+			}
+
+			conn.run()
+
+			r.onConnection(conn)
+		}
+	}()
 
 	return nil
 }
@@ -39,7 +73,21 @@ type OnConnectionEvent struct {
 }
 
 func (r *LP2PReceiver) OnConnection(callback func(e OnConnectionEvent)) {
-	// TODO: event wiring
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.cbOnConnection = callback
+}
+
+func (r *LP2PReceiver) onConnection(connection *LP2PConnection) {
+	e := OnConnectionEvent{
+		Connection: connection,
+	}
+	r.mu.Lock()
+	cb := r.cbOnConnection
+	r.mu.Unlock()
+
+	cb(e)
 }
 
 type LP2PRequestConfig struct {
@@ -56,7 +104,7 @@ type LP2PRequest struct {
 // NewLP2PRequest
 func NewLP2PRequest(config LP2PRequestConfig) (*LP2PRequest, error) {
 	// Discover early
-	_ = userAgent.PeerManager()
+	_ = DefaultUserAgent.PeerManager()
 
 	return &LP2PRequest{
 		config: config,
@@ -65,12 +113,20 @@ func NewLP2PRequest(config LP2PRequestConfig) (*LP2PRequest, error) {
 
 // Start the request.
 func (r *LP2PRequest) Start() (*LP2PConnection, error) {
-	pm := userAgent.PeerManager()
-	conn, err := pm.PickAndDial(r.config.Nickname)
+	pm := DefaultUserAgent.PeerManager()
+	oConn, err := pm.PickAndDial(r.config.Nickname)
+	if err != nil {
+		return nil, err
+	}
 
-	return &LP2PConnection{
-		conn: conn,
-	}, err
+	conn := &LP2PConnection{
+		mu:   sync.Mutex{},
+		conn: oConn,
+	}
+
+	conn.run()
+
+	return conn, nil
 }
 
 // LP2PConnection
@@ -80,4 +136,7 @@ type LP2PConnection struct {
 	// Nickname string
 
 	conn *ospc.Connection
+
+	mu              sync.Mutex
+	cbOnDataChannel func(e OnDataChannelEvent)
 }

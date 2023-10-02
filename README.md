@@ -4,15 +4,19 @@ This repo contains experiments for the [Local Peer-to-Peer API](https://github.c
 
 ## Open points
 
-- [x] Mock out LP2P API
-- [x] ospc discovery, listen & dial
-- [ ] ospc PSK Authentication messages
-- [ ] Finish ospc.DataChannel
-- [ ] Finish LP2P API & examples
-- [ ] ospc to WebTransport Protocol upgrade
-- [ ] WebTransport API & examples
-- [ ] Abstract LP2P API from underlying transport (to allow others like Wi-Fi Direct)
-- [ ] Lots of cleanup
+- LP2P API
+  - [x] Initial implementation & example.
+  - [x] User agent PSK present & consume
+  - [ ] User agent peer selection
+  - [ ] WebTransport API & examples
+- OSP(C)
+  - [x] discovery, listen & dial
+  - [x] data-channel protocol extension
+  - [ ] WebTransport Protocol interaction
+  - [ ] implement actual PAKE algorithm
+- Various
+  - [ ] Abstract LP2P API from underlying transport (to allow others like Wi-Fi Direct)
+  - [ ] Lots of cleanup
 
 ## Coding conventions
 

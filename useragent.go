@@ -15,12 +15,23 @@ import (
 // the LP2P API.
 type mockUserAgent struct {
 	pm *uaPeerManager
+
+	IgnoreConsent bool
+	PSKOverride   []byte
+	Consumer      consumer
+	Presenter     presenter
 }
+
+type presenter func(psk []byte)
+type consumer func() ([]byte, error)
 
 // PeerManager
 func (a *mockUserAgent) PeerManager() *uaPeerManager {
 	if a.pm == nil {
-		a.pm = &uaPeerManager{}
+		a.pm = &uaPeerManager{
+			ua: a,
+		}
+
 		// Start early
 		a.pm.run()
 	}
@@ -29,6 +40,7 @@ func (a *mockUserAgent) PeerManager() *uaPeerManager {
 
 // uaPeerManager contains anything LP2P related
 type uaPeerManager struct {
+	ua         *mockUserAgent
 	discoverer *ospc.Discoverer
 
 	discoveredAgents []*ospc.RemoteAgent
@@ -120,10 +132,15 @@ func (m *uaPeerManager) authenticatePSK(ctx context.Context, uConn *ospc.Unauthe
 	role := uConn.GetAuthenticationRole()
 
 	var psk []byte
+	var err error
 	if role == ospc.AuthenticationRolePresenter {
-		psk, err := uConn.GeneratePSK()
-		if err != nil {
-			return nil, err
+		if m.ua.PSKOverride != nil {
+			psk = m.ua.PSKOverride
+		} else {
+			psk, err = uConn.GeneratePSK()
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		m.present(psk)
@@ -134,7 +151,7 @@ func (m *uaPeerManager) authenticatePSK(ctx context.Context, uConn *ospc.Unauthe
 			return nil, err
 		}
 
-		psk, err = m.collect()
+		psk, err = m.consume()
 		if err != nil {
 			return nil, err
 		}
@@ -172,6 +189,10 @@ func (m *uaPeerManager) dial(ctx context.Context, agent *ospc.RemoteAgent, local
 }
 
 func (m *uaPeerManager) consentListen(nickname string) error {
+	if m.ua.IgnoreConsent {
+		return nil
+	}
+
 	consent := ""
 	fmt.Printf("Accept connections as %s? (y/n):\n", nickname)
 	fmt.Scanln(&consent)
@@ -183,6 +204,9 @@ func (m *uaPeerManager) consentListen(nickname string) error {
 }
 
 func (m *uaPeerManager) consentAccept(nickname string) error {
+	if m.ua.IgnoreConsent {
+		return nil
+	}
 	consent := ""
 	fmt.Printf("Accept connection from %s? (y/n):\n", nickname)
 	fmt.Scanln(&consent)
@@ -194,11 +218,19 @@ func (m *uaPeerManager) consentAccept(nickname string) error {
 }
 
 func (m *uaPeerManager) present(psk []byte) {
+	m.ua.Presenter(psk)
+}
+
+func CLIPresenter(psk []byte) {
 	pskEncoded := encodeNumeric(psk)
 	fmt.Printf("Pin code: %s\n", pskEncoded)
 }
 
-func (m *uaPeerManager) collect() ([]byte, error) {
+func (m *uaPeerManager) consume() ([]byte, error) {
+	return m.ua.Consumer()
+}
+
+func CLICollector() ([]byte, error) {
 	pskEncoded := ""
 	fmt.Println("Enter pin:")
 	fmt.Scanln(&pskEncoded)
