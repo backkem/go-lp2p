@@ -22,3 +22,8 @@ go.work
 go.work.sum
 
 notes.md
+*-notes.md
+
+node_modules
+package-lock.json
+build

@@ -1,0 +1,19 @@
+{
+  "name": "go-lp2p",
+  "version": "1.0.0",
+  "description": "This repo contains experiments for the [Local Peer-to-Peer API](https://github.com/ibelem/local-peer-to-peer) proposal. Do not use any of this code yet, it not tested nor secure.",
+  "main": "index.js",
+  "directories": {
+    "example": "examples"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "compile": "npx tsc"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "typescript": "^5.2.2"
+  }
+}
