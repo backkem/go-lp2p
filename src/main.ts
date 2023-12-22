@@ -2,27 +2,127 @@
 
 // This file contains stub classes to help write examples in JavaScript.
 
-function objectExample() {
+async function exampleLP2PReceiver() {
+    const receiver = new LP2PReceiver({
+        nickname: "example-receiver",
+    });
+    receiver.onconnection = e => {
+        console.log("Connection established!");
+        const conn = e.connection;
+    };
+
+    // Blocks until permission is received.
+    await receiver.start();
+}
+
+exampleLP2PReceiver();
+
+async function exampleLP2PRequest() {
+    const request = new LP2PRequest({
+        nickname: "example-request",
+    });
+
+    // Blocks until connection is received.
+    const conn = await request.start();
+    console.log("Connection established!");
+}
+
+exampleLP2PRequest();
+
+async function exampleLP2PQuicTransport() {
     // Peer A
     const receiver = new LP2PReceiver({
         nickname: "Peer A",
     });
 
-    receiver.onConnection(e => {
+    receiver.ontransport = e => {
+        const transport = e.transport;
+    }
+
+    // Blocks until permission is received.
+    await receiver.start();
+
+    // Peer B
+    const request = new LP2PRequest({
+        nickname: "Peer B",
+    });
+
+    const transport = new LP2PQuicTransport(request);
+
+    // Blocks until transport is opened.
+    await transport.ready;
+}
+
+exampleLP2PQuicTransport();
+
+
+async function exampleLP2PQuicTransportOverConnection() {
+    // Peer A
+    const receiver = new LP2PReceiver({
+        nickname: "Peer A",
+    });
+    receiver.onconnection = async e => {
+        const conn = e.connection;
+
+        const transport = new LP2PQuicTransport(conn);
+
+        // Blocks until transport is ready.
+        await transport.ready;
+    };
+
+    // Blocks until permission is received.
+    await receiver.start();
+
+    // Peer B
+    const request = new LP2PRequest({
+        nickname: "Peer B",
+    });
+
+    // Blocks until connection is received.
+    const conn = await request.start();
+
+    const transport = new LP2PQuicTransport(conn);
+
+    // Blocks until transport is ready.
+    await transport.ready;
+}
+
+exampleLP2PQuicTransportOverConnection();
+
+async function exampleIncomingTransports() {
+    // Peer A
+    const receiver = new LP2PReceiver({
+        nickname: "Peer A",
+    });
+
+    for await (const transport of receiver.incomingTransports) {
+        await transport.ready;
+    }
+}
+
+exampleIncomingTransports();
+
+async function exampleLP2PDataChannel() {
+    // Peer A
+    const receiver = new LP2PReceiver({
+        nickname: "Peer A",
+    });
+
+    receiver.onconnection = e => {
         const conn = e.connection;
         console.log("Receiver: Got a connection!");
 
-        conn.onDataChannel(e => {
+        conn.ondatachannel = e => {
             const channel = e.channel;
 
-            channel.onMessage(e => {
-                const message = e.message;
+            channel.onmessage = e => {
+                const message = e.data;
                 console.log(`Receiver: Received message: ${message}`);
-            });
+            };
 
             channel.send("Good day to you, requester!");
-        });
-    });
+        };
+    };
 
     receiver.start();
 
@@ -31,178 +131,19 @@ function objectExample() {
         nickname: "Peer B",
     });
 
-    const conn = request.start();
+    const conn = await request.start();
     console.log("Requester: Got a connection!");
 
-    const dc = conn.createDataChannel("My Channel");
+    const channel = conn.createDataChannel("My Channel");
 
-    dc.onOpen(e => {
-        const channel = e.channel;
-
-        channel.onMessage(e => {
-            const message = e.message;
+    channel.onopen = e => {
+        channel.onmessage = e => {
+            const message = e.data;
             console.log(`Requester: Received message: ${message}`);
-        });
+        };
 
         channel.send("Good day to you, receiver!");
-    });
+    };
 }
 
-objectExample();
-
-class LP2P {
-
-    newReceiver(options: LP2PReceiverConfig): LP2PReceiver {
-        return new LP2PReceiver(options);
-    }
-
-    newRequest(options: LP2PRequestConfig): LP2PRequest {
-        return new LP2PRequest(options);
-    }
-}
-
-var lp2p = new LP2P();
-
-function globalExample() {
-
-    // Peer A
-    const receiver = lp2p.newReceiver({
-        nickname: "Peer A",
-    });
-
-    receiver.onConnection(e => {
-        const conn = e.connection;
-        console.log("Receiver: Got a connection!");
-
-        conn.onDataChannel(e => {
-            const channel = e.channel;
-
-            channel.onMessage(e => {
-                const message = e.message;
-                console.log(`Receiver: Received message: ${message}`);
-            });
-
-            channel.send("Good day to you, requester!");
-        });
-    });
-
-    receiver.start();
-
-    // Peer B
-    const request = lp2p.newRequest({
-        nickname: "Peer B",
-    });
-
-    const conn = request.start();
-    console.log("Requester: Got a connection!");
-
-    const dc = conn.createDataChannel("My Channel");
-
-    dc.onOpen(e => {
-        const channel = e.channel;
-
-        channel.onMessage(e => {
-            const message = e.message;
-            console.log(`Requester: Received message: ${message}`);
-        });
-
-        channel.send("Good day to you, receiver!");
-    });
-}
-
-objectExample();
-
-function simplifiedExample() {
-    // TODO
-}
-
-simplifiedExample();
-
-
-function webTransportExample() {
-    // TODO
-}
-
-webTransportExample();
-
-function signalingExample() {
-    // TODO
-}
-
-signalingExample();
-
-type cbFn<T> = (e: T) => void;
-
-// Receiver
-interface LP2PReceiverConfig {
-    nickname: string
-}
-
-interface OnConnectionEvent {
-    connection: LP2PConnection
-}
-
-class LP2PReceiver {
-
-    constructor(options: LP2PReceiverConfig) { }
-
-    onConnection(cb: cbFn<OnConnectionEvent>) { }
-
-    start() { }
-}
-
-// Request
-interface LP2PRequestConfig {
-    nickname: string
-}
-
-interface OnConnectionEvent {
-    connection: LP2PConnection
-}
-
-class LP2PRequest {
-
-    constructor(options: LP2PRequestConfig) { }
-
-    onConnection(cb: cbFn<OnConnectionEvent>) { }
-
-    start(): LP2PConnection { return new LP2PConnection(); }
-}
-
-// Connection
-class LP2PConnection {
-
-    createDataChannel(label: string, opts?: DataChannelInit): DataChannel { return new DataChannel(); }
-
-    onDataChannel(cb: cbFn<OnDataChannelEvent>) { }
-}
-
-// DataChannel
-interface DataChannelInit {
-    protocol: string
-    id: number
-
-}
-
-interface OnDataChannelEvent {
-    channel: DataChannel
-}
-
-interface OnDataChannelOpenEvent {
-    channel: DataChannel
-}
-
-interface OnMessageEvent {
-    message: Payload // TODO: verify
-}
-
-type Payload = String | Blob | BinaryData;
-
-class DataChannel {
-
-    onMessage(cb: cbFn<OnMessageEvent>) { }
-
-    onOpen(cb: cbFn<OnDataChannelOpenEvent>) { }
-
-    send(message: Payload) { }
-}
+exampleLP2PDataChannel();

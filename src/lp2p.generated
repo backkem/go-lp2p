@@ -1,0 +1,71 @@
+interface LP2PReceiver extends EventTarget {
+    new (options?: LP2PReceiverOptions);
+    onconnection: EventHandler;
+    start(): Promise<undefined>;
+}
+interface LP2PReceiverOptions {
+    nickname?: string;
+}
+interface LP2PConnectionEvent extends Event {
+    new (type: string, connectionEventInitDict: LP2PConnectionEventInit);
+    readonly connection: LP2PConnection;
+}
+interface LP2PConnectionEventInit extends EventInit {
+    connection: LP2PConnection;
+}
+interface LP2PRequest {
+    new (options?: LP2PRequestOptions);
+    start(): Promise<LP2PConnection>;
+}
+interface LP2PRequestOptions {
+    nickname?: string;
+}
+interface LP2PConnection extends EventTarget {
+}
+interface LP2PQuicTransport {
+    new (connection: LP2PConnection, dataChannelDict?: LP2PQuicTransportInit);
+}
+interface LP2PDataChannel extends EventTarget {
+    new (label: string, dataChannelDict?: LP2PDataChannelInit);
+    readonly label: string;
+    readonly protocol: string;
+    readonly id: number | null;
+    onopen: EventHandler;
+    onerror: EventHandler;
+    onclosing: EventHandler;
+    onclose: EventHandler;
+    close(): undefined;
+    onmessage: EventHandler;
+    binaryType: BinaryType;
+    send(data: string | Blob | ArrayBuffer | ArrayBufferView): undefined;
+}
+interface LP2PDataChannelInit {
+    protocol?: string;
+    id?: number;
+}
+interface LP2PConnection {
+    createDataChannel(label: string, dataChannelDict?: LP2PDataChannelInit): LP2PDataChannel;
+    ondatachannel: EventHandler;
+}
+interface LP2PDataChannelEvent extends Event {
+    new (type: string, DataChannelEventInitDict: LP2PDataChannelEventInit);
+    readonly channel: LP2PDataChannel;
+}
+interface LP2PDataChannelEventInit extends EventInit {
+    channel: LP2PDataChannel;
+}
+interface LP2PQuicTransport extends WebTransport {
+    new (request: LP2PRequest, dataChannelDict?: LP2PQuicTransportInit);
+}
+interface LP2PQuicTransportInit {
+}
+interface LP2PReceiver {
+    ontransport: EventHandler;
+}
+interface LP2PQuicTransportEvent extends Event {
+    new (type: string, QuicTransportEventInitDict: LP2PQuicTransportEventInit);
+    readonly transport: LP2PQuicTransport;
+}
+interface LP2PQuicTransportEventInit extends EventInit {
+    transport: LP2PQuicTransport;
+}

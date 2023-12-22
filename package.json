@@ -8,12 +8,15 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "compile": "npx tsc"
+    "compile": "npx tsc",
+    "idl": "npx webidl-dts-gen -i https://wicg.github.io/local-peer-to-peer/index.html -o src/lp2p.generated",
+    "idl-dev": "npx webidl-dts-gen -i ./../local-peer-to-peer/index.html -o src/lp2p.generated"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "typescript": "^5.2.2"
+    "typescript": "^5.2.2",
+    "webidl-dts-gen": "^1.7.0"
   }
 }
