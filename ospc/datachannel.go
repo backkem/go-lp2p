@@ -56,7 +56,7 @@ func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannel
 func (c *baseConnection) AcceptDataChannel(ctx context.Context) (*DataChannel, error) {
 	c.mu.Lock()
 	close := c.close
-	accept := c.connectedState.accept
+	accept := c.connectedState.acceptDataChannel
 	c.mu.Unlock()
 
 	select {

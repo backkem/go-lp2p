@@ -548,7 +548,9 @@ func (c *baseConnection) finishAuthentication() (*Connection, error) {
 	// c.authenticationState = nil
 
 	c.connectedState = &connectedState{
-		accept: make(chan *DataChannel),
+		acceptDataChannel:     make(chan *DataChannel),
+		acceptTransport:       make(chan *Transport),
+		acceptTransportStream: make(chan *baseStream),
 	}
 
 	return &Connection{
@@ -916,6 +918,12 @@ func (c *baseConnection) handleMessage(msg interface{}, stream *baseStream) (err
 	case *msgDataExchangeStartRequest:
 		err = c.handleDataExchangeStartRequest(typedMsg, stream)
 
+	case *msgDataTransportStartRequest:
+		err = c.handleDataTransportStartRequest(typedMsg, struct{}{})
+
+	case *msgDataTransportStreamRequest:
+		err = c.handleDataTransportStreamRequest(typedMsg, stream)
+
 	default:
 		fmt.Printf("baseConnection: unhandled message type: %T\n", typedMsg)
 	}
@@ -927,7 +935,9 @@ func (c *baseConnection) handleMessage(msg interface{}, stream *baseStream) (err
 }
 
 type connectedState struct {
-	accept chan *DataChannel
+	acceptDataChannel     chan *DataChannel
+	acceptTransport       chan *Transport
+	acceptTransportStream chan *baseStream
 }
 
 func (c *baseConnection) handleDataExchangeStartRequest(msg *msgDataExchangeStartRequest, stream *baseStream) error {
@@ -945,13 +955,69 @@ func (c *baseConnection) handleDataExchangeStartRequest(msg *msgDataExchangeStar
 
 	c.mu.Lock()
 	close := c.close
-	accept := c.connectedState.accept
+	accept := c.connectedState.acceptDataChannel
 	c.mu.Unlock()
 
 	select {
 	case <-close:
 		return c.err()
 	case accept <- dc:
+		return nil
+	}
+}
+
+func (c *baseConnection) handleDataTransportStartRequest(msg *msgDataTransportStartRequest, info struct{}) error {
+	c.mu.Lock()
+	t, err := c.createDataTransport()
+	if err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	c.mu.Unlock()
+
+	// TODO: send data-transport-start-response
+
+	c.mu.Lock()
+	close := c.close
+	accept := c.connectedState.acceptTransport
+	c.mu.Unlock()
+
+	select {
+	case <-close:
+		return c.err()
+	case accept <- t:
+		return nil
+	}
+}
+
+// Caller should hold the connection lock
+func (c *baseConnection) createDataTransport() (*Transport, error) {
+	t := &Transport{
+		conn: c,
+	}
+	return t, nil
+}
+
+func (c *baseConnection) handleDataTransportStreamRequest(msg *msgDataTransportStreamRequest, stream *baseStream) error {
+	// Stop message handling for this stream
+	stream.SetHandler(nil)
+
+	// TODO: send data-transport-stream-response
+
+	c.mu.Lock()
+	close := c.close
+	accept := c.connectedState.acceptTransportStream
+	c.mu.Unlock()
+
+	if accept == nil {
+		fmt.Printf("handleDataTransportStreamRequest: no transport, ignoring stream request\n")
+		return nil // No-one is listening
+	}
+
+	select {
+	case <-close:
+		return c.err()
+	case accept <- stream:
 		return nil
 	}
 }

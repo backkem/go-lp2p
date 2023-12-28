@@ -84,6 +84,12 @@ const (
 	// DataExchange
 	typeKeyDataExchangeStartRequest  TypeKey = 1101
 	typeKeyDataExchangeStartResponse TypeKey = 1102
+
+	// Transport Stream
+	typeKeyDataTransportStartRequest   TypeKey = 1201
+	typeKeyDataTransportStartResponse  TypeKey = 1202
+	typeKeyDataTransportStreamRequest  TypeKey = 1203
+	typeKeyDataTransportStreamResponse TypeKey = 1204
 )
 
 func readTypeKey(r io.Reader) (TypeKey, error) {
@@ -152,6 +158,18 @@ func newMessageByType(key TypeKey) (interface{}, error) {
 
 	case typeKeyDataExchangeStartResponse:
 		return &msgDataExchangeStartResponse{}, nil
+
+	case typeKeyDataTransportStartRequest:
+		return &msgDataTransportStartRequest{}, nil
+
+	case typeKeyDataTransportStartResponse:
+		return &msgDataTransportStartResponse{}, nil
+
+	case typeKeyDataTransportStreamRequest:
+		return &msgDataTransportStreamRequest{}, nil
+
+	case typeKeyDataTransportStreamResponse:
+		return &msgDataTransportStreamResponse{}, nil
 
 	default:
 		return nil, fmt.Errorf("unknown type key: %d", key)
@@ -245,6 +263,18 @@ func typeKeyByMessage(msg interface{}) (TypeKey, error) {
 
 	case *msgDataExchangeStartResponse:
 		return typeKeyDataExchangeStartResponse, nil
+
+	case *msgDataTransportStartRequest:
+		return typeKeyDataTransportStartRequest, nil
+
+	case *msgDataTransportStartResponse:
+		return typeKeyDataTransportStartResponse, nil
+
+	case *msgDataTransportStreamRequest:
+		return typeKeyDataTransportStreamRequest, nil
+
+	case *msgDataTransportStreamResponse:
+		return typeKeyDataTransportStreamResponse, nil
 
 	default:
 		return 0, fmt.Errorf("unknown message type: %T", msg)
@@ -367,6 +397,30 @@ type msgDataExchangeStartRequest struct {
 
 // data-exchange-start-response
 type msgDataExchangeStartResponse struct {
+	RequestID uint64    `codec:"0"`
+	Result    msgResult `codec:"1"`
+}
+
+// data-transport-start-request
+type msgDataTransportStartRequest struct {
+	RequestID  uint64 `codec:"0"`
+	ExchangeId uint64 `codec:"1"`
+}
+
+// data-transport-start-response
+type msgDataTransportStartResponse struct {
+	RequestID uint64    `codec:"0"`
+	Result    msgResult `codec:"1"`
+}
+
+// data-transport-stream-request
+type msgDataTransportStreamRequest struct {
+	RequestID  uint64 `codec:"0"`
+	ExchangeId uint64 `codec:"1"`
+}
+
+// data-transport-stream-response
+type msgDataTransportStreamResponse struct {
 	RequestID uint64    `codec:"0"`
 	Result    msgResult `codec:"1"`
 }

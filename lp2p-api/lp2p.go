@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/backkem/go-lp2p/ospc"
+	"github.com/backkem/go-lp2p/web-api"
 )
 
 var DefaultUserAgent = &mockUserAgent{
@@ -18,25 +19,33 @@ type LP2PReceiverConfig struct {
 
 // LP2PReceiver advertises itself and receives incoming peer connections.
 type LP2PReceiver struct {
-	config LP2PReceiverConfig
-	l      *uaPeerListener
+	config       LP2PReceiverConfig
+	peerListener *uaPeerListener
 
-	mu sync.Mutex
+	OnConnection        web.CallbackSetter[OnConnectionEvent]
+	onConnectionHandler *web.EventHandler[OnConnectionEvent]
 
-	cbOnConnection func(e OnConnectionEvent)
+	OnTransport        web.CallbackSetter[OnTransportEvent]
+	onTransportHandler *web.EventHandler[OnTransportEvent]
 }
 
 // NewLP2Receiver
 func NewLP2Receiver(config LP2PReceiverConfig) (*LP2PReceiver, error) {
+	onConnectionHandler := web.NewEventHandler[OnConnectionEvent]()
+	onTransportHandler := web.NewEventHandler[OnTransportEvent]()
 	return &LP2PReceiver{
-		config: config,
+		config:              config,
+		OnConnection:        onConnectionHandler.SetCallback,
+		onConnectionHandler: onConnectionHandler,
+		OnTransport:         onTransportHandler.SetCallback,
+		onTransportHandler:  onTransportHandler,
 	}, nil
 }
 
 // Start advertising and receiving peers.
 func (r *LP2PReceiver) Start() error {
 	var err error
-	r.l, err = DefaultUserAgent.PeerManager().Listen(r.config.Nickname)
+	r.peerListener, err = DefaultUserAgent.PeerManager().ListenConnection(r.config.Nickname)
 	if err != nil {
 		return err
 	}
@@ -47,21 +56,38 @@ func (r *LP2PReceiver) Start() error {
 }
 
 func (r *LP2PReceiver) run() error {
+	// Connection
 	go func() {
 		for {
-			oConn, err := r.l.Accept(context.Background())
+			oConn, err := r.peerListener.AcceptConnection(context.Background())
 			if err != nil {
 				return
 			}
 
 			conn := &LP2PConnection{
-				mu:   sync.Mutex{},
 				conn: oConn,
 			}
 
+			r.peerListener.listenPooledTransport(conn)
 			conn.run()
 
-			r.onConnection(conn)
+			r.onConnectionHandler.OnCallback(OnConnectionEvent{
+				Connection: conn,
+			})
+		}
+	}()
+
+	// Transport
+	go func() {
+		for {
+			t, err := r.peerListener.AcceptTransport(context.Background())
+			if err != nil {
+				return
+			}
+
+			r.onTransportHandler.OnCallback(OnTransportEvent{
+				Transport: t,
+			})
 		}
 	}()
 
@@ -70,24 +96,6 @@ func (r *LP2PReceiver) run() error {
 
 type OnConnectionEvent struct {
 	Connection *LP2PConnection
-}
-
-func (r *LP2PReceiver) OnConnection(callback func(e OnConnectionEvent)) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	r.cbOnConnection = callback
-}
-
-func (r *LP2PReceiver) onConnection(connection *LP2PConnection) {
-	e := OnConnectionEvent{
-		Connection: connection,
-	}
-	r.mu.Lock()
-	cb := r.cbOnConnection
-	r.mu.Unlock()
-
-	cb(e)
 }
 
 type LP2PRequestConfig struct {
@@ -139,4 +147,8 @@ type LP2PConnection struct {
 
 	mu              sync.Mutex
 	cbOnDataChannel func(e OnDataChannelEvent)
+}
+
+type OnTransportEvent struct {
+	Transport *LP2PQuicTransport
 }
