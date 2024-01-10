@@ -3,6 +3,7 @@ package ospc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	mdns "github.com/grandcat/zeroconf"
@@ -28,7 +29,7 @@ type Discoverer struct {
 
 	remoteNickname *string
 
-	accept chan *RemoteAgent
+	accept chan *DiscoveredAgent
 
 	close    chan struct{}
 	closeErr error
@@ -39,7 +40,7 @@ type Discoverer struct {
 func NewDiscoverer() *Discoverer {
 	d := &Discoverer{
 		mu:       sync.Mutex{},
-		accept:   make(chan *RemoteAgent),
+		accept:   make(chan *DiscoveredAgent),
 		close:    make(chan struct{}),
 		closeErr: nil,
 		done:     make(chan struct{}),
@@ -96,8 +97,9 @@ func (d *Discoverer) run() error {
 				if !ok {
 					continue
 				}
-				agent := &RemoteAgent{
-					info: e,
+				agent, err := newDiscoveredAgent(e)
+				if err != nil {
+					continue
 				}
 				select {
 				case acceptCh <- agent:
@@ -124,7 +126,7 @@ drainLoop:
 }
 
 // Accept returns an a discovered agent. It should be called in a loop.
-func (d *Discoverer) Accept(ctx context.Context) (*RemoteAgent, error) {
+func (d *Discoverer) Accept(ctx context.Context) (*DiscoveredAgent, error) {
 	d.mu.Lock()
 	acceptCh := d.accept
 	closeCh := d.close
@@ -167,12 +169,33 @@ func (d *Discoverer) err() error {
 	return d.closeErr
 }
 
-// RemoteAgent represents a discovered remote agent that has not been contacted yet.
-type RemoteAgent struct {
-	info *mdns.ServiceEntry
+// DiscoveredAgent represents a discovered remote agent that has not been contacted yet.
+type DiscoveredAgent struct {
+	PeerID PeerID
+	TXT    TXTRecordSet
+	info   *mdns.ServiceEntry
+}
+
+func newDiscoveredAgent(info *mdns.ServiceEntry) (*DiscoveredAgent, error) {
+	txt := TXTRecordSet{}
+	err := txt.FromSlice(info.Text)
+	if err != nil {
+		return nil, err
+	}
+
+	fp, err := txt.GetOne("fp")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get fp record: %v", err)
+	}
+
+	return &DiscoveredAgent{
+		PeerID: PeerID(fp),
+		TXT:    txt,
+		info:   info,
+	}, nil
 }
 
 // Nickname of the remote agent
-func (a *RemoteAgent) Nickname() string {
+func (a *DiscoveredAgent) Nickname() string {
 	return a.info.ServiceRecord.Instance
 }

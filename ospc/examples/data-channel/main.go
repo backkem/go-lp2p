@@ -42,9 +42,15 @@ func mainErr() error {
 }
 
 func simPeerA() error {
-	l, err := ospc.Listen(ospc.AgentConfig{
-		Nickname: "PeerA",
-	})
+	c := ospc.AgentConfig{
+		DisplayName: "PeerA",
+	}
+	a, err := ospc.NewAgent(c)
+	if err != nil {
+		return err
+	}
+
+	l, err := ospc.Listen(a)
 	if err != nil {
 		return err
 	}
@@ -93,23 +99,26 @@ func simPeerB() error {
 		return err
 	}
 
-	agent, err := d.Accept(context.Background())
+	discovered, err := d.Accept(context.Background())
 	if err != nil {
 		return err
 	}
 
-	log.Printf("Peer B: Found agent: %s\n", agent.Nickname())
-
-	uConn, err := agent.Dial(context.Background(),
-		ospc.AgentConfig{
-			Nickname: "PeerB",
-		})
+	log.Printf("Peer B: Found agent: %s\n", discovered.Nickname())
+	c := ospc.AgentConfig{
+		DisplayName: "PeerB",
+	}
+	a, err := ospc.NewAgent(c)
+	if err != nil {
+		return err
+	}
+	uConn, err := discovered.Dial(context.Background(), a)
 	if err != nil {
 		return err
 	}
 	defer uConn.Close() // Cleanup if not authenticated
 
-	log.Printf("Peer B: connected to %s\n", uConn.RemoteConfig().Nickname)
+	log.Printf("Peer B: connected to %s\n", uConn.RemoteAgent().Info().DisplayName)
 
 	role := uConn.GetAuthenticationRole()
 

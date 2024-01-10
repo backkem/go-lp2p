@@ -19,12 +19,12 @@ type Connection struct {
 	base *baseConnection
 }
 
-func (c *Connection) LocalConfig() AgentConfig {
-	return c.base.localInfo
+func (c *Connection) LocalAgent() *Agent {
+	return c.base.localAgent
 }
 
-func (c *Connection) RemoteConfig() AgentConfig {
-	return c.base.RemoteConfig()
+func (c *Connection) RemoteAgent() *Agent {
+	return c.base.RemoteAgent()
 }
 
 // Handoff the underlying quick connection for use by another protocol.
@@ -83,18 +83,6 @@ func randomCharset(chars string, length int) string {
 	return result
 }
 
-type AgentInfo struct {
-	DisplayName string
-	ModelName   string
-	// Capabilities []agentCapability
-	StateToken string
-	Locales    []string
-}
-
-type AgentAuthenticationInfo struct {
-	PSKConfig PSKConfig
-}
-
 // baseConnection is the actual connection handler implementation.
 type baseConnection struct {
 	conn quic.Connection
@@ -104,9 +92,8 @@ type baseConnection struct {
 	agentRole  AgentRole
 	agentState AgentState
 
-	localInfo                AgentConfig
-	remoteInfo               *AgentInfo
-	remoteAuthenticationInfo *AgentAuthenticationInfo
+	localAgent  *Agent
+	remoteAgent *Agent
 
 	exchangeInfoState  *exchangeInfoState
 	authenticationRole AuthenticationRole
@@ -122,35 +109,24 @@ type baseConnection struct {
 	done         chan struct{}
 }
 
-func newBaseConnection(conn quic.Connection, localConfig AgentConfig, role AgentRole) *baseConnection {
+func newBaseConnection(conn quic.Connection, localAgent *Agent, remoteAgent *Agent, role AgentRole) *baseConnection {
 	bConn := &baseConnection{
-		mu:         sync.Mutex{},
-		agentRole:  role,
-		agentState: newAgentState(), // TODO: reconnect
-		localInfo:  localConfig,
-		conn:       conn,
-		authNotify: make(chan struct{}),
-		close:      make(chan struct{}),
-		done:       make(chan struct{}),
+		mu:          sync.Mutex{},
+		agentRole:   role,
+		agentState:  newAgentState(), // TODO: reconnect
+		localAgent:  localAgent,
+		remoteAgent: remoteAgent,
+		conn:        conn,
+		authNotify:  make(chan struct{}),
+		close:       make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 
 	return bConn
 }
 
-func (c *baseConnection) RemoteConfig() AgentConfig {
-	// Since the Connection is only emitted after
-	// agent info exchange, this should not be nil.
-	if c.remoteInfo == nil {
-		panic("Connection without remote info")
-	}
-	if c.remoteAuthenticationInfo == nil {
-		panic("Connection without remote auth info")
-	}
-	return AgentConfig{
-		Nickname: c.remoteInfo.DisplayName,
-		// Certificate: c.conn.ConnectionState().TLS.PeerCertificates,
-		PSKConfig: c.remoteAuthenticationInfo.PSKConfig,
-	}
+func (c *baseConnection) RemoteAgent() *Agent {
+	return c.remoteAgent
 }
 
 type exchangeInfoState struct {
@@ -178,10 +154,11 @@ func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInf
 	}
 
 	// Auth Info
+	localAuthInfo := c.localAgent.AuthenticationInfo()
 	authMsg := &msgAuthCapabilities{
-		PskEaseOfInput:      uint64(c.localInfo.PSKConfig.EaseOfInput),
+		PskEaseOfInput:      uint64(localAuthInfo.PSKConfig.EaseOfInput),
 		PskInputMethods:     []msgPskInputMethod{msgPskInputMethodNumeric},
-		PskMinBitsOfEntropy: uint64(c.localInfo.PSKConfig.Entropy),
+		PskMinBitsOfEntropy: uint64(localAuthInfo.PSKConfig.Entropy),
 	}
 
 	err = writeMessage(authMsg, stream)
@@ -225,14 +202,15 @@ func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest, stream
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	localInfo := c.localAgent.Info()
 	infoMsg := &msgAgentInfoResponse{
 		RequestID: msg.RequestID,
 		AgentInfo: msgPartAgentInfo{
-			DisplayName:  c.localInfo.Nickname,
-			ModelName:    c.localInfo.ModelName,
+			DisplayName:  localInfo.DisplayName,
+			ModelName:    localInfo.ModelName,
 			Capabilities: []agentCapability{agentCapabilityExchangeData},
 			// StateToken: , // TODO: State token
-			// Locales:  // TODO: Locales
+			Locales: localInfo.Locales,
 		},
 	}
 	err := writeMessage(infoMsg, stream)
@@ -257,10 +235,10 @@ func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse, stre
 		return nil
 	}
 
-	c.remoteInfo = &AgentInfo{
+	c.remoteAgent.setInfo(AgentInfo{
 		DisplayName: msg.AgentInfo.DisplayName,
 		ModelName:   msg.AgentInfo.ModelName,
-	}
+	})
 
 	c.checkAgentInfoComplete()
 
@@ -271,13 +249,12 @@ func (c *baseConnection) handleAuthCapabilities(msg *msgAuthCapabilities, stream
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.remoteAuthenticationInfo = &AgentAuthenticationInfo{
+	c.remoteAgent.setAuthenticationInfo(AgentAuthenticationInfo{
 		PSKConfig: PSKConfig{
 			EaseOfInput: int(msg.PskEaseOfInput),
-			// TOOD: PskInputMethods
-			Entropy: int(msg.PskMinBitsOfEntropy),
+			Entropy:     int(msg.PskMinBitsOfEntropy),
 		},
-	}
+	})
 
 	c.checkAgentInfoComplete()
 
@@ -287,8 +264,8 @@ func (c *baseConnection) handleAuthCapabilities(msg *msgAuthCapabilities, stream
 // caller should hold connection lock.
 func (c *baseConnection) checkAgentInfoComplete() {
 	if c.exchangeInfoState != nil &&
-		c.remoteInfo != nil &&
-		c.remoteAuthenticationInfo != nil {
+		c.remoteAgent.HasInfo() &&
+		c.remoteAgent.HasAuthenticationInfo() {
 
 		state := c.exchangeInfoState
 		c.determineAuthenticationRole()
@@ -339,13 +316,16 @@ func (c *baseConnection) determineAuthenticationRole() {
 
 // Caller should hold connection lock.
 func (c *baseConnection) getAuthenticationRole() AuthenticationRole {
-	if c.localInfo.PSKConfig.EaseOfInput == c.remoteAuthenticationInfo.PSKConfig.EaseOfInput {
+	localAuthInfo := c.localAgent.AuthenticationInfo()
+	remoteAuthInfo := c.remoteAgent.AuthenticationInfo()
+
+	if localAuthInfo.PSKConfig.EaseOfInput == remoteAuthInfo.PSKConfig.EaseOfInput {
 		if c.agentRole == AgentRoleServer {
 			return AuthenticationRolePresenter
 		}
 		return AuthenticationRoleConsumer
 	}
-	if c.localInfo.PSKConfig.EaseOfInput < c.remoteAuthenticationInfo.PSKConfig.EaseOfInput {
+	if localAuthInfo.PSKConfig.EaseOfInput < remoteAuthInfo.PSKConfig.EaseOfInput {
 		return AuthenticationRolePresenter
 	}
 	return AuthenticationRoleConsumer
@@ -356,9 +336,11 @@ func (c *baseConnection) GeneratePSK() ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	localAuthInfo := c.localAgent.AuthenticationInfo()
+	remoteAuthInfo := c.remoteAgent.AuthenticationInfo()
 	minBits := maxInt(
-		c.localInfo.PSKConfig.Entropy,
-		c.remoteAuthenticationInfo.PSKConfig.Entropy,
+		localAuthInfo.PSKConfig.Entropy,
+		remoteAuthInfo.PSKConfig.Entropy,
 	)
 
 	// We round up to full byte

@@ -17,9 +17,13 @@ import (
 
 var ErrListenerClosed = errors.New("listener closed")
 
+const (
+	ALPN_OSP = "OSP"
+)
+
 // Listen starts an advertising agent and listens for incoming connections.
-func Listen(c AgentConfig) (*Listener, error) {
-	l := NewListener(c)
+func Listen(a *Agent) (*Listener, error) {
+	l := NewListener(a)
 
 	err := l.run()
 	if err != nil {
@@ -34,9 +38,11 @@ func Listen(c AgentConfig) (*Listener, error) {
 type Listener struct {
 	mu sync.Mutex
 
-	agentConfig AgentConfig
+	agent *Agent
 
 	accept chan *UnauthenticatedConnection
+
+	alpnListeners map[string]*ALPNListener
 
 	close    chan struct{}
 	closeErr error
@@ -44,17 +50,55 @@ type Listener struct {
 }
 
 // NewListener creates a new Listener
-func NewListener(c AgentConfig) *Listener {
+func NewListener(a *Agent) *Listener {
 	l := &Listener{
-		mu:          sync.Mutex{},
-		agentConfig: c,
-		accept:      make(chan *UnauthenticatedConnection),
-		close:       make(chan struct{}),
-		closeErr:    nil,
-		done:        make(chan struct{}),
+		mu:       sync.Mutex{},
+		agent:    a,
+		accept:   make(chan *UnauthenticatedConnection),
+		close:    make(chan struct{}),
+		closeErr: nil,
+		done:     make(chan struct{}),
 	}
 
 	return l
+}
+
+// ListenApplication allows you to listen for quic connections
+// on the same port but with a different ALPN. Only one per ALPN
+// is allowed. Needs to be registered before starting the Listener.
+func (l *Listener) ListenApplication(alpn string, config *ALPNListenerConfig) *ALPNListener {
+	child := newALPNListener(l, config)
+
+	l.registerALPNListener(alpn, child)
+
+	return child
+}
+
+func (l *Listener) registerALPNListener(alpn string, child *ALPNListener) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.alpnListeners[alpn] = child
+}
+
+func (l *Listener) removeALPNListener(child *ALPNListener) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for k, v := range l.alpnListeners {
+		if v == child {
+			delete(l.alpnListeners, k)
+			return
+		}
+	}
+}
+
+func (l *Listener) getALPNListener(alpn string) *ALPNListener {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	child := l.alpnListeners[alpn]
+	return child
 }
 
 func (l *Listener) Start() error {
@@ -121,12 +165,6 @@ func (l *Listener) run() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	err := l.agentConfig.normalize()
-	if err != nil {
-		return err
-	}
-	agentConfig := l.agentConfig
-
 	var pendingConns []*baseConnection
 	pendingCh := make(chan exchangeInfoResult)
 
@@ -134,15 +172,27 @@ func (l *Listener) run() error {
 	closeCh := l.close
 	doneCh := l.done
 
+	// List all registered ALPN_OSPs.
+	nextProtos := []string{ALPN_OSP}
+	for k := range l.alpnListeners {
+		nextProtos = append(nextProtos, k)
+	}
+
 	// Listen for and handle incoming connections
 	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*l.agentConfig.Certificate},
-		NextProtos:   []string{"OSP"}, // Application-Layer Protocol Negotiation
+		Certificates: []tls.Certificate{*l.agent.Certificate},
+		NextProtos:   nextProtos, // Application-Layer Protocol Negotiation
 		ClientAuth:   tls.RequireAnyClientCert,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) != 1 {
 				return errors.New("didn't expect cert chain")
 			}
+
+			alpn := cs.NegotiatedProtocol
+			if alpn != ALPN_OSP {
+				return l.getALPNListener(alpn).doVerifyConnection(cs)
+			}
+
 			peerCert := cs.PeerCertificates[0]
 			roots := x509.NewCertPool()
 			roots.AddCert(peerCert)
@@ -152,6 +202,7 @@ func (l *Listener) run() error {
 				Roots: roots,
 			}
 			_, err := peerCert.Verify(opts)
+
 			return err
 		},
 	}
@@ -160,7 +211,7 @@ func (l *Listener) run() error {
 		return err
 	}
 
-	fp, err := l.agentConfig.CertificateFingerPrint()
+	fp, err := l.agent.CertificateFingerPrint()
 	if err != nil {
 		return err
 	}
@@ -176,9 +227,9 @@ func (l *Listener) run() error {
 	txt.Set("fp", fp)
 	txt.Set("mv", mv)
 	txt.Set("at", at)
-	txt.Set("sn", l.agentConfig.Certificate.Leaf.SerialNumber.String()) // TODO: openscreenprotocol#293
+	txt.Set("sn", l.agent.Certificate.Leaf.SerialNumber.String()) // TODO: openscreenprotocol#293
 	port := listener.Addr().(*net.UDPAddr).Port
-	advertiser, err := mdns.Register(l.agentConfig.Nickname, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)
+	advertiser, err := mdns.Register(l.agent.info.DisplayName, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)
 	if err != nil {
 		return err
 	}
@@ -186,16 +237,25 @@ func (l *Listener) run() error {
 	acceptCtx, acceptCancel := context.WithCancel(context.Background())
 	qConns := make(chan quic.Connection)
 	go func() {
-		qConn, err := listener.Accept(acceptCtx)
-		if err != nil {
-			fmt.Printf("AcceptListener error: %s\n", err)
-			// TODO: Close early here?
-			return
-		}
-		select {
-		case qConns <- qConn:
-		case <-closeCh:
-			return
+		for {
+			qConn, err := listener.Accept(acceptCtx)
+			if err != nil {
+				fmt.Printf("AcceptListener error: %s\n", err)
+				// TODO: Close early here?
+				return
+			}
+
+			alpn := qConn.ConnectionState().TLS.NegotiatedProtocol
+			if alpn != ALPN_OSP {
+				l.getALPNListener(alpn).dispatch(qConn)
+				continue
+			}
+
+			select {
+			case qConns <- qConn:
+			case <-closeCh:
+				return
+			}
 		}
 	}()
 
@@ -214,14 +274,20 @@ func (l *Listener) run() error {
 				close(doneCh)
 
 			case qConn := <-qConns: // Incoming connection
+				remoteAgent, err := l.agent.NewRemoteAgent(qConn)
+				if err != nil {
+					fmt.Printf("failed to create remote agent: %v\n", err)
+					continue
+				}
 				bConn := newBaseConnection(
 					qConn,
-					agentConfig,
+					l.agent,
+					remoteAgent,
 					AgentRoleServer,
 				)
 
 				bConn.run()
-				err := bConn.exchangeInfo(context.Background(), pendingCh)
+				err = bConn.exchangeInfo(context.Background(), pendingCh)
 				if err != nil {
 					fmt.Printf("failed to exchange metadata: %v\n", err)
 					bConn.closeWithError(fmt.Errorf("failed to exchange metadata: %v", err))
@@ -279,6 +345,9 @@ func (l *Listener) Accept(ctx context.Context) (*UnauthenticatedConnection, erro
 	}
 }
 
+// func (l *Listener) Addr() net.Addr {
+// }
+
 // Close closes the listener.
 // Any blocked Accept operations will be unblocked and return errors.
 func (l *Listener) Close() error {
@@ -312,14 +381,14 @@ type UnauthenticatedConnection struct {
 	base *baseConnection
 }
 
-// LocalConfig provides info about local agent configuration
-func (c *UnauthenticatedConnection) LocalConfig() AgentConfig {
-	return c.base.localInfo
+// LocalAgent provides info about local agent
+func (c *UnauthenticatedConnection) LocalAgent() *Agent {
+	return c.base.localAgent
 }
 
-// RemoteConfig provides info about remote agent configuration.
-func (c *UnauthenticatedConnection) RemoteConfig() AgentConfig {
-	return c.base.RemoteConfig()
+// RemoteAgent provides info about remote agent
+func (c *UnauthenticatedConnection) RemoteAgent() *Agent {
+	return c.base.RemoteAgent()
 }
 
 // GetAuthenticationRole determines if the agent should act as presenter or consumer of the PSK.

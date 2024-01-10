@@ -1,9 +1,7 @@
 class LP2PReceiver extends EventTarget {
     constructor(options?: LP2PReceiverOptions): LP2PReceiver;
     onconnection: EventHandler<LP2PConnectionEvent>;
-    ontransport: EventHandler<LP2PQuicTransportEvent>;
     start(): Promise<undefined>;
-    incomingTransports: ReadableStream<LP2PQuicTransport>;
 }
 interface LP2PReceiverOptions {
     nickname?: string;
@@ -54,13 +52,16 @@ interface LP2PDataChannelEventInit extends EventInit {
     channel: LP2PDataChannel;
 }
 class LP2PQuicTransport extends WebTransport {
-    constructor(request: LP2PRequest): LP2PQuicTransport;
-    constructor(connection: LP2PConnection): LP2PQuicTransport;
+    constructor(source: LP2PRequest | LP2PReceiver, quicTransportDict?: LP2PQuicTransportInit): LP2PQuicTransport;
+    constructor(connection: LP2PConnection, quicTransportDict?: LP2PQuicTransportInit): LP2PQuicTransport;
 }
-interface LP2PQuicTransportEvent extends Event {
-    new(type: string, QuicTransportEventInitDict: LP2PQuicTransportEventInit);
-    readonly transport: LP2PQuicTransport;
+
+interface LP2PQuicTransportInit {
 }
-interface LP2PQuicTransportEventInit extends EventInit {
-    transport: LP2PQuicTransport;
+class LP2PQuicTransportListener {
+    constructor(source: LP2PRequest | LP2PReceiver, quicTransportListenerDict?: LP2PQuicTransportListenerInit): LP2PQuicTransportListener;
+    readonly ready: Promise<undefined>;
+    readonly incomingTransports: ReadableStream<LP2PQuicTransport>;
+}
+interface LP2PQuicTransportListenerInit {
 }

@@ -13,9 +13,11 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pion/dtls/v2/pkg/crypto/fingerprint"
+	"github.com/quic-go/quic-go"
 )
 
 type AgentRole int
@@ -26,19 +28,23 @@ const (
 )
 
 type AgentConfig struct {
-	Nickname  string
-	ModelName string
+	// ID
+	PeerID            PeerID
+	Certificate       *tls.Certificate
+	CertificateSNBase uint32
 
-	Certificate          *tls.Certificate
-	CertificateSNBase    uint32
-	CertificateSNCounter uint32
+	// Info
+	DisplayName string
+	ModelName   string
+	Locales     []string
 
+	// AuthInfo
 	PSKConfig PSKConfig
 }
 
 func NewAgentConfig(nickname string) AgentConfig {
 	return AgentConfig{
-		Nickname: nickname,
+		DisplayName: nickname,
 	}
 }
 
@@ -60,40 +66,204 @@ func (c *AgentConfig) WithCertificateSNBase(snBase uint32) {
 	c.CertificateSNBase = snBase
 }
 
-func (c *AgentConfig) normalize() (err error) {
-	if len(c.ModelName) == 0 {
-		c.ModelName = "OSPC-GO"
-	}
+// PeerID is a unique identifier for a peer, it is equal tot the
+// OSP agent fingerprint (FP) of the peer.
+type PeerID string
 
-	if c.PSKConfig.Entropy == 0 {
-		c.PSKConfig.Entropy = 20
-	}
+type Agent struct {
+	PeerID PeerID
 
-	if c.CertificateSNBase == 0 {
-		err = binary.Read(rand.Reader, binary.BigEndian, &c.CertificateSNBase)
-		if err != nil {
-			return err
-		}
-	}
+	Certificate          *tls.Certificate
+	CertificateSNBase    uint32
+	CertificateSNCounter uint32
 
-	if c.Certificate == nil {
-		c.Certificate, err = c.generateCert()
-		if err != nil {
-			return err
-		}
-	}
+	mu sync.Mutex
 
-	return nil
+	info               *AgentInfo
+	authenticationInfo *AgentAuthenticationInfo
+
+	knownPeers map[PeerID]knownPeer
 }
 
-func (c *AgentConfig) generateCert() (*tls.Certificate, error) {
+type knownPeer struct {
+	Agent         *Agent
+	Authenticated bool
+}
+
+type AgentAuthenticationInfo struct {
+	PSKConfig PSKConfig
+}
+
+type AgentInfo struct {
+	DisplayName string
+	ModelName   string
+	// Capabilities []agentCapability
+	// StateToken string // TODO: State token
+	Locales []string
+}
+
+func NewAgent(c AgentConfig) (*Agent, error) {
+	var agent *Agent
+
+	certificateSNBase := uint32(0)
+	if c.CertificateSNBase != 0 {
+		certificateSNBase = c.CertificateSNBase
+	} else {
+		err := binary.Read(rand.Reader, binary.BigEndian, &certificateSNBase)
+		if err != nil {
+			return nil, err
+		}
+	}
+	certificateSNCounter := uint32(0) // TODO: Manage counter state.
+
+	var peerID PeerID
+	var cert *tls.Certificate
+	if c.Certificate != nil {
+		peerID = c.PeerID
+		cert = c.Certificate
+	} else {
+		var err error
+		cert, err = generateCert(c.DisplayName, certificateSNBase, certificateSNCounter)
+		if err != nil {
+			return nil, err
+		}
+		rawPeerID, err := certificateFingerPrint(cert.Leaf)
+		if err != nil {
+			return nil, err
+		}
+		peerID = PeerID(rawPeerID)
+	}
+
+	agent = &Agent{
+		PeerID:               peerID,
+		Certificate:          cert,
+		CertificateSNBase:    certificateSNBase,
+		CertificateSNCounter: certificateSNCounter,
+		mu:                   sync.Mutex{},
+	}
+
+	agent.info = &AgentInfo{
+		DisplayName: c.DisplayName,
+		ModelName:   "OSPC-GO",
+		Locales:     c.Locales,
+	}
+	if len(c.DisplayName) != 0 {
+		agent.info.DisplayName = c.DisplayName
+	}
+	if len(c.ModelName) != 0 {
+		agent.info.ModelName = c.ModelName
+	}
+
+	agent.authenticationInfo = &AgentAuthenticationInfo{
+		PSKConfig: PSKConfig{
+			EaseOfInput: 0,
+			Entropy:     20,
+		},
+	}
+	if c.PSKConfig.EaseOfInput != 0 {
+		agent.authenticationInfo.PSKConfig.EaseOfInput = c.PSKConfig.EaseOfInput
+	}
+	if c.PSKConfig.Entropy != 0 {
+		agent.authenticationInfo.PSKConfig.Entropy = c.PSKConfig.Entropy
+	}
+
+	return agent, nil
+}
+
+func (a *Agent) NewRemoteAgent(conn quic.Connection) (*Agent, error) {
+
+	certs := conn.ConnectionState().TLS.PeerCertificates
+	cert := &tls.Certificate{
+		Certificate: [][]byte{},
+		Leaf:        certs[0],
+	}
+	for _, orig := range certs {
+		cert.Certificate = append(cert.Certificate, orig.Raw)
+	}
+	rawPeerID, err := certificateFingerPrint(cert.Leaf)
+	if err != nil {
+		return nil, err
+	}
+	peerID := PeerID(rawPeerID)
+
+	if agent, ok := a.knownPeers[peerID]; ok {
+		// TODO: avoid re-authenticating known peers.
+		return agent.Agent, nil
+	}
+
+	return &Agent{
+		PeerID:               peerID,
+		Certificate:          cert,
+		CertificateSNBase:    0,
+		CertificateSNCounter: 0,
+		mu:                   sync.Mutex{},
+	}, nil
+}
+
+func (a *Agent) setInfo(info AgentInfo) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.info = &info
+}
+
+func (a *Agent) HasInfo() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.info != nil
+}
+
+func (a *Agent) Info() *AgentInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.info == nil {
+		return nil
+	}
+
+	return &AgentInfo{
+		DisplayName: a.info.DisplayName,
+		ModelName:   a.info.ModelName,
+		Locales:     a.info.Locales,
+	}
+}
+
+func (a *Agent) setAuthenticationInfo(authenticationInfo AgentAuthenticationInfo) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.authenticationInfo = &authenticationInfo
+}
+
+func (a *Agent) HasAuthenticationInfo() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.authenticationInfo != nil
+}
+
+func (a *Agent) AuthenticationInfo() *AgentAuthenticationInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.authenticationInfo == nil {
+		return nil
+	}
+
+	return &AgentAuthenticationInfo{
+		PSKConfig: a.authenticationInfo.PSKConfig,
+	}
+}
+
+func generateCert(displayName string, certificateSNBase, certificateSNCounter uint32) (*tls.Certificate, error) {
 	privKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
 	pubKey := privKey.Public()
 
-	serialNumber := uint64(c.CertificateSNBase)<<32 | uint64(c.CertificateSNCounter) // TODO: Manage counter state.
+	serialNumber := uint64(certificateSNBase)<<32 | uint64(certificateSNCounter)
 
 	cn := fmt.Sprintf("%d._openscreen._udp", serialNumber) // TODO: openscreenprotocol#293
 	names := []string{cn}
@@ -114,7 +284,7 @@ func (c *AgentConfig) generateCert() (*tls.Certificate, error) {
 		IsCA:                  true,
 		DNSNames:              names,
 		Issuer: pkix.Name{
-			CommonName: c.Nickname,
+			CommonName: displayName,
 		},
 		Subject: pkix.Name{
 			CommonName: cn,
@@ -138,7 +308,11 @@ func (c *AgentConfig) generateCert() (*tls.Certificate, error) {
 	}, nil
 }
 
-func (c *AgentConfig) CertificateFingerPrint() (string, error) {
+func (a *Agent) CertificateFingerPrint() (string, error) {
+	return certificateFingerPrint(a.Certificate.Leaf)
+}
+
+func certificateFingerPrint(cert *x509.Certificate) (string, error) {
 	// fp                     = hash-func SP fingerprint
 	// hash-func              =  "sha-256" / "sha-512"
 	// fingerprint            =  2UHEX *(":" 2UHEX)
@@ -149,7 +323,7 @@ func (c *AgentConfig) CertificateFingerPrint() (string, error) {
 	hashAlgo := crypto.SHA512
 	hashName := "sha-512"
 
-	fp, err := fingerprint.Fingerprint(c.Certificate.Leaf, hashAlgo)
+	fp, err := fingerprint.Fingerprint(cert, hashAlgo)
 	if err != nil {
 		return "", fmt.Errorf("failed to create hash: %v", err)
 	}

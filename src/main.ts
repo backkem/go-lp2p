@@ -35,12 +35,12 @@ async function exampleLP2PQuicTransport() {
         nickname: "Peer A",
     });
 
-    receiver.ontransport = e => {
-        const transport = e.transport;
-    }
+    const listener = new LP2PQuicTransportListener(receiver);
 
-    // Blocks until permission is received.
-    await receiver.start();
+    for await (const transport of listener.incomingTransports) {
+        // Blocks until transport is ready.
+        await transport.ready;
+    }
 
     // Peer B
     const request = new LP2PRequest({
@@ -95,7 +95,10 @@ async function exampleIncomingTransports() {
         nickname: "Peer A",
     });
 
-    for await (const transport of receiver.incomingTransports) {
+    const listener = new LP2PQuicTransportListener(receiver);
+
+    for await (const transport of listener.incomingTransports) {
+        // Blocks until transport is ready.
         await transport.ready;
     }
 }

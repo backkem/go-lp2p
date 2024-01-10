@@ -48,7 +48,8 @@ func (c *LP2PConnection) CreateDataChannel(label string, opts *DataChannelInit) 
 	return dc, nil
 }
 
-func (c *LP2PConnection) run() {
+func (c *LP2PConnection) run(transportListener *LP2PQuicTransportListener) {
+	// Listen for data channels.
 	go func() {
 		for {
 			oDc, err := c.conn.AcceptDataChannel(context.Background())
@@ -63,32 +64,32 @@ func (c *LP2PConnection) run() {
 
 			dc.run()
 
-			c.onDataChannel(dc)
+			c.onDataChannelHandler.OnCallback(OnDataChannelEvent{
+				Channel: dc,
+			})
 		}
 	}()
-}
 
-type OnDataChannelEvent struct {
-	Channel *DataChannel
+	// Listen for pooled Transports
+	go func() {
+		for {
+			t, err := c.conn.AcceptTransport(context.Background())
+			if err != nil {
+				return
+			}
+
+			transportListener.handleTransport(incomingTransport{
+				Transport:   t,
+				IsDedicated: false,
+			})
+		}
+	}()
+
 }
 
 // OnDataChannel fires when a data channel is opened.
-func (c *LP2PConnection) OnDataChannel(callback func(e OnDataChannelEvent)) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.cbOnDataChannel = callback
-}
-
-func (c *LP2PConnection) onDataChannel(dc *DataChannel) {
-	e := OnDataChannelEvent{
-		Channel: dc,
-	}
-	c.mu.Lock()
-	cb := c.cbOnDataChannel
-	c.mu.Unlock()
-
-	cb(e)
+type OnDataChannelEvent struct {
+	Channel *DataChannel
 }
 
 func (c *DataChannel) run() {

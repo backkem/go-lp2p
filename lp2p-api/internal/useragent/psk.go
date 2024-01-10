@@ -1,4 +1,4 @@
-package lp2p
+package ua
 
 import (
 	"encoding/binary"
@@ -6,46 +6,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-// mockUserAgent represents everything a user agent provides to
-// the LP2P API.
-type mockUserAgent struct {
-	pm *uaPeerManager
-
-	IgnoreConsent bool
-	PSKOverride   []byte
-	Consumer      consumer
-	Presenter     presenter
-}
-
-type presenter func(psk []byte)
-type consumer func() ([]byte, error)
-
-// PeerManager
-func (a *mockUserAgent) PeerManager() *uaPeerManager {
-	if a.pm == nil {
-		a.pm = &uaPeerManager{
-			ua: a,
-		}
-
-		// Start early
-		a.pm.run()
-	}
-	return a.pm
-}
-
-func CLICollector() ([]byte, error) {
-	pskEncoded := ""
-	fmt.Println("Enter pin:")
-	fmt.Scanln(&pskEncoded)
-
-	psk, err := decodeNumeric(pskEncoded)
-	if err != nil {
-		return nil, err
-	}
-
-	return psk, nil
-}
 
 type pskEncoder func([]byte) string
 

@@ -12,25 +12,14 @@ import (
 )
 
 // Dial opens a connection to the remote agent.
-func (r RemoteAgent) Dial(ctx context.Context, c AgentConfig) (*UnauthenticatedConnection, error) {
-	err := c.normalize()
-	if err != nil {
-		return nil, err
-	}
-
-	txt := TXTRecordSet{}
-	err = txt.FromSlice(r.info.Text)
-	if err != nil {
-		return nil, err
-	}
-
-	sn, err := txt.GetOne("sn")
+func (ra DiscoveredAgent) Dial(ctx context.Context, la *Agent) (*UnauthenticatedConnection, error) {
+	sn, err := ra.TXT.GetOne("sn")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sn record: %v", err)
 	}
-	fp, err := txt.GetOne("fp")
+	fp, err := ra.TXT.GetOne("fp")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get sn record: %v", err)
+		return nil, fmt.Errorf("failed to get fp record: %v", err)
 	}
 
 	cn := fmt.Sprintf("%s._openscreen._udp", sn) // TODO: openscreenprotocol#293
@@ -54,7 +43,7 @@ func (r RemoteAgent) Dial(ctx context.Context, c AgentConfig) (*UnauthenticatedC
 		},
 		NextProtos:   []string{"OSP"}, // Application-Layer Protocol Negotiation
 		ServerName:   cn,
-		Certificates: []tls.Certificate{*c.Certificate},
+		Certificates: []tls.Certificate{*la.Certificate},
 		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			certs := []tls.Certificate{}
 			for _, rawCert := range rawCerts {
@@ -73,16 +62,21 @@ func (r RemoteAgent) Dial(ctx context.Context, c AgentConfig) (*UnauthenticatedC
 			return validateFingerprint(fp, certs)
 		},
 	}
-	addr := fmt.Sprintf("%s:%d", getMdnsHost(r.info), r.info.Port)
+	addr := fmt.Sprintf("%s:%d", getMdnsHost(ra.info), ra.info.Port)
 
 	qConn, err := quic.DialAddr(ctx, addr, tlsConfig, nil)
 	if err != nil {
 		return nil, err
 	}
 
+	remoteAgent, err := la.NewRemoteAgent(qConn)
+	if err != nil {
+		return nil, err
+	}
 	bConn := newBaseConnection(
 		qConn,
-		c,
+		la,
+		remoteAgent,
 		AgentRoleClient,
 	)
 

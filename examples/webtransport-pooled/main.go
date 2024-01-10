@@ -23,35 +23,37 @@ func exampleReceive() error {
 		return err
 	}
 
-	// Handle transport
-	receiver.OnTransport(func(e OnTransportEvent) {
-		t := e.Transport
-		log.Printf("Receiver: got transport\n")
+	listener, err := NewLP2PQuicTransportListener(receiver, LP2PQuicTransportListenerInit{})
+	if err != nil {
+		return err
+	}
 
-		incoming := t.IncomingBidirectionalStreams.GetReader(nil).(ReadableStreamDefaultReader[WebTransportBidirectionalStream])
-		res, err := incoming.Read()
-		if err != nil {
-			log.Fatalf("failed to get stream: %v\n", err)
-		}
+	transportReader := listener.IncomingTransports.GetReader(nil).(ReadableStreamDefaultReader[*LP2PQuicTransport])
+	tRes, err := transportReader.Read() // Should be called in a loop
+	if err != nil || tRes.Done {
+		log.Fatalf("failed to get transport: %v\n", err)
+	}
+	transport := tRes.Val
+	log.Printf("Receiver: got transport\n")
 
-		reader := res.Val.Readable.GetReader(nil).(ReadableStreamDefaultReader[[]byte])
-		for {
-			data, err := reader.Read()
-			if err != nil {
-				log.Fatalf("failed to read: %v\n", err)
-			}
-			if data.Done {
-				break
-			}
+	incoming := transport.IncomingBidirectionalStreams.GetReader(nil).(ReadableStreamDefaultReader[WebTransportBidirectionalStream])
+	sRes, err := incoming.Read() // Should be called in a loop
+	if err != nil || sRes.Done {
+		log.Fatalf("failed to get stream: %v\n", err)
+	}
+	stream := sRes.Val
 
-			log.Printf("Requester: Received: %s\n", string(data.Val))
-		}
+	reader := stream.Readable.GetReader(nil).(ReadableStreamDefaultReader[[]byte])
+	data, err := reader.Read() // Should be called in a loop
+	if err != nil || data.Done {
+		log.Fatalf("failed to read: %v\n", err)
+	}
 
-		notifyPresenter() // Signals example end
-	})
+	log.Printf("Requester: Received: %s\n", string(data.Val))
 
-	// Now that all event-handlers are set up, start receiving!
-	return receiver.Start()
+	// Signals example end
+	notifyPresenter()
+	return nil
 }
 
 // exampleConnect shows how to connect to a peer.
@@ -86,8 +88,8 @@ func exampleConnect() error {
 		log.Fatalf("failed to write: %v\n", err)
 	}
 
-	notifyConsumer() // Signal example end
-
+	// Signals example end
+	notifyConsumer()
 	return nil
 }
 

@@ -23,7 +23,7 @@ interface LP2PRequestOptions {
 interface LP2PConnection extends EventTarget {
 }
 interface LP2PQuicTransport {
-    new (connection: LP2PConnection, dataChannelDict?: LP2PQuicTransportInit);
+    new (connection: LP2PConnection, quicTransportDict?: LP2PQuicTransportInit);
 }
 interface LP2PDataChannel extends EventTarget {
     new (label: string, dataChannelDict?: LP2PDataChannelInit);
@@ -55,17 +55,14 @@ interface LP2PDataChannelEventInit extends EventInit {
     channel: LP2PDataChannel;
 }
 interface LP2PQuicTransport extends WebTransport {
-    new (request: LP2PRequest, dataChannelDict?: LP2PQuicTransportInit);
+    new (source: LP2PRequest | LP2PReceiver, quicTransportDict?: LP2PQuicTransportInit);
 }
 interface LP2PQuicTransportInit {
 }
-interface LP2PReceiver {
-    ontransport: EventHandler;
+interface LP2PQuicTransportListener {
+    new (source: LP2PRequest | LP2PReceiver, quicTransportListenerDict?: LP2PQuicTransportListenerInit);
+    readonly ready: Promise<undefined>;
+    readonly incomingTransports: ReadableStream;
 }
-interface LP2PQuicTransportEvent extends Event {
-    new (type: string, QuicTransportEventInitDict: LP2PQuicTransportEventInit);
-    readonly transport: LP2PQuicTransport;
-}
-interface LP2PQuicTransportEventInit extends EventInit {
-    transport: LP2PQuicTransport;
+interface LP2PQuicTransportListenerInit {
 }
