@@ -7,9 +7,7 @@ import (
 )
 
 // exampleReceive shows how to make yourself discoverable
-// and handle incoming connections.
 func exampleReceive() error {
-
 	// Construct a LP2Receiver to receive peer connections.
 	receiver, err := NewLP2Receiver(LP2PReceiverConfig{
 		Nickname: "Receiver",
@@ -33,7 +31,8 @@ func exampleReceive() error {
 
 				log.Printf("Receiver: Received message: %s", message)
 
-				notifyPresenter() // Signals example end
+				// Signals example end
+				notifyPresenter()
 			})
 
 			// Send our new friend a message.
@@ -47,7 +46,6 @@ func exampleReceive() error {
 
 // exampleConnect shows how to connect to a peer.
 func exampleConnect() error {
-
 	// Construct a LP2PRequest to request a connection.
 	request, err := NewLP2PRequest(LP2PRequestConfig{
 		Nickname: "Requester",

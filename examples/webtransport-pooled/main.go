@@ -12,9 +12,7 @@ import (
 )
 
 // exampleReceive shows how to make yourself discoverable
-// and handle incoming transports.
 func exampleReceive() error {
-
 	// Construct a LP2Receiver to receive peer connections.
 	receiver, err := NewLP2Receiver(LP2PReceiverConfig{
 		Nickname: "Receiver",
@@ -23,28 +21,32 @@ func exampleReceive() error {
 		return err
 	}
 
+	// Listen for incoming transports.
 	listener, err := NewLP2PQuicTransportListener(receiver, LP2PQuicTransportListenerInit{})
 	if err != nil {
 		return err
 	}
 
+	// Handle incoming transports (Should be read in a loop).
 	transportReader := listener.IncomingTransports.GetReader(nil).(ReadableStreamDefaultReader[*LP2PQuicTransport])
-	tRes, err := transportReader.Read() // Should be called in a loop
+	tRes, err := transportReader.Read()
 	if err != nil || tRes.Done {
 		log.Fatalf("failed to get transport: %v\n", err)
 	}
 	transport := tRes.Val
 	log.Printf("Receiver: got transport\n")
 
+	// Handle incoming streams (Should be read in a loop).
 	incoming := transport.IncomingBidirectionalStreams.GetReader(nil).(ReadableStreamDefaultReader[WebTransportBidirectionalStream])
-	sRes, err := incoming.Read() // Should be called in a loop
+	sRes, err := incoming.Read()
 	if err != nil || sRes.Done {
 		log.Fatalf("failed to get stream: %v\n", err)
 	}
 	stream := sRes.Val
 
+	// Read from the stream (Should be read in a loop).
 	reader := stream.Readable.GetReader(nil).(ReadableStreamDefaultReader[[]byte])
-	data, err := reader.Read() // Should be called in a loop
+	data, err := reader.Read()
 	if err != nil || data.Done {
 		log.Fatalf("failed to read: %v\n", err)
 	}
@@ -58,7 +60,6 @@ func exampleReceive() error {
 
 // exampleConnect shows how to connect to a peer.
 func exampleConnect() error {
-
 	// Construct a LP2PRequest to request a connection.
 	request, err := NewLP2PRequest(LP2PRequestConfig{
 		Nickname: "Requester",
@@ -66,6 +67,8 @@ func exampleConnect() error {
 	if err != nil {
 		return err
 	}
+
+	// Open a transport
 	t, err := request.NewLP2PQuicTransport(
 		LP2PWebTransportOptions{
 			AllowPooling: true,
@@ -75,13 +78,14 @@ func exampleConnect() error {
 		return err
 	}
 
+	// Open a stream
 	s, err := t.CreateBidirectionalStream()
 	if err != nil {
 		log.Fatalf("failed to create stream: %v\n", err)
 	}
 
+	// Write to the stream
 	writer := s.Writable.GetWriter()
-
 	msg := []byte("Good day to you, receiver!")
 	err = writer.Write(msg)
 	if err != nil {

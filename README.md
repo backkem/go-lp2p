@@ -4,6 +4,8 @@ This repo contains experiments to help inform the design of the [Local Peer-to-P
 
 ## Examples
 
+Check out the [examples](./examples/) or run them on Replit:
+
 <a href="https://replit.com/@backkem/go-lp2p"><img loading="lazy" src="https://replit.com/badge/github/backkem/go-lp2p" alt="Run on Replit" style="height: 40px; width: 190px;"></a>
 
 ## Open points

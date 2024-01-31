@@ -1,8 +1,9 @@
 # Example data-channel
 
-This example provides an overview of the API for exchanging data
-from both sides. It is configured to run in a non-interactive way,
-simulating user input.
+This example demonstrates the LP2PDataChannel API for exchanging messages.
+
+The example simulates both peers. It is configured to run in
+a non-interactive way, simulating user input.
 
 ## Example output
 
