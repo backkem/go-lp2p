@@ -18,7 +18,7 @@ import (
 var ErrListenerClosed = errors.New("listener closed")
 
 const (
-	ALPN_OSP = "OSP"
+	ALPN_OSP = "osp"
 )
 
 // Listen starts an advertising agent and listens for incoming connections.
