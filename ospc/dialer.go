@@ -41,7 +41,7 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, la *Agent) (*Unauthenticated
 			_, err := peerCert.Verify(opts)
 			return err
 		},
-		NextProtos:   []string{"OSP"}, // Application-Layer Protocol Negotiation
+		NextProtos:   []string{ALPN_OSP}, // Application-Layer Protocol Negotiation
 		ServerName:   cn,
 		Certificates: []tls.Certificate{*la.Certificate},
 		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {

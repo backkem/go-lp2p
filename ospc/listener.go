@@ -17,10 +17,6 @@ import (
 
 var ErrListenerClosed = errors.New("listener closed")
 
-const (
-	ALPN_OSP = "osp"
-)
-
 // Listen starts an advertising agent and listens for incoming connections.
 func Listen(a *Agent) (*Listener, error) {
 	l := NewListener(a)
