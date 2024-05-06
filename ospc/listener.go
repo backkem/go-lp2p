@@ -202,7 +202,7 @@ func (l *Listener) run() error {
 			return err
 		},
 	}
-	listener, err := quic.ListenAddr(":", tlsConfig, nil)
+	listener, err := ListenAddr(":", tlsConfig, nil)
 	if err != nil {
 		return err
 	}
