@@ -157,7 +157,7 @@ func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInf
 	localAuthInfo := c.localAgent.AuthenticationInfo()
 	authMsg := &msgAuthCapabilities{
 		PskEaseOfInput:      uint64(localAuthInfo.PSKConfig.EaseOfInput),
-		PskInputMethods:     []msgPskInputMethod{msgPskInputMethodNumeric},
+		PskInputMethods:     []msgPskInputMethod{PskInputMethodNumeric},
 		PskMinBitsOfEntropy: uint64(localAuthInfo.PSKConfig.Entropy),
 	}
 
@@ -172,7 +172,9 @@ func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInf
 		done:      done,
 	}
 	infoMsg := &msgAgentInfoRequest{
-		RequestID: state.requestId,
+		msgRequest: msgRequest{
+			RequestId: msgRequestId(state.requestId),
+		},
 	}
 
 	err = writeMessage(infoMsg, stream)
@@ -204,11 +206,16 @@ func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest, stream
 
 	localInfo := c.localAgent.Info()
 	infoMsg := &msgAgentInfoResponse{
-		RequestID: msg.RequestID,
-		AgentInfo: msgPartAgentInfo{
-			DisplayName:  localInfo.DisplayName,
-			ModelName:    localInfo.ModelName,
-			Capabilities: []agentCapability{agentCapabilityExchangeData},
+		msgResponse: msgResponse{
+			RequestId: msg.RequestId,
+		},
+		AgentInfo: msgAgentInfo{
+			DisplayName: localInfo.DisplayName,
+			ModelName:   localInfo.ModelName,
+			Capabilities: []msgAgentCapability{
+				AgentCapabilityDataChannels,
+				AgentCapabilityQuickTransport,
+			},
 			// StateToken: , // TODO: State token
 			Locales: localInfo.Locales,
 		},
@@ -222,6 +229,7 @@ func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest, stream
 }
 
 func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse, stream quic.Stream) error {
+	_ = stream
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -230,7 +238,7 @@ func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse, stre
 		return nil
 	}
 
-	if c.exchangeInfoState.requestId != msg.RequestID {
+	if c.exchangeInfoState.requestId != uint64(msg.RequestId) {
 		fmt.Println("ignoring AgentInfoResponse with wrong request ID")
 		return nil
 	}
@@ -246,6 +254,7 @@ func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse, stre
 }
 
 func (c *baseConnection) handleAuthCapabilities(msg *msgAuthCapabilities, stream quic.Stream) error {
+	_ = stream
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -404,7 +413,7 @@ type authenticationState struct {
 	remotePublic       []byte
 	sharedSecret       *spakeSecret
 	remoteConfirmation []byte
-	remoteResult       msgResult
+	remoteResult       *msgAuthStatusResult
 
 	done chan struct{}
 }
@@ -523,7 +532,8 @@ func (c *baseConnection) finishAuthentication() (*Connection, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.authenticationState.remoteResult != msgResultSuccess {
+	if c.authenticationState.remoteResult == nil ||
+		*c.authenticationState.remoteResult != AuthStatusResultAuthenticated {
 		return nil, fmt.Errorf("authentication failed: %d", c.authenticationState.remoteResult)
 	}
 
@@ -663,7 +673,7 @@ func (c *baseConnection) authenticatePSKProgress() error {
 	}
 
 	if authState.status == authStatusAwaitResult {
-		if authState.remoteResult == 0 {
+		if authState.remoteResult == nil {
 			return nil // continue waiting
 		}
 
@@ -688,7 +698,7 @@ func (c *baseConnection) sendAuthSpake2NeedPsk() error {
 		return err
 	}
 
-	msg := &msgAuthSpake2NeedPsk{
+	msg := &msgAuthSpake2NeedPskDeprecated{
 		AuthInitiationToken: at,
 	}
 
@@ -710,7 +720,7 @@ func (c *baseConnection) sendAuthSpake2Handshake() error {
 		return err
 	}
 
-	msg := &msgAuthSpake2Handshake{
+	msg := &msgAuthSpake2HandshakeDeprecated{
 		AuthInitiationToken: at,
 		Payload:             publicValue,
 	}
@@ -728,7 +738,7 @@ func (c *baseConnection) sendAuthSpake2Confirmation() error {
 	authState := c.authenticationState
 	confirmation := authState.sharedSecret.DeriveConfirmation()
 
-	msg := &msgAuthSpake2Confirmation{
+	msg := &msgAuthSpake2ConfirmationDeprecated{
 		Payload: confirmation,
 	}
 
@@ -745,7 +755,7 @@ func (c *baseConnection) sendAuthStatus() error {
 	authState := c.authenticationState
 
 	msg := &msgAuthStatus{
-		Result: msgResultSuccess,
+		Result: AuthStatusResultAuthenticated,
 	}
 
 	err := writeMessage(msg, authState.stream)
@@ -756,7 +766,8 @@ func (c *baseConnection) sendAuthStatus() error {
 	return nil
 }
 
-func (c *baseConnection) handleAuthSpake2NeedPsk(msg *msgAuthSpake2NeedPsk, stream quic.Stream) error {
+func (c *baseConnection) handleAuthSpake2NeedPsk(msg *msgAuthSpake2NeedPskDeprecated, stream quic.Stream) error {
+	_ = msg
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -774,7 +785,7 @@ func (c *baseConnection) handleAuthSpake2NeedPsk(msg *msgAuthSpake2NeedPsk, stre
 	return c.authenticatePSKProgress()
 }
 
-func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake, stream quic.Stream) error {
+func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2HandshakeDeprecated, stream quic.Stream) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -796,7 +807,8 @@ func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake, 
 	return c.authenticatePSKProgress()
 }
 
-func (c *baseConnection) handleAuthSpake2Confirmation(msg *msgAuthSpake2Confirmation, stream quic.Stream) error {
+func (c *baseConnection) handleAuthSpake2Confirmation(msg *msgAuthSpake2ConfirmationDeprecated, stream quic.Stream) error {
+	_ = stream
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -811,6 +823,7 @@ func (c *baseConnection) handleAuthSpake2Confirmation(msg *msgAuthSpake2Confirma
 }
 
 func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus, stream quic.Stream) error {
+	_ = stream
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -819,7 +832,8 @@ func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus, stream quic.Stream
 		return errors.New("unsolicited auth-status")
 	}
 
-	authState.remoteResult = msg.Result
+	res := msg.Result
+	authState.remoteResult = &res
 
 	return c.authenticatePSKProgress()
 }
@@ -885,20 +899,20 @@ func (c *baseConnection) handleMessage(msg interface{}, stream *baseStream) (err
 	case *msgAuthCapabilities:
 		err = c.handleAuthCapabilities(typedMsg, stream.stream)
 
-	case *msgAuthSpake2NeedPsk:
+	case *msgAuthSpake2NeedPskDeprecated:
 		err = c.handleAuthSpake2NeedPsk(typedMsg, stream.stream)
 
-	case *msgAuthSpake2Handshake:
+	case *msgAuthSpake2HandshakeDeprecated:
 		err = c.handleAuthSpake2Handshake(typedMsg, stream.stream)
 
-	case *msgAuthSpake2Confirmation:
+	case *msgAuthSpake2ConfirmationDeprecated:
 		err = c.handleAuthSpake2Confirmation(typedMsg, stream.stream)
 
 	case *msgAuthStatus:
 		err = c.handleAuthStatus(typedMsg, stream.stream)
 
-	case *msgDataExchangeStartRequest:
-		err = c.handleDataExchangeStartRequest(typedMsg, stream)
+	case *msgDataChannelOpenRequest:
+		err = c.handleDataChannelOpenRequest(typedMsg, stream)
 
 	case *msgDataTransportStartRequest:
 		err = c.handleDataTransportStartRequest(typedMsg, struct{}{})
@@ -922,11 +936,11 @@ type connectedState struct {
 	acceptTransportStream chan *baseStream
 }
 
-func (c *baseConnection) handleDataExchangeStartRequest(msg *msgDataExchangeStartRequest, stream *baseStream) error {
+func (c *baseConnection) handleDataChannelOpenRequest(msg *msgDataChannelOpenRequest, stream *baseStream) error {
 	dc := &DataChannel{
 		DataChannelParameters: DataChannelParameters{
 			Label:    msg.Label,
-			ID:       msg.ExchangeId,
+			ID:       uint64(msg.ChannelId),
 			Protocol: msg.Protocol,
 		},
 		stream: stream.stream,
@@ -949,6 +963,8 @@ func (c *baseConnection) handleDataExchangeStartRequest(msg *msgDataExchangeStar
 }
 
 func (c *baseConnection) handleDataTransportStartRequest(msg *msgDataTransportStartRequest, info struct{}) error {
+	// TODO: msg validation
+	_, _ = msg, info
 	c.mu.Lock()
 	t, err := c.createDataTransport()
 	if err != nil {
@@ -981,6 +997,8 @@ func (c *baseConnection) createDataTransport() (*Transport, error) {
 }
 
 func (c *baseConnection) handleDataTransportStreamRequest(msg *msgDataTransportStreamRequest, stream *baseStream) error {
+	// TODO: msg validation
+	_ = msg
 	// Stop message handling for this stream
 	stream.SetHandler(nil)
 

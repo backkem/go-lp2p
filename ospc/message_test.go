@@ -7,7 +7,9 @@ import (
 
 func TestAgentInfoRequest(t *testing.T) {
 	expected := &msgAgentInfoRequest{
-		RequestID: 100,
+		msgRequest: msgRequest{
+			RequestId: 100,
+		},
 	}
 
 	buf := new(bytes.Buffer)
@@ -27,19 +29,22 @@ func TestAgentInfoRequest(t *testing.T) {
 		t.Fatalf("different message type")
 	}
 
-	if expected.RequestID != actual.RequestID {
-		t.Fatalf("different RequestID")
+	if expected.RequestId != actual.RequestId {
+		t.Fatalf("different RequestId")
 	}
 }
 
 func TestAgentInfoResponse(t *testing.T) {
 	expected := &msgAgentInfoResponse{
-		RequestID: 100,
-		AgentInfo: msgPartAgentInfo{
+		msgResponse: msgResponse{
+			RequestId: 100,
+		},
+		AgentInfo: msgAgentInfo{
 			DisplayName: "Agent007",
 			ModelName:   "Bond",
-			Capabilities: []agentCapability{
-				agentCapabilityExchangeData,
+			Capabilities: []msgAgentCapability{
+				AgentCapabilityDataChannels,
+				AgentCapabilityQuickTransport,
 			},
 			StateToken: "01234567",
 			Locales:    []string{"EN"},
@@ -63,8 +68,8 @@ func TestAgentInfoResponse(t *testing.T) {
 		t.Fatalf("different message type")
 	}
 
-	if expected.RequestID != actual.RequestID {
-		t.Fatalf("different RequestID")
+	if expected.RequestId != actual.RequestId {
+		t.Fatalf("different RequestId")
 	}
 
 	if expected.AgentInfo.DisplayName != actual.AgentInfo.DisplayName {
@@ -80,7 +85,9 @@ func TestConsecutiveMessage(t *testing.T) {
 	buf := new(bytes.Buffer)
 
 	oneExpected := &msgAgentInfoRequest{
-		RequestID: 1,
+		msgRequest: msgRequest{
+			RequestId: 1,
+		},
 	}
 
 	err := writeMessage(oneExpected, buf)
@@ -89,7 +96,9 @@ func TestConsecutiveMessage(t *testing.T) {
 	}
 
 	twoExpected := &msgAgentInfoRequest{
-		RequestID: 2,
+		msgRequest: msgRequest{
+			RequestId: 2,
+		},
 	}
 
 	err = writeMessage(twoExpected, buf)
@@ -107,8 +116,8 @@ func TestConsecutiveMessage(t *testing.T) {
 		t.Fatalf("one: different message type")
 	}
 
-	if oneExpected.RequestID != oneActual.RequestID {
-		t.Fatalf("one: different RequestID")
+	if oneExpected.RequestId != oneActual.RequestId {
+		t.Fatalf("one: different RequestId")
 	}
 
 	msgTwo, err := readMessage(buf)
@@ -121,8 +130,8 @@ func TestConsecutiveMessage(t *testing.T) {
 		t.Fatalf("two: different message type")
 	}
 
-	if twoExpected.RequestID != twoActual.RequestID {
-		t.Fatalf("two: different RequestID")
+	if twoExpected.RequestId != twoActual.RequestId {
+		t.Fatalf("two: different RequestId")
 	}
 
 }
