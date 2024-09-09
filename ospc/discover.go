@@ -114,14 +114,8 @@ func (d *Discoverer) run() error {
 
 // waitCloseMdns ensures mdns is fully shutdown.
 func waitCloseMdns(entries chan *mdns.ServiceEntry) {
-drainLoop:
-	for {
-		select {
-		case _, ok := <-entries:
-			if !ok {
-				break drainLoop
-			}
-		}
+	// Drain channel
+	for range entries {
 	}
 }
 

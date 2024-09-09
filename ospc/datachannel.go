@@ -28,11 +28,13 @@ func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannel
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	msg := &msgDataExchangeStartRequest{
-		RequestID:  c.agentState.nextRequestID(),
-		ExchangeId: params.ID,
-		Label:      params.Label,
-		Protocol:   params.Protocol,
+	msg := &msgDataChannelOpenRequest{
+		msgRequest: msgRequest{
+			RequestId: msgRequestId(c.agentState.nextRequestID()),
+		},
+		ChannelId: params.ID,
+		Label:     params.Label,
+		Protocol:  params.Protocol,
 	}
 
 	stream, err := c.conn.OpenStreamSync(ctx)
@@ -82,7 +84,7 @@ func (c *DataChannel) SendMessage(payload []byte) error {
 // SendMessageWithEncoding
 func (c *DataChannel) SendMessageWithEncoding(payload []byte, enc DataEncoding) error {
 	msg := &msgDataFrame{
-		EncodingId: enc,
+		EncodingId: uint64(enc),
 		Payload:    payload,
 	}
 
@@ -107,7 +109,7 @@ func (c *DataChannel) ReceiveMessageWithEncoding() ([]byte, DataEncoding, error)
 		return nil, 0, fmt.Errorf("unexpected message type: %T", msg)
 	}
 
-	return dataFrame.Payload, dataFrame.EncodingId, nil
+	return dataFrame.Payload, DataEncoding(dataFrame.EncodingId), nil
 }
 
 // Read reads a packet of len(p) bytes as binary data
@@ -131,10 +133,6 @@ func (c *DataChannel) ReadDataChannel(p []byte) (int, DataEncoding, error) {
 	payload := dataFrame.Payload
 
 	n := copy(p, payload)
-	if err != nil {
-		return int(n), 0, err
-	}
-
 	return int(n), DataEncoding(dataFrame.EncodingId), nil
 }
 
@@ -146,7 +144,7 @@ func (c *DataChannel) Write(p []byte) (n int, err error) {
 // WriteDataChannel writes len(p) bytes from p
 func (c *DataChannel) WriteDataChannel(p []byte, enc DataEncoding) (n int, err error) {
 	msg := &msgDataFrame{
-		EncodingId: enc,
+		EncodingId: uint64(enc),
 		Payload:    p,
 	}
 

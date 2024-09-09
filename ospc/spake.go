@@ -12,10 +12,12 @@ type spakeSecret struct {
 }
 
 func newSpakeClient(psk []byte) (*spakeState, error) {
+	_ = psk
 	return &spakeState{}, nil
 }
 
 func newSpakeServer(psk []byte) (*spakeState, error) {
+	_ = psk
 	return &spakeState{}, nil
 }
 
