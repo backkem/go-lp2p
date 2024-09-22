@@ -3,6 +3,9 @@ package main
 import (
 	"log"
 
+	"net/http"
+	_ "net/http/pprof"
+
 	. "github.com/backkem/go-lp2p/lp2p-api" //lint:ignore ST1001 emulate global API
 )
 
@@ -97,6 +100,10 @@ var notifyPresenter func()
 var notifyConsumer func()
 
 func main() {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	// mock user interaction
 	DefaultUserAgent.IgnoreConsent = true
 	DefaultUserAgent.PSKOverride = []byte("1234")
