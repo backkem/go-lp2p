@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"sync"
 
+	spake2 "github.com/backkem/go-lp2p/spake2"
 	quic "github.com/quic-go/quic-go"
 )
 
@@ -409,10 +410,11 @@ type authenticationState struct {
 	status authenticationStatus
 
 	localPSK           []byte
-	spakeState         *spakeState
+	spakeState         *spake2.Context
 	remotePublic       []byte
-	sharedSecret       *spakeSecret
+	sharedSecret       []byte
 	remoteConfirmation []byte
+	localResult        *msgAuthStatusResult
 	remoteResult       *msgAuthStatusResult
 
 	done chan struct{}
@@ -615,13 +617,13 @@ func (c *baseConnection) authenticatePSKProgress() error {
 			return nil // continue waiting
 		}
 		if role == AuthenticationRolePresenter {
-			client, err := newSpakeClient(authState.localPSK)
+			client, err := spake2.NewClient([]byte{}, []byte{})
 			if err != nil {
 				return err
 			}
 			authState.spakeState = client
 		} else {
-			server, err := newSpakeServer(authState.localPSK)
+			server, err := spake2.NewServer([]byte{}, []byte{})
 			if err != nil {
 				return err
 			}
@@ -640,11 +642,22 @@ func (c *baseConnection) authenticatePSKProgress() error {
 		if authState.remotePublic == nil {
 			return nil // continue waiting
 		}
-		secret, err := authState.spakeState.DeriveSecret(authState.remotePublic)
+		secret := spake2.NewMsgBuffer()
+		n, err := authState.spakeState.ProcessMsg(secret, authState.remotePublic)
 		if err != nil {
+			if err == spake2.ErrValidationFailed {
+				status := AuthStatusResultProofInvalid
+				authState.localResult = &status
+			} else {
+				status := AuthStatusResultUnknownError
+				authState.localResult = &status
+			}
 			return err
 		}
-		authState.sharedSecret = secret
+
+		status := AuthStatusResultAuthenticated
+		authState.localResult = &status
+		authState.sharedSecret = secret[:n]
 
 		err = c.sendAuthSpake2Confirmation()
 		if err != nil {
@@ -659,12 +672,9 @@ func (c *baseConnection) authenticatePSKProgress() error {
 			return nil // continue waiting
 		}
 
-		err := authState.sharedSecret.Verify(authState.remoteConfirmation)
-		if err != nil {
-			return err
-		}
+		// TODO: update to new flow.
 
-		err = c.sendAuthStatus()
+		err := c.sendAuthStatus()
 		if err != nil {
 			return err
 		}
@@ -713,7 +723,11 @@ func (c *baseConnection) sendAuthSpake2NeedPsk() error {
 // Caller should hold connection lock
 func (c *baseConnection) sendAuthSpake2Handshake() error {
 	authState := c.authenticationState
-	publicValue := authState.spakeState.GetLocalPublic()
+	payload := spake2.NewMsgBuffer()
+	n, err := authState.spakeState.GenerateMsg(payload, authState.localPSK)
+	if err != nil {
+		return err
+	}
 
 	at, err := c.getAuthInitiationToken()
 	if err != nil {
@@ -722,7 +736,7 @@ func (c *baseConnection) sendAuthSpake2Handshake() error {
 
 	msg := &msgAuthSpake2HandshakeDeprecated{
 		AuthInitiationToken: at,
-		Payload:             publicValue,
+		Payload:             payload[:n],
 	}
 
 	err = writeMessage(msg, authState.stream)
@@ -736,7 +750,7 @@ func (c *baseConnection) sendAuthSpake2Handshake() error {
 // Caller should hold connection lock
 func (c *baseConnection) sendAuthSpake2Confirmation() error {
 	authState := c.authenticationState
-	confirmation := authState.sharedSecret.DeriveConfirmation()
+	confirmation := authState.sharedSecret
 
 	msg := &msgAuthSpake2ConfirmationDeprecated{
 		Payload: confirmation,
@@ -755,7 +769,7 @@ func (c *baseConnection) sendAuthStatus() error {
 	authState := c.authenticationState
 
 	msg := &msgAuthStatus{
-		Result: AuthStatusResultAuthenticated,
+		Result: *authState.localResult,
 	}
 
 	err := writeMessage(msg, authState.stream)
