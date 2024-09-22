@@ -8,11 +8,10 @@ import (
 	"fmt"
 
 	mdns "github.com/grandcat/zeroconf"
-	"github.com/quic-go/quic-go"
 )
 
 // Dial opens a connection to the remote agent.
-func (ra DiscoveredAgent) Dial(ctx context.Context, la *Agent) (*UnauthenticatedConnection, error) {
+func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport, la *Agent) (*UnauthenticatedConnection, error) {
 	sn, err := ra.TXT.GetOne("sn")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sn record: %v", err)
@@ -64,23 +63,27 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, la *Agent) (*Unauthenticated
 	}
 	addr := fmt.Sprintf("%s:%d", getMdnsHost(ra.info), ra.info.Port)
 
-	qConn, err := quic.DialAddr(ctx, addr, tlsConfig, nil)
+	t, err := NewNetworkTransport(transportType)
+	if err != nil {
+		return nil, err
+	}
+	nc, err := t.DialAddr(ctx, addr, tlsConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	remoteAgent, err := la.NewRemoteAgent(qConn)
+	remoteAgent, err := la.NewRemoteAgent(nc)
 	if err != nil {
 		return nil, err
 	}
 	bConn := newBaseConnection(
-		qConn,
+		nc,
 		la,
 		remoteAgent,
 		AgentRoleClient,
 	)
 
-	bConn.run()
+	bConn.runNetwork()
 
 	pendingCh := make(chan exchangeInfoResult)
 	err = bConn.exchangeInfo(ctx, pendingCh)

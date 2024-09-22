@@ -2,21 +2,19 @@ package ospc
 
 import (
 	"sync"
-
-	quic "github.com/quic-go/quic-go"
 )
 
 type msgHandler func(msg interface{}, stream *baseStream) error
 
 // baseStream is used to handoff a stream to a DataChannel
 type baseStream struct {
-	stream quic.Stream
+	stream ApplicationStream
 
 	mu      sync.Mutex
 	handler msgHandler
 }
 
-func newBaseStream(stream quic.Stream, handler msgHandler) *baseStream {
+func newBaseStream(stream ApplicationStream, handler msgHandler) *baseStream {
 	return &baseStream{
 		stream:  stream,
 		mu:      sync.Mutex{},

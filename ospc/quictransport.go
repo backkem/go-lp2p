@@ -2,20 +2,21 @@ package ospc
 
 import (
 	"context"
+	"fmt"
 )
 
-// Transport implements WebTransport pooled over an
-// existing OpenScreenProtocol connection.
-type Transport struct {
+// PooledWebTransport implements WebTransport pooled over an
+// existing OpenScreenProtocol Application Transport.
+type PooledWebTransport struct {
 	conn *baseConnection
 }
 
 // NewTransport
-func (c *Connection) NewTransport(ctx context.Context) (*Transport, error) {
+func (c *Connection) NewTransport(ctx context.Context) (*PooledWebTransport, error) {
 	return c.base.NewTransport(ctx)
 }
 
-func (c *baseConnection) NewTransport(ctx context.Context) (*Transport, error) {
+func (c *baseConnection) NewTransport(ctx context.Context) (*PooledWebTransport, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -23,7 +24,7 @@ func (c *baseConnection) NewTransport(ctx context.Context) (*Transport, error) {
 		RequestID: c.agentState.nextRequestID(),
 	}
 
-	stream, err := c.conn.OpenStreamSync(ctx)
+	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -47,16 +48,16 @@ type TransportListener struct {
 	conn *baseConnection
 }
 
-func (c *Connection) NewTransportListener() (*Transport, error) {
+func (c *Connection) NewTransportListener() (*PooledWebTransport, error) {
 	return c.base.createDataTransport()
 }
 
-func (c *baseConnection) NewTransportListener() (*Transport, error) {
+func (c *baseConnection) NewTransportListener() (*PooledWebTransport, error) {
 	t, err := c.createDataTransport()
 	return t, err
 }
 
-func (l *TransportListener) Accept(ctx context.Context) (*Transport, error) {
+func (l *TransportListener) Accept(ctx context.Context) (*PooledWebTransport, error) {
 	return l.conn.AcceptTransport(ctx)
 }
 
@@ -65,11 +66,11 @@ func (l *TransportListener) Close() error {
 	return nil
 }
 
-func (c *Connection) AcceptTransport(ctx context.Context) (*Transport, error) {
+func (c *Connection) AcceptTransport(ctx context.Context) (*PooledWebTransport, error) {
 	return c.base.AcceptTransport(ctx)
 }
 
-func (c *baseConnection) AcceptTransport(ctx context.Context) (*Transport, error) {
+func (c *baseConnection) AcceptTransport(ctx context.Context) (*PooledWebTransport, error) {
 	c.mu.Lock()
 	close := c.close
 	accept := c.connectedState.acceptTransport
@@ -85,7 +86,7 @@ func (c *baseConnection) AcceptTransport(ctx context.Context) (*Transport, error
 	}
 }
 
-func (t *Transport) AcceptStream(ctx context.Context) (*QuicStream, error) {
+func (t *PooledWebTransport) AcceptStream(ctx context.Context) (*QuicStream, error) {
 	s, err := t.conn.AcceptTransportStream(ctx)
 	if err != nil {
 		return nil, err
@@ -111,7 +112,7 @@ func (c *baseConnection) AcceptTransportStream(ctx context.Context) (*QuicStream
 	}
 }
 
-func (t *Transport) OpenStreamSync(ctx context.Context) (*QuicStream, error) {
+func (t *PooledWebTransport) OpenStreamSync(ctx context.Context) (*QuicStream, error) {
 	s, err := t.conn.OpenTransportStream(ctx)
 	if err != nil {
 		return nil, err
@@ -123,7 +124,6 @@ func (t *Transport) OpenStreamSync(ctx context.Context) (*QuicStream, error) {
 }
 
 func (c *baseConnection) OpenTransportStream(ctx context.Context) (*baseStream, error) {
-
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -131,7 +131,7 @@ func (c *baseConnection) OpenTransportStream(ctx context.Context) (*baseStream, 
 		RequestID: c.agentState.nextRequestID(),
 	}
 
-	stream, err := c.conn.OpenStreamSync(ctx)
+	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func (c *baseConnection) OpenTransportStream(ctx context.Context) (*baseStream, 
 	return newBaseStream(stream, nil), nil
 }
 
-func (t *Transport) CloseWithError(uint64, string) error {
+func (t *PooledWebTransport) CloseWithError(uint64, string) error {
 	// TODO: NOP for now
 	return nil
 }
@@ -157,7 +157,14 @@ type QuicStream struct {
 }
 
 func (s *QuicStream) StreamID() int64 {
-	return int64(s.stream.stream.StreamID())
+	switch stream := s.stream.stream.(type) {
+	case *QuicApplicationStream:
+		return int64(stream.stream.StreamID())
+
+	default:
+		// TODO: move to transport interface?
+		panic(fmt.Sprintf("unknown stream type: %T", s.stream.stream))
+	}
 }
 
 func (s *QuicStream) Read(p []byte) (int, error) {

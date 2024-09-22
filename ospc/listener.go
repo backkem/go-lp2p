@@ -12,14 +12,13 @@ import (
 	"sync"
 
 	mdns "github.com/grandcat/zeroconf"
-	quic "github.com/quic-go/quic-go"
 )
 
 var ErrListenerClosed = errors.New("listener closed")
 
 // Listen starts an advertising agent and listens for incoming connections.
-func Listen(a *Agent) (*Listener, error) {
-	l := NewListener(a)
+func Listen(transportType AgentTransport, a *Agent) (*Listener, error) {
+	l := NewListener(a, transportType)
 
 	err := l.run()
 	if err != nil {
@@ -34,7 +33,8 @@ func Listen(a *Agent) (*Listener, error) {
 type Listener struct {
 	mu sync.Mutex
 
-	agent *Agent
+	agent         *Agent
+	transportType AgentTransport
 
 	accept chan *UnauthenticatedConnection
 
@@ -46,14 +46,15 @@ type Listener struct {
 }
 
 // NewListener creates a new Listener
-func NewListener(a *Agent) *Listener {
+func NewListener(a *Agent, transportType AgentTransport) *Listener {
 	l := &Listener{
-		mu:       sync.Mutex{},
-		agent:    a,
-		accept:   make(chan *UnauthenticatedConnection),
-		close:    make(chan struct{}),
-		closeErr: nil,
-		done:     make(chan struct{}),
+		mu:            sync.Mutex{},
+		agent:         a,
+		transportType: transportType,
+		accept:        make(chan *UnauthenticatedConnection),
+		close:         make(chan struct{}),
+		closeErr:      nil,
+		done:          make(chan struct{}),
 	}
 
 	return l
@@ -202,7 +203,12 @@ func (l *Listener) run() error {
 			return err
 		},
 	}
-	listener, err := ListenAddr(":", tlsConfig, nil)
+
+	t, err := NewNetworkTransport(l.transportType)
+	if err != nil {
+		return err
+	}
+	listener, err := t.ListenAddr(":", tlsConfig)
 	if err != nil {
 		return err
 	}
@@ -231,24 +237,28 @@ func (l *Listener) run() error {
 	}
 
 	acceptCtx, acceptCancel := context.WithCancel(context.Background())
-	qConns := make(chan quic.Connection)
+	netConns := make(chan NetworkConnection)
 	go func() {
 		for {
-			qConn, err := listener.Accept(acceptCtx)
+			nc, err := listener.Accept(acceptCtx)
 			if err != nil {
 				fmt.Printf("AcceptListener error: %s\n", err)
 				// TODO: Close early here?
 				return
 			}
 
-			alpn := qConn.ConnectionState().TLS.NegotiatedProtocol
+			alpn := nc.ConnectionState().NegotiatedProtocol
 			if alpn != ALPN_OSP {
-				l.getALPNListener(alpn).dispatch(qConn)
+				if qnc, ok := nc.(*QuicNetworkConnection); ok {
+					l.getALPNListener(alpn).dispatch(qnc.conn)
+				} else {
+					panic("TODO: generalize ALPNListener")
+				}
 				continue
 			}
 
 			select {
-			case qConns <- qConn:
+			case netConns <- nc:
 			case <-closeCh:
 				return
 			}
@@ -269,20 +279,21 @@ func (l *Listener) run() error {
 
 				close(doneCh)
 
-			case qConn := <-qConns: // Incoming connection
-				remoteAgent, err := l.agent.NewRemoteAgent(qConn)
+			case nc := <-netConns: // Incoming connection
+				remoteAgent, err := l.agent.NewRemoteAgent(nc)
 				if err != nil {
 					fmt.Printf("failed to create remote agent: %v\n", err)
 					continue
 				}
 				bConn := newBaseConnection(
-					qConn,
+					nc,
 					l.agent,
 					remoteAgent,
 					AgentRoleServer,
 				)
 
-				bConn.run()
+				bConn.runNetwork()
+
 				err = bConn.exchangeInfo(context.Background(), pendingCh)
 				if err != nil {
 					fmt.Printf("failed to exchange metadata: %v\n", err)

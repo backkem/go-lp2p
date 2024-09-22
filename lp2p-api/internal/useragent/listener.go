@@ -29,7 +29,7 @@ func (m *ConnectionManager) ListenConnection(nickname string) (*PeerListener, er
 		return nil, err
 	}
 
-	listener, err := ospc.Listen(a)
+	listener, err := ospc.Listen(ospc.AgentTransportQUIC, a)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen: %s", err)
 	}
@@ -77,7 +77,7 @@ func (m *ConnectionManager) dial(ctx context.Context, agent *ospc.DiscoveredAgen
 		return nil, err
 	}
 
-	uConn, err := agent.Dial(context.Background(), a)
+	uConn, err := agent.Dial(context.Background(), ospc.AgentTransportQUIC, a)
 	if err != nil {
 		return nil, err
 	}

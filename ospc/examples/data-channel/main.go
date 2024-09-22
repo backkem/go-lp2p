@@ -50,7 +50,7 @@ func simPeerA() error {
 		return err
 	}
 
-	l, err := ospc.Listen(a)
+	l, err := ospc.Listen(ospc.AgentTransportQUIC, a)
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func simPeerB() error {
 	if err != nil {
 		return err
 	}
-	uConn, err := discovered.Dial(context.Background(), a)
+	uConn, err := discovered.Dial(context.Background(), ospc.AgentTransportQUIC, a)
 	if err != nil {
 		return err
 	}

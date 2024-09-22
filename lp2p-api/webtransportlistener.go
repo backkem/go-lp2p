@@ -43,7 +43,7 @@ type LP2PQuicTransportListenerInit struct {
 }
 
 type incomingTransport struct {
-	Transport   *ospc.Transport
+	Transport   *ospc.PooledWebTransport
 	IsDedicated bool
 }
 

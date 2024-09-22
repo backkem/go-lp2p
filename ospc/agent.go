@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/pion/dtls/v2/pkg/crypto/fingerprint"
-	"github.com/quic-go/quic-go"
 )
 
 type AgentRole int
@@ -25,6 +24,13 @@ type AgentRole int
 const (
 	AgentRoleClient AgentRole = 0
 	AgentRoleServer AgentRole = 1
+)
+
+type AgentTransport int
+
+const (
+	AgentTransportQUIC AgentTransport = iota + 1
+	AgentTransportWebRTC
 )
 
 type AgentConfig struct {
@@ -40,6 +46,8 @@ type AgentConfig struct {
 
 	// AuthInfo
 	PSKConfig PSKConfig
+
+	SupportedTransports []AgentTransport
 }
 
 func NewAgentConfig(nickname string) AgentConfig {
@@ -170,9 +178,8 @@ func NewAgent(c AgentConfig) (*Agent, error) {
 	return agent, nil
 }
 
-func (a *Agent) NewRemoteAgent(conn quic.Connection) (*Agent, error) {
-
-	certs := conn.ConnectionState().TLS.PeerCertificates
+func (a *Agent) NewRemoteAgent(nc NetworkConnection) (*Agent, error) {
+	certs := nc.ConnectionState().PeerCertificates
 	cert := &tls.Certificate{
 		Certificate: [][]byte{},
 		Leaf:        certs[0],

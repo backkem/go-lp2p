@@ -3,8 +3,6 @@ package ospc
 import (
 	"context"
 	"fmt"
-
-	quic "github.com/quic-go/quic-go"
 )
 
 // DataChannelParameters
@@ -37,7 +35,7 @@ func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannel
 		Protocol:  params.Protocol,
 	}
 
-	stream, err := c.conn.OpenStreamSync(ctx)
+	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +71,7 @@ func (c *baseConnection) AcceptDataChannel(ctx context.Context) (*DataChannel, e
 
 type DataChannel struct {
 	DataChannelParameters
-	stream quic.Stream
+	stream ApplicationStream
 }
 
 // SendMessage
