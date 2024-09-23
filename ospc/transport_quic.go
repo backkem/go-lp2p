@@ -36,14 +36,6 @@ func (g *ospConnectionIDGenerator) ConnectionIDLen() int {
 	return 0
 }
 
-func listenUDP(addr string) (*net.UDPConn, error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		return nil, err
-	}
-	return net.ListenUDP("udp", udpAddr)
-}
-
 func (t *QuicTransport) ListenAddr(addr string, tlsConf *tls.Config) (NetworkListener, error) {
 	// ListenAddr is a version of quic.ListenAddr that overwrites the
 	// ConnectionID behavior to match the OSP zero-length requirement.

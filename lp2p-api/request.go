@@ -48,7 +48,7 @@ func (r *LP2PRequest) Start() (*LP2PConnection, error) {
 	return conn, nil
 }
 
-func (r *LP2PRequest) registerTransportListener(listener *LP2PQuicTransportListener) error {
+func (r *LP2PRequest) registerLP2PQuicTransportListener(listener *LP2PQuicTransportListener) error {
 	r.mu.Lock()
 	r.transportListener = listener
 	r.mu.Unlock()

@@ -8,6 +8,7 @@ import (
 )
 
 func (c *baseConnection) openStream(ctx context.Context) (ApplicationStream, error) {
+	_ = ctx
 	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
@@ -62,7 +63,7 @@ func (c *baseConnection) handleApplicationStream(stream *baseStream) {
 			if err == quic.ErrServerClosed {
 				return
 			} else if err != nil {
-				fmt.Printf("failed to read message: %v\n", err)
+				fmt.Printf("application protocol: failed to read message: %v\n", err)
 				// c.closeWithError(fmt.Errorf("failed to read message: %v", err))
 				return
 			}

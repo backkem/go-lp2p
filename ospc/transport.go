@@ -16,6 +16,10 @@ func NewNetworkTransport(typ AgentTransport) (NetworkTransport, error) {
 	switch typ {
 	case AgentTransportQUIC:
 		return &QuicTransport{}, nil
+
+	case AgentTransportWebRTC:
+		return &DTLSTransport{}, nil
+
 	default:
 		return nil, fmt.Errorf("unknown transport type: %T", typ)
 	}
@@ -55,4 +59,12 @@ type ApplicationConnection interface {
 // Abstract stream for the application protocol.
 type ApplicationStream interface {
 	io.ReadWriteCloser
+}
+
+func listenUDP(addr string) (*net.UDPConn, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return net.ListenUDP("udp", udpAddr)
 }

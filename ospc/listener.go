@@ -181,6 +181,9 @@ func (l *Listener) run() error {
 		NextProtos:   nextProtos, // Application-Layer Protocol Negotiation
 		ClientAuth:   tls.RequireAnyClientCert,
 		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("no peer certificate")
+			}
 			if len(cs.PeerCertificates) != 1 {
 				return errors.New("didn't expect cert chain")
 			}

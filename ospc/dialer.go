@@ -24,8 +24,11 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	cn := fmt.Sprintf("%s._openscreen._udp", sn) // TODO: openscreenprotocol#293
 
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: true, // Manual verification in VerifyConnection
 		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("no peer certificate")
+			}
 			if len(cs.PeerCertificates) != 1 {
 				return errors.New("didn't expect cert chain")
 			}

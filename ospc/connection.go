@@ -107,6 +107,9 @@ type baseConnection struct {
 }
 
 func newBaseConnection(nc NetworkConnection, localAgent *Agent, remoteAgent *Agent, role AgentRole) *baseConnection {
+
+	// TODO: Retransmission in case NetworkConnection is not reliable.
+
 	bConn := &baseConnection{
 		mu:          sync.Mutex{},
 		agentRole:   role,

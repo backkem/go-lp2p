@@ -68,7 +68,7 @@ func (r *LP2PReceiver) run() error {
 	return nil
 }
 
-func (r *LP2PReceiver) registerTransportListener(listener *LP2PQuicTransportListener) error {
+func (r *LP2PReceiver) registerLP2PQuicTransportListener(listener *LP2PQuicTransportListener) error {
 	r.mu.Lock()
 	r.transportListener = listener
 	r.mu.Unlock()

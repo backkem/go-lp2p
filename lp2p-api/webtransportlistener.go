@@ -31,7 +31,7 @@ func NewLP2PQuicTransportListener(source interface{}, options LP2PQuicTransportL
 	}
 	listener.IncomingTransports = streams.NewValueReadableStream(&transportReader{listener})
 
-	err := tSource.registerTransportListener(listener)
+	err := tSource.registerLP2PQuicTransportListener(listener)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func (l *LP2PQuicTransportListener) acceptTransport(ctx context.Context) (*LP2PQ
 // transportSource is an interface that allows getting transports form the
 // LP2PReceiver, LP2PRequest or LP2PConnection.
 type transportSource interface {
-	registerTransportListener(listener *LP2PQuicTransportListener) error
+	registerLP2PQuicTransportListener(listener *LP2PQuicTransportListener) error
 }
 
 var _ transportSource = (*LP2PReceiver)(nil)

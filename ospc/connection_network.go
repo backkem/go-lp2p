@@ -20,6 +20,7 @@ type exchangeInfoResult struct {
 }
 
 func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInfoResult) error {
+	_ = ctx
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -707,7 +708,7 @@ func (c *baseConnection) runNetwork() {
 		for {
 			msg, err := readMessage(c.netConn)
 			if err != nil {
-				fmt.Printf("failed to read message: %v\n", err)
+				fmt.Printf("network protocol: failed to read message: %v\n", err)
 				// c.closeWithError(fmt.Errorf("failed to read message: %v", err))
 				return
 			}
