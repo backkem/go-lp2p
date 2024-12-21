@@ -232,6 +232,7 @@ func (l *Listener) run() error {
 	txt.Set("fp", fp)
 	txt.Set("mv", mv)
 	txt.Set("at", at)
+	txt.Set("fn", "TODO:Remove?")
 	txt.Set("sn", l.agent.Certificate.Leaf.SerialNumber.String()) // TODO: openscreenprotocol#293
 	port := listener.Addr().(*net.UDPAddr).Port
 	advertiser, err := mdns.Register(l.agent.info.DisplayName, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)
