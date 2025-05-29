@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 
@@ -34,12 +35,12 @@ func mainErr() error {
 		// Dials quick (the Go API uses this nomenclature to match net.Conn)
 		return runClient()
 	} else {
+		fmt.Println("Awaiting connection... Run the client side: `protocol client`")
 		// OSP server or "Advertising" agent
 		// Advertizes mDNS
 		// Listens for quic (the Go API uses this nomenclature to match net.Conn)
 		return runServer()
 	}
-
 }
 
 func runServer() error {
@@ -51,7 +52,7 @@ func runServer() error {
 		return err
 	}
 
-	l, err := ospc.Listen(a)
+	l, err := ospc.Listen(ospc.AgentTransportQUIC, a)
 	if err != nil {
 		return err
 	}
@@ -122,7 +123,7 @@ func runClient() error {
 	if err != nil {
 		return err
 	}
-	uConn, err := discovered.Dial(context.Background(), a)
+	uConn, err := discovered.Dial(context.Background(), ospc.AgentTransportQUIC, a)
 	if err != nil {
 		return err
 	}
