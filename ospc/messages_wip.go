@@ -11,25 +11,12 @@ import "fmt"
 
 const (
 	// Transport Stream
-	typeKeyAuthSpake2NeedPskDeprecated      TypeKey = 99001
-	typeKeyAuthSpake2HandshakeDeprecated    TypeKey = 99002
-	typeKeyAuthSpake2ConfirmationDeprecated TypeKey = 99003
+	typeKeyAuthSpake2NeedPskDeprecated TypeKey = 99001
 )
 
 // auth-spake2-need-psk
 type msgAuthSpake2NeedPskDeprecated struct {
 	AuthInitiationToken string `codec:"0"`
-}
-
-// auth-spake2-handshake
-type msgAuthSpake2HandshakeDeprecated struct {
-	AuthInitiationToken string `codec:"0"`
-	Payload             []byte `codec:"1"`
-}
-
-// auth-spake2-confirmation
-type msgAuthSpake2ConfirmationDeprecated struct {
-	Payload []byte `codec:"1"`
 }
 
 // DataChannel
@@ -70,12 +57,6 @@ func newMessageByTypeWIP(key TypeKey) (interface{}, error) {
 	case typeKeyAuthSpake2NeedPskDeprecated:
 		return &msgAuthSpake2NeedPskDeprecated{}, nil
 
-	case typeKeyAuthSpake2HandshakeDeprecated:
-		return &msgAuthSpake2HandshakeDeprecated{}, nil
-
-	case typeKeyAuthSpake2ConfirmationDeprecated:
-		return &msgAuthSpake2ConfirmationDeprecated{}, nil
-
 	default:
 		return nil, fmt.Errorf("unknown type key: %d", key)
 	}
@@ -97,12 +78,6 @@ func typeKeyByMessageWIP(msg interface{}) (TypeKey, error) {
 
 	case *msgAuthSpake2NeedPskDeprecated:
 		return typeKeyAuthSpake2NeedPskDeprecated, nil
-
-	case *msgAuthSpake2HandshakeDeprecated:
-		return typeKeyAuthSpake2HandshakeDeprecated, nil
-
-	case *msgAuthSpake2ConfirmationDeprecated:
-		return typeKeyAuthSpake2ConfirmationDeprecated, nil
 
 	default:
 		return 0, fmt.Errorf("unknown message type: %T", msg)
