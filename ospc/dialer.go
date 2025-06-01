@@ -4,15 +4,17 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"math/big"
 
 	mdns "github.com/grandcat/zeroconf"
 )
 
 // Dial opens a connection to the remote agent.
 func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport, la *Agent) (*UnauthenticatedConnection, error) {
-	sn, err := ra.TXT.GetOne("sn")
+	snBase64, err := ra.TXT.GetOne("sn")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get sn record: %v", err)
 	}
@@ -21,7 +23,14 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 		return nil, fmt.Errorf("failed to get fp record: %v", err)
 	}
 
-	cn := fmt.Sprintf("%s._openscreen._udp", sn) // TODO: openscreenprotocol#293
+	// Decode base64 serial number to get expected certificate serial number
+	expectedSNBytes, err := base64.StdEncoding.DecodeString(snBase64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode sn: %v", err)
+	}
+	expectedSN := new(big.Int).SetBytes(expectedSNBytes)
+
+	cn := fmt.Sprintf("%s._openscreen._udp", snBase64) // TODO: openscreenprotocol#293
 
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true, // Manual verification in VerifyConnection
@@ -33,6 +42,12 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 				return errors.New("didn't expect cert chain")
 			}
 			peerCert := cs.PeerCertificates[0]
+			
+			// Verify certificate serial number matches advertised value
+			if peerCert.SerialNumber.Cmp(expectedSN) != 0 {
+				return fmt.Errorf("certificate serial number mismatch: expected %s, got %s", expectedSN.String(), peerCert.SerialNumber.String())
+			}
+			
 			roots := x509.NewCertPool()
 			roots.AddCert(peerCert)
 

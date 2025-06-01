@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -233,7 +234,10 @@ func (l *Listener) run() error {
 	txt.Set("mv", mv)
 	txt.Set("at", at)
 	txt.Set("fn", "TODO:Remove?")
-	txt.Set("sn", l.agent.Certificate.Leaf.SerialNumber.String()) // TODO: openscreenprotocol#293
+	// Encode certificate serial number as base64 per OpenScreen spec
+	snBytes := l.agent.Certificate.Leaf.SerialNumber.Bytes()
+	snBase64 := base64.StdEncoding.EncodeToString(snBytes)
+	txt.Set("sn", snBase64) // TODO: openscreenprotocol#293
 	port := listener.Addr().(*net.UDPAddr).Port
 	advertiser, err := mdns.Register(l.agent.info.DisplayName, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)
 	if err != nil {

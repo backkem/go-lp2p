@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -272,7 +273,11 @@ func generateCert(displayName string, certificateSNBase, certificateSNCounter ui
 
 	serialNumber := uint64(certificateSNBase)<<32 | uint64(certificateSNCounter)
 
-	cn := fmt.Sprintf("%d._openscreen._udp", serialNumber) // TODO: openscreenprotocol#293
+	// Encode serial number as base64 for hostname per OpenScreen spec
+	snBig := new(big.Int).SetUint64(serialNumber)
+	snBytes := snBig.Bytes()
+	snBase64 := base64.StdEncoding.EncodeToString(snBytes)
+	cn := fmt.Sprintf("%s._openscreen._udp", snBase64) // TODO: openscreenprotocol#293
 	names := []string{cn}
 
 	keyUsage := x509.KeyUsageDigitalSignature // | x509.KeyUsageCertSign
