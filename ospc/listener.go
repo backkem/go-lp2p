@@ -178,6 +178,8 @@ func (l *Listener) run() error {
 
 	// Listen for and handle incoming connections
 	tlsConfig := &tls.Config{
+		MinVersion:   tls.VersionTLS13, // OpenScreen spec requires TLS 1.3
+		MaxVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{*l.agent.Certificate},
 		NextProtos:   nextProtos, // Application-Layer Protocol Negotiation
 		ClientAuth:   tls.RequireAnyClientCert,

@@ -265,7 +265,7 @@ func (a *Agent) AuthenticationInfo() *AgentAuthenticationInfo {
 }
 
 func generateCert(displayName string, certificateSNBase, certificateSNCounter uint32) (*tls.Certificate, error) {
-	privKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}

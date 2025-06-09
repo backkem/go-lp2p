@@ -36,6 +36,8 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	cn := buildAgentHostname(snBase64, instanceName, domain)
 
 	tlsConfig := &tls.Config{
+		MinVersion:         tls.VersionTLS13, // OpenScreen spec requires TLS 1.3
+		MaxVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: true, // Manual verification in VerifyConnection
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
