@@ -30,7 +30,10 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	}
 	expectedSN := new(big.Int).SetBytes(expectedSNBytes)
 
-	cn := fmt.Sprintf("%s._openscreen._udp", snBase64) // TODO: openscreenprotocol#293
+	// Build OpenScreen-compliant hostname from discovered agent info
+	instanceName := ra.info.ServiceRecord.Instance
+	domain := MdnsDomain
+	cn := buildAgentHostname(snBase64, instanceName, domain)
 
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: true, // Manual verification in VerifyConnection

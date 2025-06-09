@@ -277,7 +277,9 @@ func generateCert(displayName string, certificateSNBase, certificateSNCounter ui
 	snBig := new(big.Int).SetUint64(serialNumber)
 	snBytes := snBig.Bytes()
 	snBase64 := base64.StdEncoding.EncodeToString(snBytes)
-	cn := fmt.Sprintf("%s._openscreen._udp", snBase64) // TODO: openscreenprotocol#293
+	
+	// Build OpenScreen-compliant hostname: serialNumber.encodedInstanceName.encodedDomain
+	cn := buildAgentHostname(snBase64, displayName, MdnsDomain)
 	names := []string{cn}
 
 	keyUsage := x509.KeyUsageDigitalSignature // | x509.KeyUsageCertSign

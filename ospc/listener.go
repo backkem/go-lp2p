@@ -198,9 +198,12 @@ func (l *Listener) run() error {
 			roots := x509.NewCertPool()
 			roots.AddCert(peerCert)
 
+			// Extract expected hostname from peer certificate for validation
+			expectedCN := peerCert.Subject.CommonName
+			
 			opts := x509.VerifyOptions{
-				// DNSName: cn,
-				Roots: roots,
+				DNSName: expectedCN,
+				Roots:   roots,
 			}
 			_, err := peerCert.Verify(opts)
 
