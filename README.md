@@ -22,7 +22,7 @@ Check out the [examples](./examples/) or run them on Replit:
   - [ ] WebTransport Protocol interaction
     - [x] Over OSP connection
     - [ ] Over dedicated QUIC connection
-  - [ ] implement actual PAKE algorithm
+  - [x] implement actual PAKE algorithm
 - Various
   - [ ] Abstract LP2P API from underlying transport (to allow others like Wi-Fi Direct)
   - [ ] Lots of cleanup
