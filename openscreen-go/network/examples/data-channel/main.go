@@ -7,7 +7,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 
-	"github.com/backkem/go-lp2p/ospc"
+	"github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
 func main() {

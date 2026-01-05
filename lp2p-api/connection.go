@@ -1,7 +1,7 @@
 package lp2p
 
 import (
-	"github.com/backkem/go-lp2p/ospc"
+	"github.com/backkem/go-lp2p/openscreen-go/network"
 	"github.com/backkem/go-lp2p/web-api"
 )
 

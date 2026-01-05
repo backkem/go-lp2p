@@ -1,7 +1,7 @@
 package ua
 
 import (
-	"github.com/backkem/go-lp2p/ospc"
+	"github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
 // PeerContext represents the context of a local peer.

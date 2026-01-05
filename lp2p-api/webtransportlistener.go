@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/backkem/go-lp2p/ospc"
+	"github.com/backkem/go-lp2p/openscreen-go/network"
 	"github.com/backkem/go-lp2p/streams-api"
 	"github.com/backkem/go-lp2p/webtransport-api"
 )

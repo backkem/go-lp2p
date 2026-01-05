@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/backkem/go-lp2p/ospc"
+	"github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
 // Data channel supports simple message passing over WebTransport.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/backkem/go-lp2p/ospc"
+	"github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
 type PeerListener struct {
