@@ -11,13 +11,9 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"math/big"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/pion/dtls/v2/pkg/crypto/fingerprint"
 )
 
 type AgentRole int
@@ -327,43 +323,30 @@ func (a *Agent) CertificateFingerPrint() (string, error) {
 }
 
 func certificateFingerPrint(cert *x509.Certificate) (string, error) {
-	// fp                     = hash-func SP fingerprint
-	// hash-func              =  "sha-256" / "sha-512"
-	// fingerprint            =  2UHEX *(":" 2UHEX)
-	//                           ; Each byte in upper-case hex, separated
-	//                           ; by colons.
-	// UHEX                   =  DIGIT / %x41-46 ; A-F uppercase
+	// Per OpenScreen spec (network.bs - "Computing the Agent Fingerprint"):
+	// 1. Compute the SPKI Fingerprint of the agent certificate
+	//    according to RFC7469 using SHA-256 as the hash algorithm.
+	// 2. base64 encode the result of Step 1 according to RFC4648.
+	// Note: The resulting string will be 44 bytes in length.
 
-	hashAlgo := crypto.SHA512
-	hashName := "sha-512"
+	// RFC7469: SPKI fingerprint is the SHA-256 hash of the
+	// DER-encoded SubjectPublicKeyInfo structure
+	hash := crypto.SHA256.New()
+	hash.Write(cert.RawSubjectPublicKeyInfo)
+	spkiHash := hash.Sum(nil)
 
-	fp, err := fingerprint.Fingerprint(cert, hashAlgo)
-	if err != nil {
-		return "", fmt.Errorf("failed to create hash: %v", err)
-	}
-
-	return fmt.Sprintf("%s %s", hashName, fp), nil
+	return base64.StdEncoding.EncodeToString(spkiHash), nil
 }
 func validateFingerprint(fp string, remoteCerts []tls.Certificate) error {
+	// Per OpenScreen spec, fingerprint is a 44-character base64-encoded
+	// SHA-256 hash of the SPKI (SubjectPublicKeyInfo)
 	for _, cert := range remoteCerts {
-		n := strings.IndexRune(fp, ' ')
-		if n < 0 {
-			return errors.New("failed to find fingerprint algo")
-		}
-		algo := fp[:n]
-		fpValue := fp[n+1:]
-
-		hashAlgo, err := fingerprint.HashFromString(algo)
+		remoteValue, err := certificateFingerPrint(cert.Leaf)
 		if err != nil {
 			return err
 		}
 
-		remoteValue, err := fingerprint.Fingerprint(cert.Leaf, hashAlgo)
-		if err != nil {
-			return err
-		}
-
-		if strings.EqualFold(remoteValue, fpValue) {
+		if remoteValue == fp {
 			return nil
 		}
 	}

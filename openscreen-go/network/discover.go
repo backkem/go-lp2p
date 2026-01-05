@@ -91,6 +91,7 @@ func (d *Discoverer) run() error {
 				browseCancel()
 				waitCloseMdns(entries)
 				close(doneCh)
+				return
 
 			case e, ok := <-entries:
 				// Ignore firing due to closed channel

@@ -11,6 +11,15 @@ type TypeKey uint64
 // The below is generated semi-automatically
 ////
 
+// Exported type keys for application protocol use
+const (
+	TypeKeyAgentInfoRequest  TypeKey = 10
+	TypeKeyAgentInfoResponse TypeKey = 11
+	TypeKeyAgentStatusRequest  TypeKey = 12
+	TypeKeyAgentStatusResponse TypeKey = 13
+	TypeKeyAgentInfoEvent    TypeKey = 120
+)
+
 const (
 	// structure:
 	// typeKeyFoo    TypeKey = 123

@@ -870,3 +870,62 @@ type msgStreamingSessionReceiverStatsEvent struct {
 	Audio              []msgReceiverStatsAudio `codec:"2,omitempty"`
 	Video              []msgReceiverStatsVideo `codec:"3,omitempty"`
 }
+
+//
+// Exported types for application protocol use
+//
+
+// RequestID is the request identifier type
+type RequestID = msgRequestId
+
+// AgentCapability represents an agent capability
+type AgentCapability = msgAgentCapability
+
+// Exported capability constants
+const (
+	CapabilityReceiveAudio          = AgentCapabilityReceiveAudio
+	CapabilityReceiveVideo          = AgentCapabilityReceiveVideo
+	CapabilityReceivePresentation   = AgentCapabilityReceivePresentation
+	CapabilityControlPresentation   = AgentCapabilityControlPresentation
+	CapabilityReceiveRemotePlayback = AgentCapabilityReceiveRemotePlayback
+	CapabilityControlRemotePlayback = AgentCapabilityControlRemotePlayback
+	CapabilityReceiveStreaming      = AgentCapabilityReceiveStreaming
+	CapabilitySendStreaming         = AgentCapabilitySendStreaming
+)
+
+// MsgAgentInfo is the exported agent-info structure
+type MsgAgentInfo struct {
+	DisplayName  string            `codec:"0"`
+	ModelName    string            `codec:"1,omitempty"`
+	Capabilities []AgentCapability `codec:"2"`
+	StateToken   string            `codec:"3"`
+	Locales      []string          `codec:"4"`
+}
+
+// MsgAgentInfoRequest is the exported agent-info-request message
+type MsgAgentInfoRequest struct {
+	RequestID RequestID `codec:"0"`
+}
+
+// MsgAgentInfoResponse is the exported agent-info-response message
+type MsgAgentInfoResponse struct {
+	RequestID RequestID    `codec:"0"`
+	AgentInfo MsgAgentInfo `codec:"1"`
+}
+
+// MsgAgentStatusRequest is the exported agent-status-request message
+type MsgAgentStatusRequest struct {
+	RequestID RequestID `codec:"0"`
+	Status    *string   `codec:"1,omitempty"`
+}
+
+// MsgAgentStatusResponse is the exported agent-status-response message
+type MsgAgentStatusResponse struct {
+	RequestID RequestID `codec:"0"`
+	Status    *string   `codec:"1,omitempty"`
+}
+
+// MsgAgentInfoEvent is the exported agent-info-event message
+type MsgAgentInfoEvent struct {
+	AgentInfo MsgAgentInfo `codec:"0"`
+}

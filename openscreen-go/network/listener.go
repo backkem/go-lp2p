@@ -291,6 +291,7 @@ func (l *Listener) run() error {
 				}
 
 				close(doneCh)
+				return
 
 			case nc := <-netConns: // Incoming connection
 				remoteAgent, err := l.agent.NewRemoteAgent(nc)

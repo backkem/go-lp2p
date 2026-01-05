@@ -27,3 +27,9 @@ notes.md
 node_modules
 package-lock.json
 build
+
+# Claude Code
+.claude/
+CLAUDE.md
+AGENTS.md
+docs/

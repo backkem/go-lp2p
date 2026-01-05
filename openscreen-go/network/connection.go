@@ -24,6 +24,18 @@ func (c *Connection) RemoteAgent() *Agent {
 	return c.base.RemoteAgent()
 }
 
+// OpenStream opens a new application stream for use by custom protocols.
+// The stream is a raw bidirectional byte stream over QUIC.
+func (c *Connection) OpenStream(ctx context.Context) (ApplicationStream, error) {
+	return c.base.connectedState.appConn.OpenStreamSync(ctx)
+}
+
+// AcceptStream accepts an incoming application stream.
+// Returns streams opened by the remote peer for custom protocol use.
+func (c *Connection) AcceptStream(ctx context.Context) (ApplicationStream, error) {
+	return c.base.connectedState.appConn.AcceptStream(ctx)
+}
+
 // Handoff the underlying quick connection for use by another protocol.
 // func (c *Connection) Handoff() (quic.Connection, error) {
 // 	return c.base.Handoff()
