@@ -239,9 +239,11 @@ func (l *Listener) run() error {
 	txt.Set("mv", mv)
 	txt.Set("at", at)
 	txt.Set("fn", "TODO:Remove?")
-	// Encode certificate serial number as base64 per OpenScreen spec
+	// Encode certificate serial number as URL-safe base64 (no padding).
+	// Spec says RFC4648 base64, but standard base64 contains +/= which are
+	// invalid in DNS labels. See: https://github.com/w3c/openscreenprotocol/issues/365
 	snBytes := l.agent.Certificate.Leaf.SerialNumber.Bytes()
-	snBase64 := base64.StdEncoding.EncodeToString(snBytes)
+	snBase64 := base64.RawURLEncoding.EncodeToString(snBytes)
 	txt.Set("sn", snBase64) // TODO: openscreenprotocol#293
 	port := listener.Addr().(*net.UDPAddr).Port
 	advertiser, err := mdns.Register(l.agent.info.DisplayName, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)

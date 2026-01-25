@@ -23,8 +23,9 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 		return nil, fmt.Errorf("failed to get fp record: %v", err)
 	}
 
-	// Decode base64 serial number to get expected certificate serial number
-	expectedSNBytes, err := base64.StdEncoding.DecodeString(snBase64)
+	// Decode URL-safe base64 serial number to get expected certificate serial number.
+	// See: https://github.com/w3c/openscreenprotocol/issues/365
+	expectedSNBytes, err := base64.RawURLEncoding.DecodeString(snBase64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode sn: %v", err)
 	}

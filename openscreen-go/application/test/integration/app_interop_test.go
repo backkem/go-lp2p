@@ -106,6 +106,53 @@ func TestGoToGo(t *testing.T) {
 	t.Log("Go-to-Go test passed")
 }
 
+// TestRustToRust tests Rust sender connecting to Rust receiver.
+// This verifies the Rust implementation works correctly before testing interop.
+func TestRustToRust(t *testing.T) {
+	if !cargoAvailable {
+		t.Skip("cargo not available, skipping Rust interop test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Start Rust receiver
+	receiverReady := make(chan struct{})
+	receiverDone := make(chan error, 1)
+
+	go func() {
+		err := runRustReceiver(ctx, testReceiverName, testPSK, receiverReady, t)
+		receiverDone <- err
+	}()
+
+	// Wait for receiver to be ready
+	select {
+	case <-receiverReady:
+		t.Log("Rust receiver is ready")
+	case err := <-receiverDone:
+		t.Fatalf("Rust receiver failed to start: %v", err)
+	case <-ctx.Done():
+		t.Fatal("Timeout waiting for Rust receiver to start")
+	}
+
+	// Give extra time for mDNS to propagate
+	time.Sleep(3 * time.Second)
+
+	// Run Rust sender
+	err := runRustSender(ctx, testPSK, t)
+	if err != nil {
+		cancel()
+		<-receiverDone
+		t.Fatalf("Rust sender failed: %v", err)
+	}
+
+	// Cancel to stop receiver
+	cancel()
+	<-receiverDone
+
+	t.Log("Rust-to-Rust test passed")
+}
+
 // TestRustReceiverGoSender tests Go sender connecting to Rust receiver.
 func TestRustReceiverGoSender(t *testing.T) {
 	if !cargoAvailable {

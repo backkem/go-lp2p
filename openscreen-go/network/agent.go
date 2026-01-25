@@ -269,10 +269,12 @@ func generateCert(displayName string, certificateSNBase, certificateSNCounter ui
 
 	serialNumber := uint64(certificateSNBase)<<32 | uint64(certificateSNCounter)
 
-	// Encode serial number as base64 for hostname per OpenScreen spec
+	// Encode serial number as URL-safe base64 (no padding) for hostname.
+	// Spec says RFC4648 base64, but standard base64 contains +/= which are
+	// invalid in DNS labels. See: https://github.com/w3c/openscreenprotocol/issues/365
 	snBig := new(big.Int).SetUint64(serialNumber)
 	snBytes := snBig.Bytes()
-	snBase64 := base64.StdEncoding.EncodeToString(snBytes)
+	snBase64 := base64.RawURLEncoding.EncodeToString(snBytes)
 	
 	// Build OpenScreen-compliant hostname: serialNumber.encodedInstanceName.encodedDomain
 	cn := buildAgentHostname(snBase64, displayName, MdnsDomain)
