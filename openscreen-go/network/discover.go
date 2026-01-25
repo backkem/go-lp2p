@@ -4,10 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	mdns "github.com/grandcat/zeroconf"
 )
+
+// unescapeDNSSD removes DNS-SD escaping from instance names.
+// The zeroconf library returns names with escaped special chars (e.g., "Test\ Receiver").
+func unescapeDNSSD(s string) string {
+	return strings.ReplaceAll(s, `\ `, " ")
+}
 
 var ErrDiscovererClosed = errors.New("discoverer closed")
 
@@ -69,11 +76,10 @@ func (d *Discoverer) run() error {
 
 	entries := make(chan *mdns.ServiceEntry)
 
-	if d.remoteNickname != nil {
-		err = resolver.Lookup(browseCtx, *d.remoteNickname, MdnsServiceType, MdnsDomain, entries)
-	} else {
-		err = resolver.Browse(browseCtx, MdnsServiceType, MdnsDomain, entries)
-	}
+	// Always use Browse instead of Lookup. Lookup has issues on Windows when
+	// server and client run in the same process (common in tests). We filter
+	// by nickname client-side instead.
+	err = resolver.Browse(browseCtx, MdnsServiceType, MdnsDomain, entries)
 	if err != nil {
 		browseCancel()
 		return err
@@ -82,6 +88,7 @@ func (d *Discoverer) run() error {
 	acceptCh := d.accept
 	closeCh := d.close
 	doneCh := d.done
+	remoteNickname := d.remoteNickname
 
 	// Run loop
 	go func() {
@@ -96,6 +103,10 @@ func (d *Discoverer) run() error {
 			case e, ok := <-entries:
 				// Ignore firing due to closed channel
 				if !ok {
+					continue
+				}
+				// Filter by nickname if specified (unescape DNS-SD encoding)
+				if remoteNickname != nil && unescapeDNSSD(e.ServiceRecord.Instance) != *remoteNickname {
 					continue
 				}
 				agent, err := newDiscoveredAgent(e)
@@ -192,5 +203,5 @@ func newDiscoveredAgent(info *mdns.ServiceEntry) (*DiscoveredAgent, error) {
 
 // Nickname of the remote agent
 func (a *DiscoveredAgent) Nickname() string {
-	return a.info.ServiceRecord.Instance
+	return unescapeDNSSD(a.info.ServiceRecord.Instance)
 }

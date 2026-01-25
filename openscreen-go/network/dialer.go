@@ -31,7 +31,8 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	expectedSN := new(big.Int).SetBytes(expectedSNBytes)
 
 	// Build OpenScreen-compliant hostname from discovered agent info
-	instanceName := ra.info.ServiceRecord.Instance
+	// Unescape DNS-SD encoding (e.g., "Test\ Receiver" -> "Test Receiver")
+	instanceName := unescapeDNSSD(ra.info.ServiceRecord.Instance)
 	domain := MdnsDomain
 	cn := buildAgentHostname(snBase64, instanceName, domain)
 
