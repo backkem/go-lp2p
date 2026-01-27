@@ -21,13 +21,13 @@ const (
 // (cddlc) Ident: data-channel-open-request
 type msgDataChannelOpenRequest struct {
 	msgRequest
-	ChannelId uint64 `codec:"1"`
-	Label     string `codec:"2"`
-	Protocol  string `codec:"3"`
+	ChannelId uint64 `cbor:"1,keyasint"`
+	Label     string `cbor:"2,keyasint"`
+	Protocol  string `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: data-channel-open-response
 type msgDataChannelOpenResponse struct {
 	msgResponse
-	Result msgResult `codec:"1"`
+	Result msgResult `cbor:"1,keyasint"`
 }

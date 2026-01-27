@@ -12,12 +12,12 @@ type msgAgentInfoRequest struct {
 // (cddlc) Ident: agent-info-response
 type msgAgentInfoResponse struct {
 	msgResponse
-	AgentInfo msgAgentInfo `codec:"1"`
+	AgentInfo msgAgentInfo `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: agent-info-event
 type msgAgentInfoEvent struct {
-	AgentInfo msgAgentInfo `codec:"0"`
+	AgentInfo msgAgentInfo `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: msgAgentCapability
@@ -36,38 +36,38 @@ const (
 
 // (cddlc) Ident: agent-info
 type msgAgentInfo struct {
-	DisplayName  string               `codec:"0"`
-	ModelName    string               `codec:"1"`
-	Capabilities []msgAgentCapability `codec:"2"`
-	StateToken   string               `codec:"3"`
-	Locales      []string             `codec:"4"`
+	DisplayName  string               `cbor:"0,keyasint"`
+	ModelName    string               `cbor:"1,keyasint"`
+	Capabilities []msgAgentCapability `cbor:"2,keyasint"`
+	StateToken   string               `cbor:"3,keyasint"`
+	Locales      []string             `cbor:"4,keyasint"`
 }
 
 // (cddlc) Ident: agent-status-request
 type msgAgentStatusRequest struct {
 	msgRequest
-	Status *msgStatus `codec:"1,omitempty"`
+	Status *msgStatus `cbor:"1,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: agent-status-response
 type msgAgentStatusResponse struct {
 	msgResponse
-	Status *msgStatus `codec:"1,omitempty"`
+	Status *msgStatus `cbor:"1,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: status
 type msgStatus struct {
-	Status string `codec:"0"`
+	Status string `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: request
 type msgRequest struct {
-	RequestId msgRequestId `codec:"0"`
+	RequestId msgRequestId `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: response
 type msgResponse struct {
-	RequestId msgRequestId `codec:"0"`
+	RequestId msgRequestId `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: request-id
@@ -90,9 +90,9 @@ type msgMediaTimelineRange struct {
 
 // (cddlc) Ident: auth-capabilities
 type msgAuthCapabilities struct {
-	PskEaseOfInput      uint64              `codec:"0"`
-	PskInputMethods     []msgPskInputMethod `codec:"1"`
-	PskMinBitsOfEntropy uint64              `codec:"2"`
+	PskEaseOfInput      uint64              `cbor:"0,keyasint"`
+	PskInputMethods     []msgPskInputMethod `cbor:"1,keyasint"`
+	PskMinBitsOfEntropy uint64              `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: msgPskInputMethod
@@ -104,10 +104,9 @@ const (
 )
 
 // (cddlc) Ident: auth-initiation-token
-// TODO: w3c/openscreenprotocol#338
-// type msgAuthInitiationToken struct {
-// 	Token *string `codec:"0,omitempty"`
-// }
+type msgAuthInitiationToken struct {
+	Token *string `cbor:"0,keyasint,omitempty"`
+}
 
 // (cddlc) Ident: msgAuthSpake2PskStatus
 type msgAuthSpake2PskStatus uint64
@@ -120,7 +119,7 @@ const (
 
 // (cddlc) Ident: auth-spake2-confirmation
 type msgAuthSpake2Confirmation struct {
-	ConfirmationValue []byte `codec:"0"`
+	ConfirmationValue []byte `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: msgAuthStatusResult
@@ -137,13 +136,14 @@ const (
 
 // (cddlc) Ident: auth-status
 type msgAuthStatus struct {
-	Result msgAuthStatusResult `codec:"0"`
+	Result msgAuthStatusResult `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: auth-spake2-handshake
 type msgAuthSpake2Handshake struct {
-	PskStatus   msgAuthSpake2PskStatus `codec:"0"`
-	PublicValue []byte                 `codec:"1"`
+	AuthInitiationToken msgAuthInitiationToken `cbor:"0,keyasint"`
+	PskStatus           msgAuthSpake2PskStatus `cbor:"1,keyasint"`
+	PublicValue         []byte                 `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: watch-id
@@ -152,21 +152,21 @@ type msgWatchId uint64
 // (cddlc) Ident: presentation-url-availability-request
 type msgPresentationUrlAvailabilityRequest struct {
 	msgRequest
-	Urls          []string        `codec:"1"`
-	WatchDuration msgMicroseconds `codec:"2"`
-	WatchId       msgWatchId      `codec:"3"`
+	Urls          []string        `cbor:"1,keyasint"`
+	WatchDuration msgMicroseconds `cbor:"2,keyasint"`
+	WatchId       msgWatchId      `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: presentation-url-availability-response
 type msgPresentationUrlAvailabilityResponse struct {
 	msgResponse
-	UrlAvailabilities []msgUrlAvailability `codec:"1"`
+	UrlAvailabilities []msgUrlAvailability `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: presentation-url-availability-event
 type msgPresentationUrlAvailabilityEvent struct {
-	WatchId           msgWatchId           `codec:"0"`
-	UrlAvailabilities []msgUrlAvailability `codec:"1"`
+	WatchId           msgWatchId           `cbor:"0,keyasint"`
+	UrlAvailabilities []msgUrlAvailability `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: msgUrlAvailability
@@ -181,9 +181,9 @@ const (
 // (cddlc) Ident: presentation-start-request
 type msgPresentationStartRequest struct {
 	msgRequest
-	PresentationId string          `codec:"1"`
-	Url            string          `codec:"2"`
-	Headers        []msgHttpHeader `codec:"3"`
+	PresentationId string          `cbor:"1,keyasint"`
+	Url            string          `cbor:"2,keyasint"`
+	Headers        []msgHttpHeader `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: http-header
@@ -195,9 +195,9 @@ type msgHttpHeader struct {
 // (cddlc) Ident: presentation-start-response
 type msgPresentationStartResponse struct {
 	msgResponse
-	Result           msgResult `codec:"1"`
-	ConnectionId     uint64    `codec:"2"`
-	HttpResponseCode *uint64   `codec:"3,omitempty"`
+	Result           msgResult `cbor:"1,keyasint"`
+	ConnectionId     uint64    `cbor:"2,keyasint"`
+	HttpResponseCode *uint64   `cbor:"3,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: msgPresentationTerminationSource
@@ -226,36 +226,36 @@ const (
 // (cddlc) Ident: presentation-termination-request
 type msgPresentationTerminationRequest struct {
 	msgRequest
-	PresentationId string                           `codec:"1"`
-	Reason         msgPresentationTerminationReason `codec:"2"`
+	PresentationId string                           `cbor:"1,keyasint"`
+	Reason         msgPresentationTerminationReason `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: presentation-termination-response
 type msgPresentationTerminationResponse struct {
 	msgResponse
-	Result msgResult `codec:"1"`
+	Result msgResult `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: presentation-termination-event
 type msgPresentationTerminationEvent struct {
-	PresentationId string                           `codec:"0"`
-	Source         msgPresentationTerminationSource `codec:"1"`
-	Reason         msgPresentationTerminationReason `codec:"2"`
+	PresentationId string                           `cbor:"0,keyasint"`
+	Source         msgPresentationTerminationSource `cbor:"1,keyasint"`
+	Reason         msgPresentationTerminationReason `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: presentation-connection-open-request
 type msgPresentationConnectionOpenRequest struct {
 	msgRequest
-	PresentationId string `codec:"1"`
-	Url            string `codec:"2"`
+	PresentationId string `cbor:"1,keyasint"`
+	Url            string `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: presentation-connection-open-response
 type msgPresentationConnectionOpenResponse struct {
 	msgResponse
-	Result          msgResult `codec:"1"`
-	ConnectionId    uint64    `codec:"2"`
-	ConnectionCount uint64    `codec:"3"`
+	Result          msgResult `cbor:"1,keyasint"`
+	ConnectionId    uint64    `cbor:"2,keyasint"`
+	ConnectionCount uint64    `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: msgPresentationConnectionCloseEventReason
@@ -269,22 +269,22 @@ const (
 
 // (cddlc) Ident: presentation-connection-close-event
 type msgPresentationConnectionCloseEvent struct {
-	ConnectionId    uint64                                    `codec:"0"`
-	Reason          msgPresentationConnectionCloseEventReason `codec:"1"`
-	ErrorMessage    *string                                   `codec:"2,omitempty"`
-	ConnectionCount uint64                                    `codec:"3"`
+	ConnectionId    uint64                                    `cbor:"0,keyasint"`
+	Reason          msgPresentationConnectionCloseEventReason `cbor:"1,keyasint"`
+	ErrorMessage    *string                                   `cbor:"2,keyasint,omitempty"`
+	ConnectionCount uint64                                    `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: presentation-change-event
 type msgPresentationChangeEvent struct {
-	PresentationId  string `codec:"0"`
-	ConnectionCount uint64 `codec:"1"`
+	PresentationId  string `cbor:"0,keyasint"`
+	ConnectionCount uint64 `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: presentation-connection-message
 type msgPresentationConnectionMessage struct {
-	ConnectionId uint64 `codec:"0"`
-	Message      []byte `codec:"1"`
+	ConnectionId uint64 `cbor:"0,keyasint"`
+	Message      []byte `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: msgResult
@@ -304,49 +304,49 @@ const (
 // (cddlc) Ident: remote-playback-availability-request
 type msgRemotePlaybackAvailabilityRequest struct {
 	msgRequest
-	Sources       []msgRemotePlaybackSource `codec:"1"`
-	WatchDuration msgMicroseconds           `codec:"2"`
-	WatchId       msgWatchId                `codec:"3"`
+	Sources       []msgRemotePlaybackSource `cbor:"1,keyasint"`
+	WatchDuration msgMicroseconds           `cbor:"2,keyasint"`
+	WatchId       msgWatchId                `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: remote-playback-availability-response
 type msgRemotePlaybackAvailabilityResponse struct {
 	msgResponse
-	UrlAvailabilities []msgUrlAvailability `codec:"1"`
+	UrlAvailabilities []msgUrlAvailability `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: remote-playback-availability-event
 type msgRemotePlaybackAvailabilityEvent struct {
-	WatchId           msgWatchId           `codec:"0"`
-	UrlAvailabilities []msgUrlAvailability `codec:"1"`
+	WatchId           msgWatchId           `cbor:"0,keyasint"`
+	UrlAvailabilities []msgUrlAvailability `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: remote-playback-start-request
 type msgRemotePlaybackStartRequest struct {
 	msgRequest
-	RemotePlaybackId msgRemotePlaybackId        `codec:"1"`
-	Sources          []msgRemotePlaybackSource  `codec:"2,omitempty"`
-	TextTrackUrls    []string                   `codec:"3,omitempty"`
-	Headers          []msgHttpHeader            `codec:"4,omitempty"`
-	Controls         *msgRemotePlaybackControls `codec:"5,omitempty"`
+	RemotePlaybackId msgRemotePlaybackId        `cbor:"1,keyasint"`
+	Sources          []msgRemotePlaybackSource  `cbor:"2,keyasint,omitempty"`
+	TextTrackUrls    []string                   `cbor:"3,keyasint,omitempty"`
+	Headers          []msgHttpHeader            `cbor:"4,keyasint,omitempty"`
+	Controls         *msgRemotePlaybackControls `cbor:"5,keyasint,omitempty"`
 	Remoting         *struct {
 		msgStreamingSessionStartRequestParams
-	} `codec:"6,omitempty"`
+	} `cbor:"6,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: remote-playback-source
 type msgRemotePlaybackSource struct {
-	Url              string `codec:"0"`
-	ExtendedMimeType string `codec:"1"`
+	Url              string `cbor:"0,keyasint"`
+	ExtendedMimeType string `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: remote-playback-start-response
 type msgRemotePlaybackStartResponse struct {
 	msgResponse
-	State    *msgRemotePlaybackState `codec:"1,omitempty"`
+	State    *msgRemotePlaybackState `cbor:"1,keyasint,omitempty"`
 	Remoting *struct {
 		msgStreamingSessionStartResponseParams
-	} `codec:"2,omitempty"`
+	} `cbor:"2,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: msgRemotePlaybackTerminationRequestReason
@@ -360,14 +360,14 @@ const (
 // (cddlc) Ident: remote-playback-termination-request
 type msgRemotePlaybackTerminationRequest struct {
 	msgRequest
-	RemotePlaybackId msgRemotePlaybackId                       `codec:"1"`
-	Reason           msgRemotePlaybackTerminationRequestReason `codec:"2"`
+	RemotePlaybackId msgRemotePlaybackId                       `cbor:"1,keyasint"`
+	Reason           msgRemotePlaybackTerminationRequestReason `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: remote-playback-termination-response
 type msgRemotePlaybackTerminationResponse struct {
 	msgResponse
-	Result msgResult `codec:"1"`
+	Result msgResult `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: msgRemotePlaybackTerminationEventReason
@@ -384,28 +384,28 @@ const (
 
 // (cddlc) Ident: remote-playback-termination-event
 type msgRemotePlaybackTerminationEvent struct {
-	RemotePlaybackId msgRemotePlaybackId                     `codec:"0"`
-	Reason           msgRemotePlaybackTerminationEventReason `codec:"1"`
+	RemotePlaybackId msgRemotePlaybackId                     `cbor:"0,keyasint"`
+	Reason           msgRemotePlaybackTerminationEventReason `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: remote-playback-modify-request
 type msgRemotePlaybackModifyRequest struct {
 	msgRequest
-	RemotePlaybackId msgRemotePlaybackId       `codec:"1"`
-	Controls         msgRemotePlaybackControls `codec:"2"`
+	RemotePlaybackId msgRemotePlaybackId       `cbor:"1,keyasint"`
+	Controls         msgRemotePlaybackControls `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: remote-playback-modify-response
 type msgRemotePlaybackModifyResponse struct {
 	msgResponse
-	Result msgResult               `codec:"1"`
-	State  *msgRemotePlaybackState `codec:"2,omitempty"`
+	Result msgResult               `cbor:"1,keyasint"`
+	State  *msgRemotePlaybackState `cbor:"2,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: remote-playback-state-event
 type msgRemotePlaybackStateEvent struct {
-	RemotePlaybackId msgRemotePlaybackId    `codec:"0"`
-	State            msgRemotePlaybackState `codec:"1"`
+	RemotePlaybackId msgRemotePlaybackId    `cbor:"0,keyasint"`
+	State            msgRemotePlaybackState `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: remote-playback-id
@@ -422,20 +422,20 @@ const (
 
 // (cddlc) Ident: remote-playback-controls
 type msgRemotePlaybackControls struct {
-	Source               *msgRemotePlaybackSource          `codec:"0,omitempty"`
-	Preload              *msgRemotePlaybackControlsPreload `codec:"1,omitempty"`
-	Loop                 *bool                             `codec:"2,omitempty"`
-	Paused               *bool                             `codec:"3,omitempty"`
-	Muted                *bool                             `codec:"4,omitempty"`
-	Volume               *float64                          `codec:"5,omitempty"`
-	Seek                 *msgMediaTimeline                 `codec:"6,omitempty"`
-	FastSeek             *msgMediaTimeline                 `codec:"7,omitempty"`
-	PlaybackRate         *float64                          `codec:"8,omitempty"`
-	Poster               *string                           `codec:"9,omitempty"`
-	EnabledAudioTrackIds []string                          `codec:"10,omitempty"`
-	SelectedVideoTrackId *string                           `codec:"11,omitempty"`
-	AddedTextTracks      []msgAddedTextTrack               `codec:"12,omitempty"`
-	ChangedTextTracks    []msgChangedTextTrack             `codec:"13,omitempty"`
+	Source               *msgRemotePlaybackSource          `cbor:"0,keyasint,omitempty"`
+	Preload              *msgRemotePlaybackControlsPreload `cbor:"1,keyasint,omitempty"`
+	Loop                 *bool                             `cbor:"2,keyasint,omitempty"`
+	Paused               *bool                             `cbor:"3,keyasint,omitempty"`
+	Muted                *bool                             `cbor:"4,keyasint,omitempty"`
+	Volume               *float64                          `cbor:"5,keyasint,omitempty"`
+	Seek                 *msgMediaTimeline                 `cbor:"6,keyasint,omitempty"`
+	FastSeek             *msgMediaTimeline                 `cbor:"7,keyasint,omitempty"`
+	PlaybackRate         *float64                          `cbor:"8,keyasint,omitempty"`
+	Poster               *string                           `cbor:"9,keyasint,omitempty"`
+	EnabledAudioTrackIds []string                          `cbor:"10,keyasint,omitempty"`
+	SelectedVideoTrackId *string                           `cbor:"11,keyasint,omitempty"`
+	AddedTextTracks      []msgAddedTextTrack               `cbor:"12,keyasint,omitempty"`
+	ChangedTextTracks    []msgChangedTextTrack             `cbor:"13,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: msgRemotePlaybackStateLoading
@@ -462,33 +462,33 @@ const (
 // (cddlc) Ident: remote-playback-state
 type msgRemotePlaybackState struct {
 	Supports *struct {
-		Rate           bool `codec:"0"`
-		Preload        bool `codec:"1"`
-		Poster         bool `codec:"2"`
-		AddedTextTrack bool `codec:"3"`
-		AddedCues      bool `codec:"4"`
-	} `codec:"0,omitempty"`
-	Source             *msgRemotePlaybackSource       `codec:"1,omitempty"`
-	Loading            *msgRemotePlaybackStateLoading `codec:"2,omitempty"`
-	Loaded             *msgRemotePlaybackStateLoaded  `codec:"3,omitempty"`
-	Error              *msgMediaError                 `codec:"4,omitempty"`
-	Epoch              *msgEpochTime                  `codec:"5,omitempty"`
-	Duration           *msgMediaTimeline              `codec:"6,omitempty"`
-	BufferedTimeRanges []msgMediaTimelineRange        `codec:"7,omitempty"`
-	SeekableTimeRanges []msgMediaTimelineRange        `codec:"8,omitempty"`
-	PlayedTimeRanges   []msgMediaTimelineRange        `codec:"9,omitempty"`
-	Position           *msgMediaTimeline              `codec:"10,omitempty"`
-	PlaybackRate       *float64                       `codec:"11,omitempty"`
-	Paused             *bool                          `codec:"12,omitempty"`
-	Seeking            *bool                          `codec:"13,omitempty"`
-	Stalled            *bool                          `codec:"14,omitempty"`
-	Ended              *bool                          `codec:"15,omitempty"`
-	Volume             *float64                       `codec:"16,omitempty"`
-	Muted              *bool                          `codec:"17,omitempty"`
-	Resolution         *msgVideoResolution            `codec:"18,omitempty"`
-	AudioTracks        []msgAudioTrackState           `codec:"19,omitempty"`
-	VideoTracks        []msgVideoTrackState           `codec:"20,omitempty"`
-	TextTracks         []msgTextTrackState            `codec:"21,omitempty"`
+		Rate           bool `cbor:"0,keyasint"`
+		Preload        bool `cbor:"1,keyasint"`
+		Poster         bool `cbor:"2,keyasint"`
+		AddedTextTrack bool `cbor:"3,keyasint"`
+		AddedCues      bool `cbor:"4,keyasint"`
+	} `cbor:"0,keyasint,omitempty"`
+	Source             *msgRemotePlaybackSource       `cbor:"1,keyasint,omitempty"`
+	Loading            *msgRemotePlaybackStateLoading `cbor:"2,keyasint,omitempty"`
+	Loaded             *msgRemotePlaybackStateLoaded  `cbor:"3,keyasint,omitempty"`
+	Error              *msgMediaError                 `cbor:"4,keyasint,omitempty"`
+	Epoch              *msgEpochTime                  `cbor:"5,keyasint,omitempty"`
+	Duration           *msgMediaTimeline              `cbor:"6,keyasint,omitempty"`
+	BufferedTimeRanges []msgMediaTimelineRange        `cbor:"7,keyasint,omitempty"`
+	SeekableTimeRanges []msgMediaTimelineRange        `cbor:"8,keyasint,omitempty"`
+	PlayedTimeRanges   []msgMediaTimelineRange        `cbor:"9,keyasint,omitempty"`
+	Position           *msgMediaTimeline              `cbor:"10,keyasint,omitempty"`
+	PlaybackRate       *float64                       `cbor:"11,keyasint,omitempty"`
+	Paused             *bool                          `cbor:"12,keyasint,omitempty"`
+	Seeking            *bool                          `cbor:"13,keyasint,omitempty"`
+	Stalled            *bool                          `cbor:"14,keyasint,omitempty"`
+	Ended              *bool                          `cbor:"15,keyasint,omitempty"`
+	Volume             *float64                       `cbor:"16,keyasint,omitempty"`
+	Muted              *bool                          `cbor:"17,keyasint,omitempty"`
+	Resolution         *msgVideoResolution            `cbor:"18,keyasint,omitempty"`
+	AudioTracks        []msgAudioTrackState           `cbor:"19,keyasint,omitempty"`
+	VideoTracks        []msgVideoTrackState           `cbor:"20,keyasint,omitempty"`
+	TextTracks         []msgTextTrackState            `cbor:"21,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: msgAddedTextTrackKind
@@ -504,17 +504,17 @@ const (
 
 // (cddlc) Ident: added-text-track
 type msgAddedTextTrack struct {
-	Kind     msgAddedTextTrackKind `codec:"0"`
-	Label    *string               `codec:"1,omitempty"`
-	Language *string               `codec:"2,omitempty"`
+	Kind     msgAddedTextTrackKind `cbor:"0,keyasint"`
+	Label    *string               `cbor:"1,keyasint,omitempty"`
+	Language *string               `cbor:"2,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: changed-text-track
 type msgChangedTextTrack struct {
-	Id            string            `codec:"0"`
-	Mode          msgTextTrackMode  `codec:"1"`
-	AddedCues     []msgTextTrackCue `codec:"2,omitempty"`
-	RemovedCueIds []string          `codec:"3,omitempty"`
+	Id            string            `cbor:"0,keyasint"`
+	Mode          msgTextTrackMode  `cbor:"1,keyasint"`
+	AddedCues     []msgTextTrackCue `cbor:"2,keyasint,omitempty"`
+	RemovedCueIds []string          `cbor:"3,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: msgTextTrackMode
@@ -528,9 +528,9 @@ const (
 
 // (cddlc) Ident: text-track-cue
 type msgTextTrackCue struct {
-	Id    string                `codec:"0"`
-	Range msgMediaTimelineRange `codec:"1"`
-	Text  string                `codec:"2"`
+	Id    string                `cbor:"0,keyasint"`
+	Range msgMediaTimelineRange `cbor:"1,keyasint"`
+	Text  string                `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: media-sync-time
@@ -558,27 +558,27 @@ type msgMediaError struct {
 
 // (cddlc) Ident: track-state
 type msgTrackState struct {
-	Id       string `codec:"0"`
-	Label    string `codec:"1"`
-	Language string `codec:"2"`
+	Id       string `cbor:"0,keyasint"`
+	Label    string `cbor:"1,keyasint"`
+	Language string `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: audio-track-state
 type msgAudioTrackState struct {
 	msgTrackState
-	Enabled bool `codec:"3"`
+	Enabled bool `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: video-track-state
 type msgVideoTrackState struct {
 	msgTrackState
-	Selected bool `codec:"3"`
+	Selected bool `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: text-track-state
 type msgTextTrackState struct {
 	msgTrackState
-	Mode msgTextTrackMode `codec:"3"`
+	Mode msgTextTrackMode `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: audio-frame
@@ -587,31 +587,31 @@ type msgAudioFrame struct {
 	StartTime  uint64
 	Payload    []byte
 	Optional   *struct {
-		Duration *uint64           `codec:"0,omitempty"`
-		SyncTime *msgMediaSyncTime `codec:"1,omitempty"`
+		Duration *uint64           `cbor:"0,keyasint,omitempty"`
+		SyncTime *msgMediaSyncTime `cbor:"1,keyasint,omitempty"`
 	}
 }
 
 // (cddlc) Ident: video-frame
 type msgVideoFrame struct {
-	EncodingId     uint64            `codec:"0"`
-	SequenceNumber uint64            `codec:"1"`
-	DependsOn      []int64           `codec:"2,omitempty"`
-	StartTime      uint64            `codec:"3"`
-	Duration       *uint64           `codec:"4,omitempty"`
-	Payload        []byte            `codec:"5"`
-	VideoRotation  *uint64           `codec:"6,omitempty"`
-	SyncTime       *msgMediaSyncTime `codec:"7,omitempty"`
+	EncodingId     uint64            `cbor:"0,keyasint"`
+	SequenceNumber uint64            `cbor:"1,keyasint"`
+	DependsOn      []int64           `cbor:"2,keyasint,omitempty"`
+	StartTime      uint64            `cbor:"3,keyasint"`
+	Duration       *uint64           `cbor:"4,keyasint,omitempty"`
+	Payload        []byte            `cbor:"5,keyasint"`
+	VideoRotation  *uint64           `cbor:"6,keyasint,omitempty"`
+	SyncTime       *msgMediaSyncTime `cbor:"7,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: data-frame
 type msgDataFrame struct {
-	EncodingId     uint64            `codec:"0"`
-	SequenceNumber *uint64           `codec:"1,omitempty"`
-	StartTime      *uint64           `codec:"2,omitempty"`
-	Duration       *uint64           `codec:"3,omitempty"`
-	Payload        []byte            `codec:"4"`
-	SyncTime       *msgMediaSyncTime `codec:"5,omitempty"`
+	EncodingId     uint64            `cbor:"0,keyasint"`
+	SequenceNumber *uint64           `cbor:"1,keyasint,omitempty"`
+	StartTime      *uint64           `cbor:"2,keyasint,omitempty"`
+	Duration       *uint64           `cbor:"3,keyasint,omitempty"`
+	Payload        []byte            `cbor:"4,keyasint"`
+	SyncTime       *msgMediaSyncTime `cbor:"5,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: ratio
@@ -628,58 +628,58 @@ type msgStreamingCapabilitiesRequest struct {
 // (cddlc) Ident: streaming-capabilities-response
 type msgStreamingCapabilitiesResponse struct {
 	msgResponse
-	StreamingCapabilities msgStreamingCapabilities `codec:"1"`
+	StreamingCapabilities msgStreamingCapabilities `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: streaming-capabilities
 type msgStreamingCapabilities struct {
-	ReceiveAudio []msgReceiveAudioCapability `codec:"0"`
-	ReceiveVideo []msgReceiveVideoCapability `codec:"1"`
-	ReceiveData  []msgReceiveDataCapability  `codec:"2"`
+	ReceiveAudio []msgReceiveAudioCapability `cbor:"0,keyasint"`
+	ReceiveVideo []msgReceiveVideoCapability `cbor:"1,keyasint"`
+	ReceiveData  []msgReceiveDataCapability  `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: format
 type msgFormat struct {
-	CodecName string `codec:"0"`
+	CodecName string `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: receive-audio-capability
 type msgReceiveAudioCapability struct {
-	Codec            msgFormat `codec:"0"`
-	MaxAudioChannels *uint64   `codec:"1,omitempty"`
-	MinBitRate       *uint64   `codec:"2,omitempty"`
+	Codec            msgFormat `cbor:"0,keyasint"`
+	MaxAudioChannels *uint64   `cbor:"1,keyasint,omitempty"`
+	MinBitRate       *uint64   `cbor:"2,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: video-resolution
 type msgVideoResolution struct {
-	Height uint64 `codec:"0"`
-	Width  uint64 `codec:"1"`
+	Height uint64 `cbor:"0,keyasint"`
+	Width  uint64 `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: video-hdr-format
 type msgVideoHdrFormat struct {
-	TransferFunction string  `codec:"0"`
-	HdrMetadata      *string `codec:"1,omitempty"`
+	TransferFunction string  `cbor:"0,keyasint"`
+	HdrMetadata      *string `cbor:"1,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: receive-video-capability
 type msgReceiveVideoCapability struct {
-	Codec              msgFormat            `codec:"0"`
-	MaxResolution      *msgVideoResolution  `codec:"1,omitempty"`
-	MaxFramesPerSecond *msgRatio            `codec:"2,omitempty"`
-	MaxPixelsPerSecond *uint64              `codec:"3,omitempty"`
-	MinBitRate         *uint64              `codec:"4,omitempty"`
-	AspectRatio        *msgRatio            `codec:"5,omitempty"`
-	ColorGamut         *string              `codec:"6,omitempty"`
-	NativeResolutions  []msgVideoResolution `codec:"7,omitempty"`
-	SupportsScaling    *bool                `codec:"8,omitempty"`
-	SupportsRotation   *bool                `codec:"9,omitempty"`
-	HdrFormats         []msgVideoHdrFormat  `codec:"10,omitempty"`
+	Codec              msgFormat            `cbor:"0,keyasint"`
+	MaxResolution      *msgVideoResolution  `cbor:"1,keyasint,omitempty"`
+	MaxFramesPerSecond *msgRatio            `cbor:"2,keyasint,omitempty"`
+	MaxPixelsPerSecond *uint64              `cbor:"3,keyasint,omitempty"`
+	MinBitRate         *uint64              `cbor:"4,keyasint,omitempty"`
+	AspectRatio        *msgRatio            `cbor:"5,keyasint,omitempty"`
+	ColorGamut         *string              `cbor:"6,keyasint,omitempty"`
+	NativeResolutions  []msgVideoResolution `cbor:"7,keyasint,omitempty"`
+	SupportsScaling    *bool                `cbor:"8,keyasint,omitempty"`
+	SupportsRotation   *bool                `cbor:"9,keyasint,omitempty"`
+	HdrFormats         []msgVideoHdrFormat  `cbor:"10,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: receive-data-capability
 type msgReceiveDataCapability struct {
-	DataType msgFormat `codec:"0"`
+	DataType msgFormat `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: streaming-session-start-request
@@ -696,9 +696,9 @@ type msgStreamingSessionStartResponse struct {
 
 // (cddlc) Ident: streaming-session-start-request-params
 type msgStreamingSessionStartRequestParams struct {
-	StreamingSessionId   uint64                `codec:"1"`
-	StreamOffers         []msgMediaStreamOffer `codec:"2"`
-	DesiredStatsInterval msgMicroseconds       `codec:"3"`
+	StreamingSessionId   uint64                `cbor:"1,keyasint"`
+	StreamOffers         []msgMediaStreamOffer `cbor:"2,keyasint"`
+	DesiredStatsInterval msgMicroseconds       `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: streaming-session-modify-request
@@ -709,27 +709,27 @@ type msgStreamingSessionModifyRequest struct {
 
 // (cddlc) Ident: streaming-session-start-response-params
 type msgStreamingSessionStartResponseParams struct {
-	Result               msgResult               `codec:"1"`
-	StreamRequests       []msgMediaStreamRequest `codec:"2"`
-	DesiredStatsInterval msgMicroseconds         `codec:"3"`
+	Result               msgResult               `cbor:"1,keyasint"`
+	StreamRequests       []msgMediaStreamRequest `cbor:"2,keyasint"`
+	DesiredStatsInterval msgMicroseconds         `cbor:"3,keyasint"`
 }
 
 // (cddlc) Ident: streaming-session-modify-request-params
 type msgStreamingSessionModifyRequestParams struct {
-	StreamingSessionId uint64                  `codec:"1"`
-	StreamRequests     []msgMediaStreamRequest `codec:"2"`
+	StreamingSessionId uint64                  `cbor:"1,keyasint"`
+	StreamRequests     []msgMediaStreamRequest `cbor:"2,keyasint"`
 }
 
 // (cddlc) Ident: streaming-session-modify-response
 type msgStreamingSessionModifyResponse struct {
 	msgResponse
-	Result msgResult `codec:"1"`
+	Result msgResult `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: streaming-session-terminate-request
 type msgStreamingSessionTerminateRequest struct {
 	msgRequest
-	StreamingSessionId uint64 `codec:"1"`
+	StreamingSessionId uint64 `cbor:"1,keyasint"`
 }
 
 // (cddlc) Ident: streaming-session-terminate-response
@@ -739,66 +739,66 @@ type msgStreamingSessionTerminateResponse struct {
 
 // (cddlc) Ident: streaming-session-terminate-event
 type msgStreamingSessionTerminateEvent struct {
-	StreamingSessionId uint64 `codec:"0"`
+	StreamingSessionId uint64 `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: media-stream-offer
 type msgMediaStreamOffer struct {
-	MediaStreamId uint64                  `codec:"0"`
-	DisplayName   *string                 `codec:"1,omitempty"`
-	Audio         []msgAudioEncodingOffer `codec:"2,omitempty"`
-	Video         []msgVideoEncodingOffer `codec:"3,omitempty"`
-	Data          []msgDataEncodingOffer  `codec:"4,omitempty"`
+	MediaStreamId uint64                  `cbor:"0,keyasint"`
+	DisplayName   *string                 `cbor:"1,keyasint,omitempty"`
+	Audio         []msgAudioEncodingOffer `cbor:"2,keyasint,omitempty"`
+	Video         []msgVideoEncodingOffer `cbor:"3,keyasint,omitempty"`
+	Data          []msgDataEncodingOffer  `cbor:"4,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: media-stream-request
 type msgMediaStreamRequest struct {
-	MediaStreamId uint64                   `codec:"0"`
-	Audio         *msgAudioEncodingRequest `codec:"1,omitempty"`
-	Video         *msgVideoEncodingRequest `codec:"2,omitempty"`
-	Data          *msgDataEncodingRequest  `codec:"3,omitempty"`
+	MediaStreamId uint64                   `cbor:"0,keyasint"`
+	Audio         *msgAudioEncodingRequest `cbor:"1,keyasint,omitempty"`
+	Video         *msgVideoEncodingRequest `cbor:"2,keyasint,omitempty"`
+	Data          *msgDataEncodingRequest  `cbor:"3,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: audio-encoding-offer
 type msgAudioEncodingOffer struct {
-	EncodingId      uint64  `codec:"0"`
-	CodecName       string  `codec:"1"`
-	TimeScale       uint64  `codec:"2"`
-	DefaultDuration *uint64 `codec:"3,omitempty"`
+	EncodingId      uint64  `cbor:"0,keyasint"`
+	CodecName       string  `cbor:"1,keyasint"`
+	TimeScale       uint64  `cbor:"2,keyasint"`
+	DefaultDuration *uint64 `cbor:"3,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: video-encoding-offer
 type msgVideoEncodingOffer struct {
-	EncodingId      uint64            `codec:"0"`
-	CodecName       string            `codec:"1"`
-	TimeScale       uint64            `codec:"2"`
-	DefaultDuration *uint64           `codec:"3,omitempty"`
-	DefaultRotation *msgVideoRotation `codec:"4,omitempty"`
+	EncodingId      uint64            `cbor:"0,keyasint"`
+	CodecName       string            `cbor:"1,keyasint"`
+	TimeScale       uint64            `cbor:"2,keyasint"`
+	DefaultDuration *uint64           `cbor:"3,keyasint,omitempty"`
+	DefaultRotation *msgVideoRotation `cbor:"4,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: data-encoding-offer
 type msgDataEncodingOffer struct {
-	EncodingId      uint64  `codec:"0"`
-	DataTypeName    string  `codec:"1"`
-	TimeScale       uint64  `codec:"2"`
-	DefaultDuration *uint64 `codec:"3,omitempty"`
+	EncodingId      uint64  `cbor:"0,keyasint"`
+	DataTypeName    string  `cbor:"1,keyasint"`
+	TimeScale       uint64  `cbor:"2,keyasint"`
+	DefaultDuration *uint64 `cbor:"3,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: audio-encoding-request
 type msgAudioEncodingRequest struct {
-	EncodingId uint64 `codec:"0"`
+	EncodingId uint64 `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: video-encoding-request
 type msgVideoEncodingRequest struct {
-	EncodingId         uint64              `codec:"0"`
-	TargetResolution   *msgVideoResolution `codec:"1,omitempty"`
-	MaxFramesPerSecond *msgRatio           `codec:"2,omitempty"`
+	EncodingId         uint64              `cbor:"0,keyasint"`
+	TargetResolution   *msgVideoResolution `cbor:"1,keyasint,omitempty"`
+	MaxFramesPerSecond *msgRatio           `cbor:"2,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: data-encoding-request
 type msgDataEncodingRequest struct {
-	EncodingId uint64 `codec:"0"`
+	EncodingId uint64 `cbor:"0,keyasint"`
 }
 
 // (cddlc) Ident: msgVideoRotation
@@ -813,25 +813,25 @@ const (
 
 // (cddlc) Ident: sender-stats-audio
 type msgSenderStatsAudio struct {
-	EncodingId            uint64           `codec:"0"`
-	CumulativeSentFrames  *uint64          `codec:"1,omitempty"`
-	CumulativeEncodeDelay *msgMicroseconds `codec:"2,omitempty"`
+	EncodingId            uint64           `cbor:"0,keyasint"`
+	CumulativeSentFrames  *uint64          `cbor:"1,keyasint,omitempty"`
+	CumulativeEncodeDelay *msgMicroseconds `cbor:"2,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: sender-stats-video
 type msgSenderStatsVideo struct {
-	EncodingId              uint64           `codec:"0"`
-	CumulativeSentDuration  *msgMicroseconds `codec:"1,omitempty"`
-	CumulativeEncodeDelay   *msgMicroseconds `codec:"2,omitempty"`
-	CumulativeDroppedFrames *uint64          `codec:"3,omitempty"`
+	EncodingId              uint64           `cbor:"0,keyasint"`
+	CumulativeSentDuration  *msgMicroseconds `cbor:"1,keyasint,omitempty"`
+	CumulativeEncodeDelay   *msgMicroseconds `cbor:"2,keyasint,omitempty"`
+	CumulativeDroppedFrames *uint64          `cbor:"3,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: streaming-session-sender-stats-event
 type msgStreamingSessionSenderStatsEvent struct {
-	StreamingSessionId uint64                `codec:"0"`
-	SystemTime         msgMicroseconds       `codec:"1"`
-	Audio              []msgSenderStatsAudio `codec:"2,omitempty"`
-	Video              []msgSenderStatsVideo `codec:"3,omitempty"`
+	StreamingSessionId uint64                `cbor:"0,keyasint"`
+	SystemTime         msgMicroseconds       `cbor:"1,keyasint"`
+	Audio              []msgSenderStatsAudio `cbor:"2,keyasint,omitempty"`
+	Video              []msgSenderStatsVideo `cbor:"3,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: msgStreamingBufferStatus
@@ -845,30 +845,30 @@ const (
 
 // (cddlc) Ident: receiver-stats-audio
 type msgReceiverStatsAudio struct {
-	EncodingId                 uint64                    `codec:"0"`
-	CumulativeReceivedDuration *msgMicroseconds          `codec:"1,omitempty"`
-	CumulativeLostDuration     *msgMicroseconds          `codec:"2,omitempty"`
-	CumulativeBufferDelay      *msgMicroseconds          `codec:"3,omitempty"`
-	CumulativeDecodeDelay      *msgMicroseconds          `codec:"4,omitempty"`
-	RemoteBufferStatus         *msgStreamingBufferStatus `codec:"5,omitempty"`
+	EncodingId                 uint64                    `cbor:"0,keyasint"`
+	CumulativeReceivedDuration *msgMicroseconds          `cbor:"1,keyasint,omitempty"`
+	CumulativeLostDuration     *msgMicroseconds          `cbor:"2,keyasint,omitempty"`
+	CumulativeBufferDelay      *msgMicroseconds          `cbor:"3,keyasint,omitempty"`
+	CumulativeDecodeDelay      *msgMicroseconds          `cbor:"4,keyasint,omitempty"`
+	RemoteBufferStatus         *msgStreamingBufferStatus `cbor:"5,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: receiver-stats-video
 type msgReceiverStatsVideo struct {
-	EncodingId              uint64                    `codec:"0"`
-	CumulativeDecodedFrames *uint64                   `codec:"1,omitempty"`
-	CumulativeLostFrames    *uint64                   `codec:"2,omitempty"`
-	CumulativeBufferDelay   *msgMicroseconds          `codec:"3,omitempty"`
-	CumulativeDecodeDelay   *msgMicroseconds          `codec:"4,omitempty"`
-	RemoteBufferStatus      *msgStreamingBufferStatus `codec:"5,omitempty"`
+	EncodingId              uint64                    `cbor:"0,keyasint"`
+	CumulativeDecodedFrames *uint64                   `cbor:"1,keyasint,omitempty"`
+	CumulativeLostFrames    *uint64                   `cbor:"2,keyasint,omitempty"`
+	CumulativeBufferDelay   *msgMicroseconds          `cbor:"3,keyasint,omitempty"`
+	CumulativeDecodeDelay   *msgMicroseconds          `cbor:"4,keyasint,omitempty"`
+	RemoteBufferStatus      *msgStreamingBufferStatus `cbor:"5,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: streaming-session-receiver-stats-event
 type msgStreamingSessionReceiverStatsEvent struct {
-	StreamingSessionId uint64                  `codec:"0"`
-	SystemTime         msgMicroseconds         `codec:"1"`
-	Audio              []msgReceiverStatsAudio `codec:"2,omitempty"`
-	Video              []msgReceiverStatsVideo `codec:"3,omitempty"`
+	StreamingSessionId uint64                  `cbor:"0,keyasint"`
+	SystemTime         msgMicroseconds         `cbor:"1,keyasint"`
+	Audio              []msgReceiverStatsAudio `cbor:"2,keyasint,omitempty"`
+	Video              []msgReceiverStatsVideo `cbor:"3,keyasint,omitempty"`
 }
 
 //
@@ -895,37 +895,37 @@ const (
 
 // MsgAgentInfo is the exported agent-info structure
 type MsgAgentInfo struct {
-	DisplayName  string            `codec:"0"`
-	ModelName    string            `codec:"1,omitempty"`
-	Capabilities []AgentCapability `codec:"2"`
-	StateToken   string            `codec:"3"`
-	Locales      []string          `codec:"4"`
+	DisplayName  string            `cbor:"0,keyasint"`
+	ModelName    string            `cbor:"1,keyasint,omitempty"`
+	Capabilities []AgentCapability `cbor:"2,keyasint"`
+	StateToken   string            `cbor:"3,keyasint"`
+	Locales      []string          `cbor:"4,keyasint"`
 }
 
 // MsgAgentInfoRequest is the exported agent-info-request message
 type MsgAgentInfoRequest struct {
-	RequestID RequestID `codec:"0"`
+	RequestID RequestID `cbor:"0,keyasint"`
 }
 
 // MsgAgentInfoResponse is the exported agent-info-response message
 type MsgAgentInfoResponse struct {
-	RequestID RequestID    `codec:"0"`
-	AgentInfo MsgAgentInfo `codec:"1"`
+	RequestID RequestID    `cbor:"0,keyasint"`
+	AgentInfo MsgAgentInfo `cbor:"1,keyasint"`
 }
 
 // MsgAgentStatusRequest is the exported agent-status-request message
 type MsgAgentStatusRequest struct {
-	RequestID RequestID `codec:"0"`
-	Status    *string   `codec:"1,omitempty"`
+	RequestID RequestID `cbor:"0,keyasint"`
+	Status    *string   `cbor:"1,keyasint,omitempty"`
 }
 
 // MsgAgentStatusResponse is the exported agent-status-response message
 type MsgAgentStatusResponse struct {
-	RequestID RequestID `codec:"0"`
-	Status    *string   `codec:"1,omitempty"`
+	RequestID RequestID `cbor:"0,keyasint"`
+	Status    *string   `cbor:"1,keyasint,omitempty"`
 }
 
 // MsgAgentInfoEvent is the exported agent-info-event message
 type MsgAgentInfoEvent struct {
-	AgentInfo MsgAgentInfo `codec:"0"`
+	AgentInfo MsgAgentInfo `cbor:"0,keyasint"`
 }

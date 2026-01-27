@@ -1,9 +1,11 @@
 package ospc
 
 import (
+	"bytes"
+	"fmt"
 	"io"
 
-	"github.com/ugorji/go/codec"
+	"github.com/fxamacker/cbor/v2"
 )
 
 func readTypeKey(r io.Reader) (TypeKey, error) {
@@ -29,36 +31,42 @@ func readMessage(r io.Reader) (interface{}, error) {
 		return nil, err
 	}
 
-	h := &codec.CborHandle{}
-	dec := codec.NewDecoder(r, h)
-	err = dec.Decode(&msg)
+	dec := cbor.NewDecoder(r)
+	err = dec.Decode(msg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cbor decode error: %w", err)
 	}
 
-	// fmt.Printf("<-- Read %T\n", msg)
+	fmt.Printf("<-- Read %T\n", msg)
 	return msg, nil
 
 }
 
-// Write with type/size prefix
+// Write with type/size prefix.
+// The entire message (type key + CBOR body) is buffered before writing
+// so that it is emitted as a single Write call. This is required when
+// each Write opens a new unidirectional QUIC stream.
 func writeMessage(msg interface{}, w io.Writer) error {
-	// fmt.Printf("  --> Writing %T\n", msg)
-	// defer fmt.Printf("  --> Done writing %T\n", msg)
+	fmt.Printf("  --> Writing %T\n", msg)
 
-	// w = newDebugReadWriter(w)
 	tKey, err := typeKeyByMessage(msg)
 	if err != nil {
 		return err
 	}
 
-	err = writeTypeKey(tKey, w)
+	var buf bytes.Buffer
+	err = writeTypeKey(tKey, &buf)
 	if err != nil {
 		return err
 	}
-	h := &codec.CborHandle{}
-	enc := codec.NewEncoder(w, h)
-	return enc.Encode(msg)
+	cborData, err := cbor.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	buf.Write(cborData)
+
+	_, err = w.Write(buf.Bytes())
+	return err
 }
 
 // ReadMessage reads a CBOR-encoded message with type key prefix from the reader.
@@ -85,14 +93,16 @@ func WriteTypeKey(v TypeKey, w io.Writer) error {
 
 // EncodeCBOR encodes a value to CBOR format.
 func EncodeCBOR(v interface{}, w io.Writer) error {
-	h := &codec.CborHandle{}
-	enc := codec.NewEncoder(w, h)
-	return enc.Encode(v)
+	data, err := cbor.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
 }
 
 // DecodeCBOR decodes a CBOR-encoded value from the reader.
 func DecodeCBOR(r io.Reader, v interface{}) error {
-	h := &codec.CborHandle{}
-	dec := codec.NewDecoder(r, h)
+	dec := cbor.NewDecoder(r)
 	return dec.Decode(v)
 }

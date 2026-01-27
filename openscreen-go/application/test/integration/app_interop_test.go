@@ -422,6 +422,7 @@ func runGoSender(ctx context.Context, name, psk, receiverName string) (*ospc.Msg
 func runRustReceiver(ctx context.Context, name, psk string, ready chan<- struct{}, t *testing.T) error {
 	cmd := exec.CommandContext(ctx, "cargo", "run", "--bin", "app-receiver", "--", "--name", name, "--psk", psk)
 	cmd.Dir = rustAppDir
+	cmd.Env = append(os.Environ(), "RUST_LOG=debug")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -478,6 +479,7 @@ func runRustReceiver(ctx context.Context, name, psk string, ready chan<- struct{
 func runRustSender(ctx context.Context, psk string, t *testing.T) error {
 	cmd := exec.CommandContext(ctx, "cargo", "run", "--bin", "app-sender", "--", "--psk", psk)
 	cmd.Dir = rustAppDir
+	cmd.Env = append(os.Environ(), "RUST_LOG=debug")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

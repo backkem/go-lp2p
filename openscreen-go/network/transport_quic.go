@@ -3,6 +3,7 @@ package ospc
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"sync"
 
@@ -77,29 +78,28 @@ func (l *QuicNetworkListener) Addr() net.Addr {
 var _ NetworkConnection = &QuicNetworkConnection{}
 
 type QuicNetworkConnection struct {
-	conn    quic.Connection
-	wStream quic.Stream
+	conn quic.Connection
 
-	bufCh chan []byte
-	lenCh chan int
+	// Read: pipe fed sequentially by run()
+	pr *io.PipeReader
+	pw *io.PipeWriter
 
+	// Lifecycle
 	acceptCancel context.CancelFunc
-	shutdownCh   chan struct{}
-	doneCh       chan struct{}
+	doneCh       chan struct{} // closed when run() exits
 
-	mu       sync.Mutex // Protects state
+	mu       sync.Mutex // Protects closeErr
 	closeErr error
 }
 
 func NewQuicNetworkConnection(conn quic.Connection) *QuicNetworkConnection {
-	ctx, acceptCancelFunc := context.WithCancel(context.Background())
-
+	pr, pw := io.Pipe()
+	ctx, cancelFunc := context.WithCancel(context.Background())
 	q := &QuicNetworkConnection{
 		conn:         conn,
-		bufCh:        make(chan []byte),
-		lenCh:        make(chan int),
-		acceptCancel: acceptCancelFunc,
-		shutdownCh:   make(chan struct{}),
+		pr:           pr,
+		pw:           pw,
+		acceptCancel: cancelFunc,
 		doneCh:       make(chan struct{}),
 	}
 	go q.run(ctx)
@@ -107,48 +107,65 @@ func NewQuicNetworkConnection(conn quic.Connection) *QuicNetworkConnection {
 }
 
 func (q *QuicNetworkConnection) run(ctx context.Context) {
-	rStreams := make([]quic.ReceiveStream, 0)
-	for {
-		select {
-		case <-q.shutdownCh:
-			// Stop receiving
-			for _, s := range rStreams {
-				s.CancelRead(0)
-			}
-			close(q.doneCh)
+	defer close(q.doneCh)
+	defer q.pw.CloseWithError(q.closeError())
 
-			return
-		default:
+	streamCh := make(chan quic.ReceiveStream, 16)
+
+	// Accept unidirectional streams (spec-compliant peers)
+	go func() {
+		for {
+			s, err := q.conn.AcceptUniStream(ctx)
+			if err != nil {
+				return
+			}
+			streamCh <- s
+		}
+	}()
+
+	// Accept bidirectional streams (backward compat)
+	go func() {
+		for {
 			s, err := q.conn.AcceptStream(ctx)
 			if err != nil {
-				// Continue to proper shutdown
-				continue
+				return
 			}
-			rStreams = append(rStreams, s)
-			go q.handleIncoming(s)
+			streamCh <- s
+		}
+	}()
+
+	// Process streams one at a time — no interleaving
+	for {
+		select {
+		case s := <-streamCh:
+			io.Copy(q.pw, s)
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
 func (q *QuicNetworkConnection) Read(p []byte) (int, error) {
-	select {
-	case q.bufCh <- p:
-		nr := <-q.lenCh
-		return nr, nil
-	case <-q.doneCh:
-		return 0, q.closeError()
-	}
+	return q.pr.Read(p)
 }
 
+// Write opens a new unidirectional stream per call, writes the data,
+// and closes the stream (sending FIN). This matches the spec requirement
+// of one unidirectional stream per message.
 func (q *QuicNetworkConnection) Write(p []byte) (int, error) {
-	if q.wStream == nil {
-		s, err := q.conn.OpenStreamSync(context.Background())
-		if err != nil {
-			return 0, err
-		}
-		q.wStream = s
+	s, err := q.conn.OpenUniStreamSync(context.Background())
+	if err != nil {
+		return 0, err
 	}
-	return q.wStream.Write(p)
+	n, err := s.Write(p)
+	if err != nil {
+		s.CancelWrite(0)
+		return n, err
+	}
+	if closeErr := s.Close(); closeErr != nil {
+		return n, closeErr
+	}
+	return n, nil
 }
 
 func (q *QuicNetworkConnection) IsReliable() bool {
@@ -173,29 +190,10 @@ func (q *QuicNetworkConnection) setCloseError(err error) {
 	q.closeErr = err
 }
 
-func (q *QuicNetworkConnection) handleIncoming(s quic.ReceiveStream) {
-	for {
-		select {
-		case p := <-q.bufCh:
-			nr, err := s.Read(p)
-			q.lenCh <- nr
-			if err != nil {
-				return
-			}
-
-		case <-q.doneCh:
-			return
-		}
-	}
-}
-
 func (q *QuicNetworkConnection) shutdown(err error) {
 	q.setCloseError(err)
-	// Stop accepting new streams
 	q.acceptCancel()
-	// Signal read loop to shutdown
-	close(q.shutdownCh)
-	// Ensure read loop is gone
+	q.pw.CloseWithError(err)
 	<-q.doneCh
 }
 

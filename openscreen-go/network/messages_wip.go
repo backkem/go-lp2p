@@ -16,7 +16,7 @@ const (
 
 // auth-spake2-need-psk
 type msgAuthSpake2NeedPskDeprecated struct {
-	AuthInitiationToken string `codec:"0"`
+	AuthInitiationToken string `cbor:"0,keyasint"`
 }
 
 // DataChannel
@@ -86,24 +86,24 @@ func typeKeyByMessageWIP(msg interface{}) (TypeKey, error) {
 
 // data-transport-start-request
 type msgDataTransportStartRequest struct {
-	RequestID  uint64 `codec:"0"`
-	ExchangeId uint64 `codec:"1"`
+	RequestID  uint64 `cbor:"0,keyasint"`
+	ExchangeId uint64 `cbor:"1,keyasint"`
 }
 
 // data-transport-start-response
 type msgDataTransportStartResponse struct {
-	RequestID uint64    `codec:"0"`
-	Result    msgResult `codec:"1"`
+	RequestID uint64    `cbor:"0,keyasint"`
+	Result    msgResult `cbor:"1,keyasint"`
 }
 
 // data-transport-stream-request
 type msgDataTransportStreamRequest struct {
-	RequestID  uint64 `codec:"0"`
-	ExchangeId uint64 `codec:"1"`
+	RequestID  uint64 `cbor:"0,keyasint"`
+	ExchangeId uint64 `cbor:"1,keyasint"`
 }
 
 // data-transport-stream-response
 type msgDataTransportStreamResponse struct {
-	RequestID uint64    `codec:"0"`
-	Result    msgResult `codec:"1"`
+	RequestID uint64    `cbor:"0,keyasint"`
+	Result    msgResult `cbor:"1,keyasint"`
 }

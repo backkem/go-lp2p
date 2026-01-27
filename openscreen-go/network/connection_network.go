@@ -376,22 +376,26 @@ func (c *baseConnection) authenticatePSKProgress() error {
 		}
 	}
 
-	// fmt.Printf("%s %s\n", c.localInfo.Nickname, c.authenticationState.status)
+	fmt.Printf("[Auth] role=%s status=%s\n", c.authenticationRole, c.authenticationState.status)
 
 	role := c.authenticationRole
 
 	if authState.status == authStatusNew {
+		fmt.Printf("[Auth] Entering authStatusNew, role=%s\n", role)
 		if role == AuthenticationRolePresenter {
 			if authState.localPSK == nil {
+				fmt.Printf("[Auth] Presenter: no PSK yet, notifying\n")
 				c.doAuthNotify()
 			}
 		} else {
 			if authState.remotePublic == nil {
+				fmt.Printf("[Auth] Consumer: no remote public yet, sending NeedPsk\n")
 				err := c.sendAuthSpake2NeedPsk()
 				if err != nil {
 					return err
 				}
 			} else if authState.localPSK == nil {
+				fmt.Printf("[Auth] Consumer: have remote public but no PSK, notifying\n")
 				c.doAuthNotify()
 			}
 		}
@@ -401,22 +405,27 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	if authState.status == authStatusAwaitPSK {
 		if authState.localPSK == nil {
+			fmt.Printf("[Auth] AwaitPSK: still waiting for PSK\n")
 			return nil // continue waiting
 		}
+		fmt.Printf("[Auth] AwaitPSK: have PSK (%d bytes), role=%s\n", len(authState.localPSK), role)
 		if role == AuthenticationRolePresenter {
 			clientOpts := &spake2.Options{
 				Ciphersuite: spake2.DefaultCiphersuite(),
 				IdentityA:   []byte(c.localAgent.PeerID),
 				IdentityB:   []byte(c.remoteAgent.PeerID),
 			}
+			fmt.Printf("[Auth] Presenter SPAKE2 Client: IdentityA(local)=%x IdentityB(remote)=%x\n", clientOpts.IdentityA, clientOpts.IdentityB)
 			client := spake2.NewClient(authState.localPSK, clientOpts)
 			authState.spakeState = client
 			localPublic, err := client.Start()
 			if err != nil {
+				fmt.Printf("[Auth] SPAKE2 Client.Start() failed: %v\n", err)
 				status := AuthStatusResultUnknownError
 				authState.localResult = &status
 				return err
 			}
+			fmt.Printf("[Auth] SPAKE2 Client.Start() ok, public=%d bytes\n", len(localPublic))
 
 			err = c.sendAuthSpake2Handshake(localPublic)
 			if err != nil {
@@ -429,16 +438,20 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	if authState.status == authStatusAwaitHandshake {
 		if authState.remotePublic == nil {
+			fmt.Printf("[Auth] AwaitHandshake: still waiting for remote public\n")
 			return nil // continue waiting
 		}
+		fmt.Printf("[Auth] AwaitHandshake: have remote public (%d bytes), role=%s\n", len(authState.remotePublic), role)
 		if role == AuthenticationRolePresenter {
 			client := authState.spakeState
 			localConfirmation, err := client.Finish(authState.remotePublic)
 			if err != nil {
+				fmt.Printf("[Auth] SPAKE2 Client.Finish() failed: %v\n", err)
 				status := AuthStatusResultUnknownError
 				authState.localResult = &status
 				return err
 			}
+			fmt.Printf("[Auth] SPAKE2 Client.Finish() ok, confirmation=%d bytes\n", len(localConfirmation))
 
 			err = c.sendAuthSpake2Confirmation(localConfirmation)
 			if err != nil {
@@ -450,15 +463,18 @@ func (c *baseConnection) authenticatePSKProgress() error {
 				IdentityA:   []byte(c.remoteAgent.PeerID),
 				IdentityB:   []byte(c.localAgent.PeerID),
 			}
+			fmt.Printf("[Auth] Consumer SPAKE2 Server: IdentityA(remote)=%x IdentityB(local)=%x\n", serverOpts.IdentityA, serverOpts.IdentityB)
 			server := spake2.NewServer(authState.localPSK, serverOpts)
 			authState.spakeState = server
 
 			localPublic, err := server.Exchange(authState.remotePublic)
 			if err != nil {
+				fmt.Printf("[Auth] SPAKE2 Server.Exchange() failed: %v\n", err)
 				status := AuthStatusResultUnknownError
 				authState.localResult = &status
 				return err
 			}
+			fmt.Printf("[Auth] SPAKE2 Server.Exchange() ok, public=%d bytes\n", len(localPublic))
 
 			err = c.sendAuthSpake2Handshake(localPublic)
 			if err != nil {
@@ -471,13 +487,16 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	if authState.status == authStatusAwaitConfirmation {
 		if authState.remoteConfirmation == nil {
+			fmt.Printf("[Auth] AwaitConfirmation: still waiting for remote confirmation\n")
 			return nil // continue waiting
 		}
+		fmt.Printf("[Auth] AwaitConfirmation: have remote confirmation (%d bytes), role=%s\n", len(authState.remoteConfirmation), role)
 
 		if role == AuthenticationRolePresenter {
 			client := authState.spakeState
 			err := client.Verify(authState.remoteConfirmation)
 			if err != nil {
+				fmt.Printf("[Auth] SPAKE2 Client.Verify() failed: %v\n", err)
 				status := AuthStatusResultUnknownError
 				if err == spake2.ErrInvalidConfirmation {
 					status = AuthStatusResultProofInvalid
@@ -485,10 +504,12 @@ func (c *baseConnection) authenticatePSKProgress() error {
 				authState.localResult = &status
 				return err
 			}
+			fmt.Printf("[Auth] SPAKE2 Client.Verify() ok\n")
 		} else {
 			server := authState.spakeState
 			localConfirmation, err := server.Confirm(authState.remoteConfirmation)
 			if err != nil {
+				fmt.Printf("[Auth] SPAKE2 Server.Confirm() failed: %v\n", err)
 				status := AuthStatusResultUnknownError
 				if err == spake2.ErrInvalidConfirmation {
 					status = AuthStatusResultProofInvalid
@@ -496,6 +517,7 @@ func (c *baseConnection) authenticatePSKProgress() error {
 				authState.localResult = &status
 				return err
 			}
+			fmt.Printf("[Auth] SPAKE2 Server.Confirm() ok, confirmation=%d bytes\n", len(localConfirmation))
 
 			err = c.sendAuthSpake2Confirmation(localConfirmation)
 			if err != nil {
@@ -510,7 +532,7 @@ func (c *baseConnection) authenticatePSKProgress() error {
 		if err != nil {
 			return err
 		}
-		// fmt.Printf("%v: shared secret: %x\n", role, authState.sharedSecret)
+		fmt.Printf("[Auth] %v: shared secret: %x\n", role, authState.sharedSecret[:8])
 
 		err = c.sendAuthStatus()
 		if err != nil {
@@ -522,8 +544,10 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	if authState.status == authStatusAwaitResult {
 		if authState.remoteResult == nil {
+			fmt.Printf("[Auth] AwaitResult: still waiting for remote result\n")
 			return nil // continue waiting
 		}
+		fmt.Printf("[Auth] AwaitResult: got remote result\n")
 
 		close(authState.done)
 
@@ -531,6 +555,7 @@ func (c *baseConnection) authenticatePSKProgress() error {
 	}
 
 	if authState.status == authStatusDone {
+		fmt.Printf("[Auth] Done\n")
 		return nil
 	}
 
@@ -568,9 +593,9 @@ func (c *baseConnection) sendAuthSpake2Handshake(publicValue []byte) error {
 	// }
 
 	msg := &msgAuthSpake2Handshake{
-		PublicValue: publicValue,
-		PskStatus:   pskStatus,
-		// AuthInitiationToken: at,
+		AuthInitiationToken: msgAuthInitiationToken{},
+		PublicValue:         publicValue,
+		PskStatus:           pskStatus,
 	}
 
 	err := writeMessage(msg, c.netConn)
@@ -667,6 +692,8 @@ func (c *baseConnection) handleAuthCapabilities(msg *msgAuthCapabilities) error 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	fmt.Printf("[Auth] handleAuthCapabilities: EaseOfInput=%d, MinBitsOfEntropy=%d\n", msg.PskEaseOfInput, msg.PskMinBitsOfEntropy)
+
 	c.remoteAgent.setAuthenticationInfo(AgentAuthenticationInfo{
 		PSKConfig: PSKConfig{
 			EaseOfInput: int(msg.PskEaseOfInput),
@@ -702,6 +729,8 @@ func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	fmt.Printf("[Auth] handleAuthSpake2Handshake: PublicValue=%d bytes, PskStatus=%d\n", len(msg.PublicValue), msg.PskStatus)
+
 	// err := c.validateAuthInitiationToken(msg.AuthInitiationToken)
 	// if err != nil {
 	// 	return err
@@ -725,6 +754,8 @@ func (c *baseConnection) handleAuthSpake2Confirmation(msg *msgAuthSpake2Confirma
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	fmt.Printf("[Auth] handleAuthSpake2Confirmation: ConfirmationValue=%d bytes\n", len(msg.ConfirmationValue))
+
 	authState := c.authenticationState
 	if authState == nil {
 		return errors.New("unsolicited auth-spake2-confirmation")
@@ -738,6 +769,8 @@ func (c *baseConnection) handleAuthSpake2Confirmation(msg *msgAuthSpake2Confirma
 func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	fmt.Printf("[Auth] handleAuthStatus: Result=%v\n", msg.Result)
 
 	authState := c.authenticationState
 	if authState == nil {
