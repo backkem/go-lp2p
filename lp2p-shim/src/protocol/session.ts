@@ -208,7 +208,7 @@ export class Session {
   private control: ControlChannel | null = null;
   private readonly controlWaiters: ((c: ControlChannel) => void)[] = [];
   private readonly usedIds = new Set<number>();
-  private nextChannelId: number;
+  private readonly channelIdParity: number;
   private nextRequestId = 1;
   private readonly incoming: DataChannelEndpoint[] = [];
   private channelHandler: ((ep: DataChannelEndpoint) => void) | null = null;
@@ -220,8 +220,8 @@ export class Session {
   constructor(connection: TransportConnection, role: Role) {
     this.connection = connection;
     this.role = role;
-    // Like SCTP stream IDs: one side allocates even IDs, the other odd.
-    this.nextChannelId = role === "requester" ? 0 : 1;
+    // The requester (QUIC client) allocates even IDs, the receiver odd ones.
+    this.channelIdParity = role === "requester" ? 0 : 1;
     if (role === "requester") this.setControl(new ControlChannel(connection.openStream()));
     connection.onstream = (s) => this.classify(s);
     connection.onclose = (reason) => {
@@ -268,17 +268,22 @@ export class Session {
     return res.agentInfo;
   }
 
-  /** Allocates a channel ID, or validates and reserves a requested one. */
+  /**
+   * Allocates the lowest free channel ID of the local parity, or validates
+   * and reserves a requested one, which must be free and of that parity.
+   */
   reserveChannelId(requested?: number): number {
     if (requested !== undefined) {
+      if (requested % 2 !== this.channelIdParity) {
+        throw new DOMException(`data channel id ${requested} has the peer's parity`, "OperationError");
+      }
       if (this.usedIds.has(requested)) throw new DOMException(`data channel id ${requested} is in use`, "OperationError");
       this.usedIds.add(requested);
       return requested;
     }
-    while (this.usedIds.has(this.nextChannelId)) this.nextChannelId += 2;
-    if (this.nextChannelId > 65534) throw new DOMException("out of data channel ids", "OperationError");
-    const id = this.nextChannelId;
-    this.nextChannelId += 2;
+    let id = this.channelIdParity;
+    while (this.usedIds.has(id)) id += 2;
+    if (id > 65534) throw new DOMException("out of data channel ids", "OperationError");
     this.usedIds.add(id);
     return id;
   }

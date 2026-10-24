@@ -77,9 +77,15 @@ test("session: data channels open with 1101/1102 and carry data-frames", async (
     ep.send(1, new TextEncoder().encode("hello"));
     assert.deepEqual(await got, [1, "hello"]);
 
-    // Receiver-allocated IDs are odd; explicit IDs must be free.
+    // Receiver-allocated IDs are odd; explicit IDs must be free and of the
+    // local parity.
     assert.equal(rcv.reserveChannelId(), 1);
     assert.throws(() => req.reserveChannelId(0), { name: "OperationError" });
+    assert.throws(() => req.reserveChannelId(3), { name: "OperationError" });
+    assert.equal(req.reserveChannelId(4), 4);
+    assert.equal(req.reserveChannelId(), 2); // lowest free even ID
+    req.releaseChannelId(2);
+    req.releaseChannelId(4);
 
     // Closing on one side closes the other.
     const closed = new Promise<void>((r) => (remote.onclose = r));
@@ -96,8 +102,10 @@ test("session: data channels open with 1101/1102 and carry data-frames", async (
 test("session: a channel ID the peer already uses is refused", async () => {
   const { req, rcv, done } = await sessions();
   try {
-    rcv.reserveChannelId(4);
-    const ep = req.openDataChannel({ id: req.reserveChannelId(4), label: "x", protocol: "" });
+    // Peer-parity IDs are accepted, but not one in use. A conforming
+    // requester never sends the receiver's ID 1.
+    assert.equal(rcv.reserveChannelId(), 1);
+    const ep = req.openDataChannel({ id: 1, label: "x", protocol: "" });
     const err = new Promise<Error>((r) => (ep.onerror = r));
     const closed = new Promise<void>((r) => (ep.onclose = r));
     assert.match((await err).message, /refused/);

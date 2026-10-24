@@ -139,12 +139,14 @@ test("api: data types, binaryType, ordering behind Blobs, ids and protocol", asy
     assert.ok(data instanceof Blob);
     assert.deepEqual(new Uint8Array(await data.arrayBuffer()), new Uint8Array([9]));
 
-    // Receiver-created channels get odd ids; explicit ids are honored.
+    // Receiver-created channels get odd ids; explicit ids must be free and
+    // of the local parity.
     const back = remote.createDataChannel("back");
     assert.equal(back.id, 1);
     const explicit = local.createDataChannel("explicit", { id: 42 });
     assert.equal(explicit.id, 42);
     assert.throws(() => local.createDataChannel("dup", { id: 42 }), { name: "OperationError" });
+    assert.throws(() => local.createDataChannel("odd", { id: 43 }), { name: "OperationError" });
     assert.throws(() => local.createDataChannel("big", { id: 70000 }), TypeError);
     local.close();
   } finally {

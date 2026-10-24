@@ -1447,7 +1447,7 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
     control = null;
     controlWaiters = [];
     usedIds = /* @__PURE__ */ new Set();
-    nextChannelId;
+    channelIdParity;
     nextRequestId = 1;
     incoming = [];
     channelHandler = null;
@@ -1457,7 +1457,7 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
     constructor(connection, role) {
       this.connection = connection;
       this.role = role;
-      this.nextChannelId = role === "requester" ? 0 : 1;
+      this.channelIdParity = role === "requester" ? 0 : 1;
       if (role === "requester") this.setControl(new ControlChannel(connection.openStream()));
       connection.onstream = (s) => this.classify(s);
       connection.onclose = (reason) => {
@@ -1497,17 +1497,22 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       this.remoteInfo = res.agentInfo;
       return res.agentInfo;
     }
-    /** Allocates a channel ID, or validates and reserves a requested one. */
+    /**
+     * Allocates the lowest free channel ID of the local parity, or validates
+     * and reserves a requested one, which must be free and of that parity.
+     */
     reserveChannelId(requested) {
       if (requested !== void 0) {
+        if (requested % 2 !== this.channelIdParity) {
+          throw new DOMException(`data channel id ${requested} has the peer's parity`, "OperationError");
+        }
         if (this.usedIds.has(requested)) throw new DOMException(`data channel id ${requested} is in use`, "OperationError");
         this.usedIds.add(requested);
         return requested;
       }
-      while (this.usedIds.has(this.nextChannelId)) this.nextChannelId += 2;
-      if (this.nextChannelId > 65534) throw new DOMException("out of data channel ids", "OperationError");
-      const id = this.nextChannelId;
-      this.nextChannelId += 2;
+      let id = this.channelIdParity;
+      while (this.usedIds.has(id)) id += 2;
+      if (id > 65534) throw new DOMException("out of data channel ids", "OperationError");
       this.usedIds.add(id);
       return id;
     }

@@ -153,9 +153,10 @@ and the LP2P extension messages (spec Appendix A) on the wire:
    `result` = 1 success) on the same stream *before* any data. The opener's channel opens when the
    response arrives. Then both sides send `data-frame` (24: key 0 = encoding-id, key 4 = payload; the
    other OSP data-frame keys are ignored on receipt). Closing the stream closes the channel.
-4. **Channel IDs**: the requester allocates even IDs and the receiver odd ones, as SCTP does with
-   DTLS roles. An explicit `id` from `LP2PDataChannelInit` is used as given. A collision throws
-   `OperationError` locally, and an open request for an ID in use is answered with
+4. **Channel IDs**: the requester (QUIC client) allocates the lowest free even ID and the receiver
+   the lowest free odd one, as go-lp2p and openscreen do. An explicit `id` from
+   `LP2PDataChannelInit` that is in use or has the peer's parity throws `OperationError`. Open
+   requests are accepted whatever the ID's parity, but one for an ID in use is answered with
    `permanent-error`.
 
 ### Transports

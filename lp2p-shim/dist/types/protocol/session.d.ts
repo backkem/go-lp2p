@@ -59,7 +59,7 @@ export declare class Session {
     private control;
     private readonly controlWaiters;
     private readonly usedIds;
-    private nextChannelId;
+    private readonly channelIdParity;
     private nextRequestId;
     private readonly incoming;
     private channelHandler;
@@ -76,7 +76,10 @@ export declare class Session {
     controlChannel(signal?: AbortSignal): Promise<ControlChannel>;
     /** Exchanges agent-info: answers the peer's request and asks for the peer's. */
     handshake(local: AgentInfo, signal?: AbortSignal): Promise<AgentInfo>;
-    /** Allocates a channel ID, or validates and reserves a requested one. */
+    /**
+     * Allocates the lowest free channel ID of the local parity, or validates
+     * and reserves a requested one, which must be free and of that parity.
+     */
     reserveChannelId(requested?: number): number;
     releaseChannelId(id: number): void;
     /** Opens a data channel; params.id must come from reserveChannelId. */
