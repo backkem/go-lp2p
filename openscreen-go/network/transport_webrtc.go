@@ -309,6 +309,11 @@ func (c *DTLSNetworkConnection) Read(p []byte) (int, error) {
 	return c.base.ReadInterruptible(p)
 }
 
+// ReadMessage reads the next message from the DTLS byte stream.
+func (c *DTLSNetworkConnection) ReadMessage() (interface{}, error) {
+	return readMessage(c)
+}
+
 func (c *DTLSNetworkConnection) Write(p []byte) (int, error) {
 	err := c.closeError()
 	if err != nil {

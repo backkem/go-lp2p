@@ -85,10 +85,14 @@ func readBytes(r io.Reader, b []byte) error {
 	end := len(b)
 	for start < end {
 		n, err := r.Read(b[start:end])
+		start += n
 		if err != nil {
+			// A reader may return the final bytes together with io.EOF.
+			if err == io.EOF && start == end {
+				return nil
+			}
 			return err
 		}
-		start += n
 	}
 	return nil
 }

@@ -213,7 +213,7 @@ func (l *Listener) run() error {
 		},
 	}
 
-	t, err := NewNetworkTransport(l.transportType)
+	t, err := newAgentTransport(l.transportType, l.agent.keepAlive)
 	if err != nil {
 		return err
 	}

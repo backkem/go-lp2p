@@ -13,9 +13,13 @@ var ErrTransportClosed = errors.New("transport closed")
 var ErrTransportHandedOff = errors.New("transport handed off")
 
 func NewNetworkTransport(typ AgentTransport) (NetworkTransport, error) {
+	return newAgentTransport(typ, KeepAliveConfig{})
+}
+
+func newAgentTransport(typ AgentTransport, keepAlive KeepAliveConfig) (NetworkTransport, error) {
 	switch typ {
 	case AgentTransportQUIC:
-		return &QuicTransport{}, nil
+		return &QuicTransport{KeepAlive: keepAlive}, nil
 
 	case AgentTransportWebRTC:
 		return &DTLSTransport{}, nil
@@ -38,7 +42,12 @@ type NetworkListener interface {
 // Abstract connection for the network protocol, responsible for getting
 // extended agent capabilities and performing the authentication ceremony.
 type NetworkConnection interface {
-	io.ReadWriteCloser
+	// Write sends a single serialized message.
+	io.WriteCloser
+	// ReadMessage returns the next received message. Transports with multiple
+	// streams read them independently: ordering is only preserved for
+	// messages within the same stream.
+	ReadMessage() (interface{}, error)
 	// Determines if this connection supports reliable delivery. If not, the
 	// network protocol agent needs to perform timeout & retransmission.
 	IsReliable() bool

@@ -88,7 +88,7 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	}
 	addr := fmt.Sprintf("%s:%d", getMdnsHost(ra.info), ra.info.Port)
 
-	t, err := NewNetworkTransport(transportType)
+	t, err := newAgentTransport(transportType, la.keepAlive)
 	if err != nil {
 		return nil, err
 	}

@@ -45,6 +45,9 @@ type AgentConfig struct {
 	PSKConfig PSKConfig
 
 	SupportedTransports []AgentTransport
+
+	// KeepAlive configures the connection keep-alive.
+	KeepAlive KeepAliveConfig
 }
 
 func NewAgentConfig(nickname string) AgentConfig {
@@ -88,6 +91,8 @@ type Agent struct {
 	authenticationInfo *AgentAuthenticationInfo
 
 	knownPeers map[PeerID]knownPeer
+
+	keepAlive KeepAliveConfig
 }
 
 type knownPeer struct {
@@ -171,6 +176,8 @@ func NewAgent(c AgentConfig) (*Agent, error) {
 	if c.PSKConfig.Entropy != 0 {
 		agent.authenticationInfo.PSKConfig.Entropy = c.PSKConfig.Entropy
 	}
+
+	agent.keepAlive = c.KeepAlive
 
 	return agent, nil
 }

@@ -792,10 +792,21 @@ func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus) error {
 	return c.authenticatePSKProgress()
 }
 
+func (c *baseConnection) handleAgentStatusRequest(msg *msgAgentStatusRequest) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return writeMessage(&msgAgentStatusResponse{
+		msgResponse: msgResponse{
+			RequestId: msg.RequestId,
+		},
+	}, c.netConn)
+}
+
 func (c *baseConnection) runNetwork() {
 	go func() {
 		for {
-			msg, err := readMessage(c.netConn)
+			msg, err := c.netConn.ReadMessage()
 			if err != nil {
 				fmt.Printf("network protocol: failed to read message: %v\n", err)
 				// c.closeWithError(fmt.Errorf("failed to read message: %v", err))
@@ -834,6 +845,13 @@ func (c *baseConnection) handleNetworkMessage(msg interface{}) (err error) {
 
 	case *msgAuthStatus:
 		err = c.handleAuthStatus(typedMsg)
+
+	case *msgAgentStatusRequest:
+		// Only reached on transports that don't answer keep-alives themselves.
+		err = c.handleAgentStatusRequest(typedMsg)
+
+	case *msgAgentStatusResponse:
+		// Keep-alive response, nothing to do.
 
 	default:
 		fmt.Printf("baseConnection: unhandled message type: %T\n", typedMsg)
