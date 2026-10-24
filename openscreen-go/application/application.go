@@ -298,4 +298,22 @@ func (c *ApplicationConnection) ReceiveAgentInfoRequest(ctx context.Context) (*o
 	return &req, respond, nil
 }
 
+// AnswerAgentInfoRequest answers msg, a received agent-info-request, with
+// the local agent's agent-info (see ospc.Agent.AgentInfoMessage). After the
+// network phase a peer may send agent-info-request at any time, and it
+// arrives through ReceiveMessage like any other message.
+func (c *ApplicationConnection) AnswerAgentInfoRequest(ctx context.Context, msg *Message) error {
+	if msg.TypeKey != ospc.TypeKeyAgentInfoRequest {
+		return fmt.Errorf("unexpected message type %d, expected %d", msg.TypeKey, ospc.TypeKeyAgentInfoRequest)
+	}
+	var req ospc.MsgAgentInfoRequest
+	if err := msg.Decode(&req); err != nil {
+		return fmt.Errorf("failed to read request: %w", err)
+	}
+	return c.SendMessage(ctx, ospc.TypeKeyAgentInfoResponse, &ospc.MsgAgentInfoResponse{
+		RequestID: req.RequestID,
+		AgentInfo: c.LocalAgent().AgentInfoMessage(),
+	})
+}
+
 var _ io.Closer = (*ApplicationConnection)(nil)

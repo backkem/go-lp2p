@@ -652,21 +652,12 @@ func (c *baseConnection) sendAuthStatus() error {
 }
 
 func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest) error {
-	localInfo := c.localAgent.Info()
+	info := c.localAgent.AgentInfoMessage()
 	return c.send(&msgAgentInfoResponse{
 		msgResponse: msgResponse{
 			RequestId: msg.RequestId,
 		},
-		AgentInfo: msgAgentInfo{
-			DisplayName: localInfo.DisplayName,
-			ModelName:   localInfo.ModelName,
-			Capabilities: []msgAgentCapability{
-				AgentCapabilityDataChannels,
-				AgentCapabilityQuickTransport,
-			},
-			StateToken: c.localAgent.StateToken(),
-			Locales:    localInfo.Locales,
-		},
+		AgentInfo: msgAgentInfo(info),
 	})
 }
 

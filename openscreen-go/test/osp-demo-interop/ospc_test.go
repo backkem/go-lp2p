@@ -134,6 +134,10 @@ func newQuirkAgent(t *testing.T, name string, q ospc.InteropQuirks, logs *logBuf
 	t.Helper()
 	conf := ospc.NewAgentConfig(name)
 	conf.InteropQuirks = q
+	// application.bs "Presentation API": controllers advertise
+	// control-presentation, receivers receive-presentation. The harness
+	// agents act as either.
+	conf.Capabilities = []ospc.AgentCapability{ospc.CapabilityReceivePresentation, ospc.CapabilityControlPresentation}
 	// The one accepted deviation: SPAKE2 over P-256, as osp_demo with
 	// --spake2_suite=p256 (see demoAuthArgs). network.bs requires
 	// edwards25519, which neither side implements.
@@ -200,51 +204,46 @@ func skipIfGated(t *testing.T, app *application.ApplicationConnection, d *ospDem
 	}
 }
 
-// expectMessage waits for an application message of type typeKey. It answers
-// agent-info-request and logs and discards anything else.
-func expectMessage(ctx context.Context, t *testing.T, app *application.ApplicationConnection, typeKey ospc.TypeKey) (map[uint64]any, error) {
+// expectMessage waits for an application message of type typeKey and
+// decodes it into v. It answers agent-info-request and logs and discards
+// anything else.
+func expectMessage(ctx context.Context, t *testing.T, app *application.ApplicationConnection, typeKey ospc.TypeKey, v any) error {
 	for {
 		msg, err := app.ReceiveMessage(ctx)
 		if err != nil {
-			return nil, err
+			return err
+		}
+		if msg.TypeKey == typeKey {
+			if err := msg.Decode(v); err != nil {
+				return fmt.Errorf("%s: %w", application.MessageName(typeKey), err)
+			}
+			t.Logf("<-- %s %+v", application.MessageName(typeKey), v)
+			return nil
 		}
 		var body any
-		if err := msg.Decode(&body); err != nil {
-			return nil, fmt.Errorf("type %d: %w", msg.TypeKey, err)
-		}
-		m := normalizeMap(body)
-		t.Logf("<-- type=%d body=%v", msg.TypeKey, m)
-		if msg.TypeKey == typeKey {
-			return m, nil
-		}
+		_ = msg.Decode(&body)
+		t.Logf("<-- %s %v (not waited for)", application.MessageName(msg.TypeKey), body)
 		if msg.TypeKey == ospc.TypeKeyAgentInfoRequest {
-			info := app.LocalAgent().Info()
-			_ = app.SendMessage(ctx, ospc.TypeKeyAgentInfoResponse, map[uint64]any{0: m[0], 1: map[uint64]any{
-				0: info.DisplayName, 1: info.ModelName, 2: []uint64{3}, 3: app.LocalAgent().StateToken(), 4: []string{"en"},
-			}})
+			_ = app.AnswerAgentInfoRequest(ctx, msg)
 		}
 	}
 }
 
-// request sends a request with a fresh request-id at key 0 and waits for
-// the correlated response.
-func request(ctx context.Context, t *testing.T, app *application.ApplicationConnection, reqType ospc.TypeKey, body map[uint64]any, respType ospc.TypeKey) (map[uint64]any, error) {
-	id := app.NextRequestID()
-	body[0] = uint64(id)
-	t.Logf("--> type=%d body=%v", reqType, body)
-	var resp any
-	if err := app.Request(ctx, reqType, id, body, respType, &resp); err != nil {
-		return nil, err
+// request sends req, whose request-id the caller allocated with
+// NextRequestID, and decodes the correlated response into resp.
+func request(ctx context.Context, t *testing.T, app *application.ApplicationConnection, reqType ospc.TypeKey, id ospc.RequestID, req any, respType ospc.TypeKey, resp any) error {
+	t.Logf("--> %s %+v", application.MessageName(reqType), req)
+	if err := app.Request(ctx, reqType, id, req, respType, resp); err != nil {
+		return err
 	}
-	m := normalizeMap(resp)
-	t.Logf("<-- type=%d body=%v", respType, m)
-	return m, nil
+	t.Logf("<-- %s %+v", application.MessageName(respType), resp)
+	return nil
 }
 
-func send(ctx context.Context, t *testing.T, app *application.ApplicationConnection, typeKey ospc.TypeKey, body map[uint64]any) {
+func send(ctx context.Context, t *testing.T, app *application.ApplicationConnection, typeKey ospc.TypeKey, msg any) {
 	t.Helper()
-	t.Logf("--> type=%d body=%v", typeKey, body)
-	if err := app.SendMessage(ctx, typeKey, body); err != nil {
+	t.Logf("--> %s %+v", application.MessageName(typeKey), msg)
+	if err := app.SendMessage(ctx, typeKey, msg); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -342,20 +341,22 @@ func TestOSPCDialPublisher(t *testing.T) {
 		var quirks []string
 		defer report.record(t, &quirks)
 		requireStage(t, app != nil, "03-authenticate")
-		m, err := request(withTimeout(t, stepTimeout), t, app, tkPresentationURLAvailabilityReq, map[uint64]any{
-			1: []string{testURL}, 2: uint64(60_000_000), 3: uint64(1),
-		}, tkPresentationURLAvailabilityResp)
+		id := app.NextRequestID()
+		var resp application.PresentationURLAvailabilityResponse
+		err := request(withTimeout(t, stepTimeout), t, app,
+			application.TypeKeyPresentationURLAvailabilityRequest, id, &application.PresentationURLAvailabilityRequest{
+				RequestID: id, URLs: []string{testURL}, WatchDuration: 60_000_000, WatchID: 1,
+			}, application.TypeKeyPresentationURLAvailabilityResponse, &resp)
 		if err != nil {
 			skipIfDemoCrashed(t, pub)
 			skipIfGated(t, app, pub, err)
 			t.Fatal(err)
 		}
-		avail, _ := m[1].([]any)
-		if len(avail) != 1 {
-			t.Fatalf("url-availabilities = %v, want one entry", m[1])
+		if len(resp.URLAvailabilities) != 1 {
+			t.Fatalf("url-availabilities = %v, want one entry", resp.URLAvailabilities)
 		}
-		if v, _ := asUint(avail[0]); v != 0 {
-			t.Fatalf("url-availability = %v, want 0 (available)", avail[0])
+		if v := resp.URLAvailabilities[0]; v != application.URLAvailable {
+			t.Fatalf("url-availability = %v, want 0 (available)", v)
 		}
 		availOK = true
 	})
@@ -364,16 +365,19 @@ func TestOSPCDialPublisher(t *testing.T) {
 		var quirks []string
 		defer report.record(t, &quirks)
 		requireStage(t, availOK, "04-presentation-url-availability")
-		m, err := request(withTimeout(t, stepTimeout), t, app, tkPresentationStartRequest, map[uint64]any{
-			1: presentationID, 2: testURL, 3: []any{},
-		}, tkPresentationStartResponse)
+		id := app.NextRequestID()
+		var resp application.PresentationStartResponse
+		err := request(withTimeout(t, stepTimeout), t, app,
+			application.TypeKeyPresentationStartRequest, id, &application.PresentationStartRequest{
+				RequestID: id, PresentationID: presentationID, URL: testURL,
+			}, application.TypeKeyPresentationStartResponse, &resp)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r, _ := asUint(m[1]); r != 1 {
-			t.Fatalf("result = %v, want 1 (success)", m[1])
+		if resp.Result != application.ResultSuccess {
+			t.Fatalf("result = %v, want 1 (success)", resp.Result)
 		}
-		connectionID, _ = asUint(m[2])
+		connectionID = resp.ConnectionID
 		startOK = true
 	})
 
@@ -383,17 +387,17 @@ func TestOSPCDialPublisher(t *testing.T) {
 		requireStage(t, startOK, "05-presentation-start")
 		const text = "hello from go"
 		ctx := withTimeout(t, stepTimeout)
-		send(ctx, t, app, tkPresentationConnectionMessage, map[uint64]any{0: connectionID, 1: text})
+		send(ctx, t, app, application.TypeKeyPresentationConnectionMessage, &application.PresentationConnectionMessage{ConnectionID: connectionID, Message: text})
 		if l, ok := pub.WaitFor(`got message: `+text, stepTimeout); ok {
 			t.Logf("osp_demo: %s", l)
 		} else {
 			t.Errorf("osp_demo did not log the message")
 		}
-		m, err := expectMessage(ctx, t, app, tkPresentationConnectionMessage)
-		if err != nil {
+		var m application.PresentationConnectionMessage
+		if err := expectMessage(ctx, t, app, application.TypeKeyPresentationConnectionMessage, &m); err != nil {
 			t.Fatal(err)
 		}
-		if got := fmt.Sprint(m[1]); got != "--echo-- "+text {
+		if got := fmt.Sprint(m.Message); got != "--echo-- "+text {
 			t.Errorf("echo = %q, want %q", got, "--echo-- "+text)
 		}
 	})
@@ -402,14 +406,17 @@ func TestOSPCDialPublisher(t *testing.T) {
 		var quirks []string
 		defer report.record(t, &quirks)
 		requireStage(t, startOK, "05-presentation-start")
-		m, err := request(withTimeout(t, stepTimeout), t, app, tkPresentationTerminationRequest, map[uint64]any{
-			1: presentationID, 2: uint64(1),
-		}, tkPresentationTerminationResponse)
+		id := app.NextRequestID()
+		var resp application.PresentationTerminationResponse
+		err := request(withTimeout(t, stepTimeout), t, app,
+			application.TypeKeyPresentationTerminationRequest, id, &application.PresentationTerminationRequest{
+				RequestID: id, PresentationID: presentationID, Reason: application.TerminationReasonApplicationRequest,
+			}, application.TypeKeyPresentationTerminationResponse, &resp)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r, _ := asUint(m[1]); r != 1 {
-			t.Errorf("result = %v, want 1 (success)", m[1])
+		if resp.Result != application.ResultSuccess {
+			t.Errorf("result = %v, want 1 (success)", resp.Result)
 		}
 	})
 }
@@ -527,13 +534,15 @@ func TestOSPCListenController(t *testing.T) {
 		requireStage(t, app != nil, "02-authenticate")
 		ctx := withTimeout(t, stepTimeout)
 		ctrl.Send("avail " + testURL)
-		m, err := expectMessage(ctx, t, app, tkPresentationURLAvailabilityReq)
-		if err != nil {
+		var req application.PresentationURLAvailabilityRequest
+		if err := expectMessage(ctx, t, app, application.TypeKeyPresentationURLAvailabilityRequest, &req); err != nil {
 			skipIfDemoCrashed(t, ctrl)
 			skipIfGated(t, app, ctrl, err)
 			t.Fatalf("no presentation-url-availability-request: %v", err)
 		}
-		send(ctx, t, app, tkPresentationURLAvailabilityResp, map[uint64]any{0: m[0], 1: []uint64{0}})
+		send(ctx, t, app, application.TypeKeyPresentationURLAvailabilityResponse, &application.PresentationURLAvailabilityResponse{
+			RequestID: req.RequestID, URLAvailabilities: []application.URLAvailability{application.URLAvailable},
+		})
 		l, ok := ctrl.WaitFor(`available! |unavailable! |request failed`, stepTimeout)
 		if !ok || !strings.Contains(l, "available! "+name) || strings.Contains(l, "unavailable") {
 			t.Fatalf("osp_demo did not accept the availability response: %q", l)
@@ -551,17 +560,20 @@ func TestOSPCListenController(t *testing.T) {
 		requireStage(t, availOK, "03-presentation-url-availability")
 		ctx := withTimeout(t, stepTimeout)
 		ctrl.Send("start " + testURL + " " + name)
-		m, err := expectMessage(ctx, t, app, tkPresentationStartRequest)
-		if err != nil {
+		var req application.PresentationStartRequest
+		if err := expectMessage(ctx, t, app, application.TypeKeyPresentationStartRequest, &req); err != nil {
 			t.Fatal(err)
 		}
-		id := fmt.Sprint(m[1])
-		if err := application.ValidatePresentationID(id); err != nil {
-			send(ctx, t, app, tkPresentationStartResponse, map[uint64]any{0: m[0], 1: uint64(11)}) // invalid-presentation-id
+		if err := application.ValidatePresentationID(req.PresentationID); err != nil {
+			send(ctx, t, app, application.TypeKeyPresentationStartResponse, &application.PresentationStartResponse{
+				RequestID: req.RequestID, Result: application.ResultInvalidPresentationID,
+			})
 			t.Fatalf("osp_demo sent an invalid presentation-id: %v", err)
 		}
-		presentationID = id
-		send(ctx, t, app, tkPresentationStartResponse, map[uint64]any{0: m[0], 1: uint64(1), 2: connectionID})
+		presentationID = req.PresentationID
+		send(ctx, t, app, application.TypeKeyPresentationStartResponse, &application.PresentationStartResponse{
+			RequestID: req.RequestID, Result: application.ResultSuccess, ConnectionID: connectionID,
+		})
 		l, ok := ctrl.WaitFor(`request successful|on request error|presentation connection connected`, stepTimeout)
 		if !ok || strings.Contains(l, "error") {
 			t.Fatalf("osp_demo did not accept the start response: %q", l)
@@ -576,14 +588,14 @@ func TestOSPCListenController(t *testing.T) {
 		requireStage(t, startOK, "04-presentation-start")
 		ctx := withTimeout(t, stepTimeout)
 		ctrl.Send("msg hello from cpp")
-		m, err := expectMessage(ctx, t, app, tkPresentationConnectionMessage)
-		if err != nil {
+		var m application.PresentationConnectionMessage
+		if err := expectMessage(ctx, t, app, application.TypeKeyPresentationConnectionMessage, &m); err != nil {
 			t.Fatal(err)
 		}
-		if got := fmt.Sprint(m[1]); got != "hello from cpp" {
+		if got := fmt.Sprint(m.Message); got != "hello from cpp" {
 			t.Errorf("message = %q", got)
 		}
-		send(ctx, t, app, tkPresentationConnectionMessage, map[uint64]any{0: connectionID, 1: "hello from go"})
+		send(ctx, t, app, application.TypeKeyPresentationConnectionMessage, &application.PresentationConnectionMessage{ConnectionID: connectionID, Message: "hello from go"})
 		if l, ok := ctrl.WaitFor(`got message: hello from go`, stepTimeout); ok {
 			t.Logf("osp_demo: %s", l)
 		} else {
@@ -597,14 +609,16 @@ func TestOSPCListenController(t *testing.T) {
 		requireStage(t, startOK, "04-presentation-start")
 		ctx := withTimeout(t, stepTimeout)
 		ctrl.Send("term")
-		m, err := expectMessage(ctx, t, app, tkPresentationTerminationRequest)
-		if err != nil {
+		var req application.PresentationTerminationRequest
+		if err := expectMessage(ctx, t, app, application.TypeKeyPresentationTerminationRequest, &req); err != nil {
 			t.Fatal(err)
 		}
-		if got := fmt.Sprint(m[1]); got != presentationID {
-			t.Errorf("presentation-id = %q, want %q", got, presentationID)
+		if req.PresentationID != presentationID {
+			t.Errorf("presentation-id = %q, want %q", req.PresentationID, presentationID)
 		}
-		send(ctx, t, app, tkPresentationTerminationResponse, map[uint64]any{0: m[0], 1: uint64(1)})
+		send(ctx, t, app, application.TypeKeyPresentationTerminationResponse, &application.PresentationTerminationResponse{
+			RequestID: req.RequestID, Result: application.ResultSuccess,
+		})
 		if l, ok := ctrl.WaitFor(`(?i)terminat`, stepTimeout); ok {
 			t.Logf("osp_demo: %s", l)
 		}

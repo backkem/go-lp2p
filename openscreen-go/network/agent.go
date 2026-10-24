@@ -44,6 +44,13 @@ type AgentConfig struct {
 	ModelName   string
 	Locales     []string
 
+	// Capabilities are advertised in agent-info in addition to the ones ospc
+	// itself implements (data channels, QUIC transport). application.bs
+	// "Presentation API": a controlling user agent must support
+	// control-presentation (CapabilityControlPresentation), a receiving user
+	// agent receive-presentation (CapabilityReceivePresentation).
+	Capabilities []AgentCapability
+
 	// AuthInfo
 	PSKConfig PSKConfig
 
@@ -122,6 +129,8 @@ type Agent struct {
 
 	info               *AgentInfo
 	authenticationInfo *AgentAuthenticationInfo
+
+	capabilities []AgentCapability // Only set for local agents, see AgentConfig.Capabilities.
 
 	keepAlive KeepAliveConfig
 	log       *slog.Logger  // Only set for local agents.
@@ -217,6 +226,7 @@ func NewAgent(c AgentConfig) (*Agent, error) {
 		return nil, fmt.Errorf("PSK entropy %d bits out of range %d-%d", psk.Entropy, minPSKEntropy, maxPSKEntropy)
 	}
 
+	agent.capabilities = append([]AgentCapability(nil), c.Capabilities...)
 	agent.keepAlive = c.KeepAlive
 	agent.log = c.Logger
 	agent.quirks = c.InteropQuirks
@@ -289,6 +299,23 @@ func (a *Agent) Info() *AgentInfo {
 		ModelName:   a.info.ModelName,
 		StateToken:  a.info.StateToken,
 		Locales:     a.info.Locales,
+	}
+}
+
+// AgentInfoMessage returns the agent-info a local agent sends in an
+// agent-info-response: its display and model name, the capabilities ospc
+// implements plus AgentConfig.Capabilities, its state token and locales.
+func (a *Agent) AgentInfoMessage() MsgAgentInfo {
+	info := a.Info()
+	return MsgAgentInfo{
+		DisplayName: info.DisplayName,
+		ModelName:   info.ModelName,
+		Capabilities: append([]AgentCapability{
+			AgentCapabilityDataChannels,
+			AgentCapabilityQuickTransport,
+		}, a.capabilities...),
+		StateToken: a.StateToken(),
+		Locales:    info.Locales,
 	}
 }
 

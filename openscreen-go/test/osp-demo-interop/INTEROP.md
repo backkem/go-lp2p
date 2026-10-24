@@ -40,7 +40,8 @@ OSP_DEMO_LOG_DIR=/tmp/osp-logs \   # optional: osp_demo and ospc logs per test
 - Who presents (network.bs: lower `psk-ease-of-input`, the server on a tie):
   `OSP_GO_EASE_OF_INPUT` sets the ospc agents' ease of input (default 0),
   `OSP_DEMO_EASE_OF_INPUT` osp_demo's `--psk_ease_of_input` (default 50).
-- Harness mechanics: osp_demo runs in a temp cwd containing
+- Harness mechanics (package `test/ospdemo`, shared with
+  `examples/presentation-messages`): osp_demo runs in a temp cwd containing
   `osp/impl/quic/certificates/`. Its log is read from the `_recv_fifo`/`_cntl_fifo`
   FIFO, and it is driven through stdin. Cleanup kills its process group.
   Instance names carry a random suffix. The osp_demo publisher always binds port
@@ -50,8 +51,9 @@ OSP_DEMO_LOG_DIR=/tmp/osp-logs \   # optional: osp_demo and ospc logs per test
 
 - **ospc** (`ospc_test.go`): `TestOSPCDialPublisher` and `TestOSPCListenController`
   use the public `ospc` API (`Discoverer`, `DiscoveredAgent.Dial`, `Listen`/`Accept`,
-  `AuthenticatePSK`) and `application.ApplicationConnection` for the Presentation
-  API messages.
+  `AuthenticatePSK`) and `application.ApplicationConnection` with the typed
+  presentation messages of `application/presentation.go` (CDDL of
+  application_messages.cddl).
   - Each direction starts with **no quirks**. It enables a quirk only when an
     attempt fails the way that quirk addresses:
     - fingerprint mismatch: `AcceptCertificateFingerprint` when dialing,
