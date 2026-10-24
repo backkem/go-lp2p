@@ -1,20 +1,43 @@
-# Example data-channel
+# lp2p-data-channel
 
-This example demonstrates the LP2PDataChannel API for exchanging messages.
+Two pages chat over an `LP2PDataChannel`. The receiver's page advertises
+itself with `LP2PReceiver`. The requester's page calls `LP2PRequest.start()`,
+the user picks the receiver in the device picker, and the two devices pair
+with a PIN. The requester then opens a channel and sends three messages. The
+receiver answers each one, and the requester closes the channel. Closing is a
+handshake, so `onclose` fires on both sides.
 
-The example simulates both peers. It is configured to run in
-a non-interactive way, simulating user input.
+```sh
+go run ./examples/lp2p-data-channel >/dev/null
+go run ./examples/lp2p-data-channel -interactive >/dev/null  # pick and type the PIN yourself
+```
 
-## Example output
+## Output
+
+Device names carry a random suffix per run, so the example picks its own
+device even if other Open Screen agents on the network use the same name.
 
 ```
-The presenting browser (receiver) show a pin:
-Pin: 1234 (presented to user)
-The consuming browser (requester) asks the user to enter the pin.
-Pin: 1234 (entered by user)
-Requester: got connection
-Requester: got dataChannel
-Receiver: got connection
-Receiver: Received message: Good day to you, receiver!
-Requester: Received message: Good day to you, requester!
+[Receiver device] https://receiver-device.example wants to be discoverable as "Chat receiver #71c2": allowed
+[Requester device] https://requester-device.example ("Chat requester") shows the device picker
+[Requester device] user picked Chat receiver #71c2 (unverified)
+[Requester device] asks for the PIN shown on Chat receiver #71c2 (unverified)
+[Receiver device] https://receiver-device.example ("Chat receiver #71c2") wants to accept a connection from Chat requester (unverified): allowed
+[Receiver device] shows PIN 1076-4280 to pair with Chat requester (unverified)
+[Requester device] user enters PIN 1076-4280
+Receiver: got a connection
+Requester: got a connection
+Requester: channel open
+Receiver: got data channel "chat"
+Receiver: got "Hello receiver!"
+Receiver: got "How are you?"
+Receiver: got "Gotta go."
+Requester: got "Hi requester, receiver here."
+Requester: got "Doing fine, thanks. You?"
+Requester: got "Bye!"
+Receiver: channel closed
+Requester: channel closed
+done
 ```
+
+Lines in brackets are the browsers' UI: what the simulated users see and do.

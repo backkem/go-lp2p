@@ -23,6 +23,7 @@ The repository is a stack of layers, each usable on its own:
  examples/                 runnable end-to-end demos
      │
  lp2p-api/        (lp2p)   the LP2P web API, mirrored in Go
+     │      ├── useragent/         (ua)            a mock browser: permission prompts, device picker, PIN pairing
      │      ├── web-api/           (web)           events, the bits of the web platform it needs
      │      ├── streams-api/       (streams)       WHATWG Streams-style readers and writers
      │      └── webtransport-api/  (webtransport)  WebTransport-style sessions and streams
@@ -37,6 +38,7 @@ The repository is a stack of layers, each usable on its own:
 | Directory | Package | What it does |
 |---|---|---|
 | [`lp2p-api`](./lp2p-api/) | `lp2p` | The `LP2PReceiver`, `LP2PRequest`, `LP2PDataChannel` and `LP2PQuicTransport` interfaces from the proposal. It deliberately stays close to the web API instead of idiomatic Go (see [Coding conventions](#coding-conventions)). |
+| [`lp2p-api/useragent`](./lp2p-api/useragent/) | `ua` | A mock user agent hosting the API. It discovers peers continuously and drives a pluggable UI for permission prompts, the device picker and PIN pairing. The UI can be scripted (examples, tests) or interactive (terminal). It exists to illustrate the API, not as a product. |
 | [`openscreen-go/network`](./openscreen-go/network/) | `ospc` | The OSP network layer: mDNS advertising and browsing, QUIC with ALPN and certificate fingerprints, SPAKE2 PSK authentication, CBOR message framing, the data-channel extension and WebTransport over OSP. It also has an experimental WebRTC (DTLS/SCTP) transport. |
 | [`openscreen-go/application`](./openscreen-go/application/) | `application` | OSP application-protocol messages, plus examples and interop tests against [openscreen-rs](https://github.com/youtube/openscreen-rs). |
 | [`cast`](./cast/) | `cast` | The Google Cast channel as used by Chromium's Open Screen Library: TLS over TCP, length-prefixed protobuf `CastMessage`s, virtual connections, heartbeat, device authentication and `_googlecast._tcp` discovery. Not yet wired into the LP2P API; see its [README](./cast/README.md). |
@@ -51,27 +53,39 @@ You need Go 1.24 or newer.
 git clone https://github.com/backkem/go-lp2p
 cd go-lp2p
 
-# Exchange messages over an LP2PDataChannel
+# Chat over an LP2PDataChannel
 go run ./examples/lp2p-data-channel
 
-# Stream data over an LP2PQuicTransport
+# Pick one of several devices in the device picker
+go run ./examples/device-picker
+
+# See how denied permissions, a dismissed picker and a wrong PIN surface
+go run ./examples/pairing-failures
+
+# Stream 4 MiB over an LP2PQuicTransport and verify it
 go run ./examples/webtransport-pooled
 ```
 
-Each example runs both peers in a single process and simulates the user's
-part, such as showing and typing the pairing PIN:
+Each example runs every device in one process, each with its own mock
+browser, and simulates the users: granting permissions, picking a device, and
+reading the pairing PIN off one screen to type it on the other. ospc prints
+protocol debug output on stdout, so add `>/dev/null` to see just the example:
 
 ```
-The presenting browser (receiver) shows a pin:
-Pin: 1234 (presented to user)
-The consuming browser (requester) asks the user to enter the pin:
-Pin: 1234 (entered by user)
-Receiver: got connection
-Requester: got connection
-Requester: got dataChannel
-Requester: Received message: Good day to you, requester!
-Receiver: Received message: Good day to you, receiver!
+[Receiver device] https://receiver-device.example wants to be discoverable as "Chat receiver #3fa9": allowed
+[Requester device] https://requester-device.example ("Chat requester") shows the device picker
+[Requester device] user picked Chat receiver #3fa9 (unverified)
+[Receiver device] shows PIN 1406-6647 to pair with Chat requester (unverified)
+[Requester device] user enters PIN 1406-6647
+Receiver: got a connection
+Requester: got a connection
+Receiver: got "Hello receiver!"
+Requester: got "Hi requester, receiver here."
+...
 ```
+
+Pass `-interactive` to pick the device and type the PIN yourself. See
+[examples](./examples/) for more.
 
 Lower-level OSP examples live next to the code they demonstrate, in
 [`openscreen-go/network/examples`](./openscreen-go/network/examples/) and
@@ -88,11 +102,23 @@ go test -tags interop ./openscreen-go/application/...
 ## Status
 
 - **LP2P API**
-  - [x] Receiver and request, with user-agent PSK presentation and entry
-  - [x] `LP2PDataChannel`
-  - [x] `LP2PQuicTransport` over an OSP connection
+  - [x] `LP2PReceiver` and `LP2PRequest`, with WebIDL names and
+        `DOMException` errors
+  - [x] `LP2PDataChannel`, including events and a closing handshake
+  - [x] `LP2PQuicTransport` and `LP2PQuicTransportListener` over an OSP
+        connection (pooled)
   - [ ] `LP2PQuicTransport` over a dedicated QUIC connection
-  - [ ] User-agent peer listing and selection
+  - [ ] Teardown in the proposal itself: `LP2PConnection.Close` and
+        `LP2PReceiver.Close` are Go-only additions
+- **Mock user agent**
+  - [x] Permission prompts for advertising and for each incoming connection
+  - [x] Continuous discovery and a live device picker (peer listing and
+        selection)
+  - [x] PIN presentation and entry
+  - [x] Scripted and interactive (terminal) UIs
+  - [ ] Peers disappearing from the picker (ospc discovery doesn't report
+        removals yet)
+  - [ ] Remembered grants: every connection prompts and pairs again
 - **Open Screen Protocol**
   - [x] Discovery, listen and dial
   - [x] SPAKE2 authentication
