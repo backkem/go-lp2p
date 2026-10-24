@@ -30,6 +30,8 @@ The repository is a stack of layers, each usable on its own:
  openscreen-go/            a Go implementation of the Open Screen Protocol
      ├── network/          (ospc)  discovery, QUIC transport, SPAKE2 auth, agent-info
      └── application/              application protocol messages on top of the network layer
+
+ cast/                     a Go implementation of the Google Cast channel, as a sibling transport
 ```
 
 | Directory | Package | What it does |
@@ -37,6 +39,7 @@ The repository is a stack of layers, each usable on its own:
 | [`lp2p-api`](./lp2p-api/) | `lp2p` | The `LP2PReceiver`, `LP2PRequest`, `LP2PDataChannel` and `LP2PQuicTransport` interfaces from the proposal. It deliberately stays close to the web API instead of idiomatic Go (see [Coding conventions](#coding-conventions)). |
 | [`openscreen-go/network`](./openscreen-go/network/) | `ospc` | The OSP network layer: mDNS advertising and browsing, QUIC with ALPN and certificate fingerprints, SPAKE2 PSK authentication, CBOR message framing, the data-channel extension and WebTransport over OSP. It also has an experimental WebRTC (DTLS/SCTP) transport. |
 | [`openscreen-go/application`](./openscreen-go/application/) | `application` | OSP application-protocol messages, plus examples and interop tests against [openscreen-rs](https://github.com/youtube/openscreen-rs). |
+| [`cast`](./cast/) | `cast` | The Google Cast channel as used by Chromium's Open Screen Library: TLS over TCP, length-prefixed protobuf `CastMessage`s, virtual connections, heartbeat, device authentication and `_googlecast._tcp` discovery. Not yet wired into the LP2P API; see its [README](./cast/README.md). |
 | [`streams-api`](./streams-api/), [`webtransport-api`](./webtransport-api/), [`web-api`](./web-api/) | `streams`, `webtransport`, `web` | Small Go shims for the web platform APIs that LP2P builds on. |
 | [`src`](./src/) | — | TypeScript typings generated from the proposal's WebIDL (`npm run idl`), plus a sketch of how the API reads from JavaScript. Reference only; the Go code doesn't depend on it. |
 
@@ -111,7 +114,7 @@ go test -tags interop ./openscreen-go/application/...
 - **[Open Screen Library](https://chromium.googlesource.com/openscreen)**
   (Chromium). The C++ reference implementation used by Chrome. Besides OSP it
   includes mDNS/DNS-SD and the Cast protocols (discovery, application control
-  and media streaming).
+  and media streaming); the [`cast`](./cast/) package follows its Cast channel.
 - **[openscreen-rs](https://github.com/youtube/openscreen-rs)** (YouTube, now
   archived). A Rust implementation of the Open Screen Protocol, used here as an
   interop target: the application examples mirror its examples, and the
