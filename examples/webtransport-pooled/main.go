@@ -1,155 +1,179 @@
+// Command webtransport-pooled streams a 4 MiB payload over an
+// LP2PQuicTransport pooled on the OSP connection, and checks it arrived
+// intact with SHA-256.
 package main
 
 import (
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
 	"log"
+	"strings"
+	"time"
 
-	"net/http"
-	_ "net/http/pprof"
-
-	. "github.com/backkem/go-lp2p/lp2p-api"         //lint:ignore ST1001 emulate global API
-	. "github.com/backkem/go-lp2p/streams-api"      //lint:ignore ST1001 emulate global API
-	. "github.com/backkem/go-lp2p/webtransport-api" //lint:ignore ST1001 emulate global API
+	"github.com/backkem/go-lp2p/examples/internal/demo"
+	. "github.com/backkem/go-lp2p/lp2p-api" //lint:ignore ST1001 emulate the global web API
+	ua "github.com/backkem/go-lp2p/lp2p-api/useragent"
+	. "github.com/backkem/go-lp2p/streams-api"      //lint:ignore ST1001 emulate the global web API
+	. "github.com/backkem/go-lp2p/webtransport-api" //lint:ignore ST1001 emulate the global web API
 )
 
-// exampleReceive shows how to make yourself discoverable
-func exampleReceive() error {
-	// Construct a LP2Receiver to receive peer connections.
-	receiver, err := NewLP2Receiver(LP2PReceiverConfig{
-		Nickname: "Receiver",
-	})
+const payloadSize = 4 << 20
+
+// The wire format on the stream is line based:
+//
+//	requester: <sha256 hex> <base64 payload>\n
+//	receiver:  ok <sha256 hex>\n   or   mismatch <sha256 hex>\n
+//
+// Base64 and an explicit terminator work around the streams shim, which
+// zero-pads every chunk it reads and may drop the last chunk at end of
+// stream; both are harmless once it is fixed.
+
+// receiverPage accepts transports and verifies what is streamed to it.
+func receiverPage(w *Window) error {
+	receiver, err := w.NewLP2PReceiver(LP2PReceiverOptions{Nickname: "Upload target"})
 	if err != nil {
 		return err
 	}
-
-	// Listen for incoming transports.
+	// Listening for transports starts the receiver.
 	listener, err := NewLP2PQuicTransportListener(receiver, LP2PQuicTransportListenerInit{})
 	if err != nil {
 		return err
 	}
 
-	// Handle incoming transports (Should be read in a loop).
-	transportReader := listener.IncomingTransports.GetReader(nil).(ReadableStreamDefaultReader[*LP2PQuicTransport])
-	tRes, err := transportReader.Read()
-	if err != nil || tRes.Done {
-		log.Fatalf("failed to get transport: %v\n", err)
-	}
-	transport := tRes.Val
-	log.Printf("Receiver: got transport\n")
-
-	// Handle incoming streams (Should be read in a loop).
-	incoming := transport.IncomingBidirectionalStreams.GetReader(nil).(ReadableStreamDefaultReader[WebTransportBidirectionalStream])
-	sRes, err := incoming.Read()
-	if err != nil || sRes.Done {
-		log.Fatalf("failed to get stream: %v\n", err)
-	}
-	stream := sRes.Val
-
-	// Read from the stream (Should be read in a loop).
-	reader := stream.Readable.GetReader(nil).(ReadableStreamDefaultReader[[]byte])
-	data, err := reader.Read()
-	if err != nil || data.Done {
-		log.Fatalf("failed to read: %v\n", err)
-	}
-
-	log.Printf("Requester: Received: %s\n", string(data.Val))
-
-	// Signals example end
-	notifyPresenter()
+	go func() {
+		transports := listener.IncomingTransports.GetReader(nil).(ReadableStreamDefaultReader[*LP2PQuicTransport])
+		for {
+			res, err := transports.Read()
+			if err != nil || res.Done {
+				return
+			}
+			go handleTransport(res.Val)
+		}
+	}()
 	return nil
 }
 
-// exampleConnect shows how to connect to a peer.
-func exampleConnect() error {
-	// Construct a LP2PRequest to request a connection.
-	request, err := NewLP2PRequest(LP2PRequestConfig{
-		Nickname: "Requester",
-	})
+func handleTransport(t *LP2PQuicTransport) {
+	log.Println("Receiver: got a transport")
+	incoming := t.IncomingBidirectionalStreams.GetReader(nil).(ReadableStreamDefaultReader[WebTransportBidirectionalStream])
+	for {
+		res, err := incoming.Read()
+		if err != nil || res.Done {
+			return
+		}
+		go func(stream WebTransportBidirectionalStream) {
+			if err := verifyUpload(stream); err != nil {
+				log.Printf("Receiver: %v", err)
+			}
+		}(res.Val)
+	}
+}
+
+func verifyUpload(stream WebTransportBidirectionalStream) error {
+	start := time.Now()
+	line, err := readLine(stream.Readable)
 	if err != nil {
 		return err
 	}
-
-	// Open a transport
-	t, err := request.NewLP2PQuicTransport(
-		LP2PWebTransportOptions{
-			AllowPooling: true,
-		},
-	)
+	wantHash, encoded, ok := strings.Cut(line, " ")
+	if !ok {
+		return errors.New("malformed upload")
+	}
+	payload, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return err
 	}
+	sum := sha256.Sum256(payload)
+	gotHash := hex.EncodeToString(sum[:])
+	verdict := "ok"
+	if gotHash != wantHash {
+		verdict = "mismatch"
+	}
+	log.Printf("Receiver: got %d bytes in %s, sha256 %s…: %s",
+		len(payload), time.Since(start).Round(time.Millisecond), gotHash[:16], verdict)
+	return stream.Writable.GetWriter().Write([]byte(verdict + " " + gotHash + "\n"))
+}
 
-	// Open a stream
-	s, err := t.CreateBidirectionalStream()
+// requesterPage uploads a random payload to a peer the user picks.
+func requesterPage(w *Window) error {
+	request, err := w.NewLP2PRequest(LP2PRequestOptions{Nickname: "Uploader"})
 	if err != nil {
-		log.Fatalf("failed to create stream: %v\n", err)
+		return err
+	}
+	// Opening a transport on a request lets the user pick a peer and
+	// connects to it; closing the transport closes that connection.
+	transport, err := NewLP2PQuicTransport(request, LP2PQuicTransportInit{AllowPooling: true})
+	if err != nil {
+		return err
+	}
+	defer transport.Close(WebTransportCloseInfo{})
+
+	payload := make([]byte, payloadSize)
+	rand.Read(payload)
+	sum := sha256.Sum256(payload)
+	hash := hex.EncodeToString(sum[:])
+
+	stream, err := transport.CreateBidirectionalStream()
+	if err != nil {
+		return err
+	}
+	log.Printf("Requester: sending %d bytes, sha256 %s…", len(payload), hash[:16])
+	msg := hash + " " + base64.StdEncoding.EncodeToString(payload) + "\n"
+	if err := stream.Writable.GetWriter().Write([]byte(msg)); err != nil {
+		return err
 	}
 
-	// Write to the stream
-	writer := s.Writable.GetWriter()
-	msg := []byte("Good day to you, receiver!")
-	err = writer.Write(msg)
+	reply, err := readLine(stream.Readable)
 	if err != nil {
-		log.Fatalf("failed to write: %v\n", err)
+		return err
 	}
-
-	// Signals example end
-	notifyConsumer()
+	if reply != "ok "+hash {
+		return fmt.Errorf("receiver reported %q", reply)
+	}
+	log.Println("Requester: receiver confirmed the payload is intact")
 	return nil
 }
 
-///
-// Below is mostly wiring to setup the example.
-///
-
-var notifyPresenter func()
-var notifyConsumer func()
+// readLine reads from a stream up to a newline.
+func readLine(rs ReadableStream[[]byte]) (string, error) {
+	reader := rs.GetReader(nil).(ReadableStreamDefaultReader[[]byte])
+	var buf []byte
+	for {
+		res, err := reader.Read()
+		if err != nil {
+			return "", err
+		}
+		if res.Done {
+			return "", errors.New("stream ended before end of line")
+		}
+		buf = append(buf, bytes.Trim(res.Val, "\x00")...) // see the wire format note
+		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+			return string(buf[:i]), nil
+		}
+	}
+}
 
 func main() {
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
+	flag.Parse()
+	demo.Watchdog(20 * time.Second)
 
-	// mock user interaction
-	DefaultUserAgent.IgnoreConsent = true
-	DefaultUserAgent.PSKOverride = []byte("1234")
-	DefaultUserAgent.Presenter = func(psk []byte) {
-		log.Println("The presenting browser (receiver) shows a pin:")
-		log.Printf("Pin: %s (presented to user)\n", string(psk))
+	presenter, consumer := demo.Pair()
+	consumer.Pick = ua.PickByName("Upload target")
+	receiverDevice := demo.NewBrowser("Receiver device", presenter)
+	requesterDevice := demo.NewBrowser("Requester device", consumer)
+	defer receiverDevice.Close()
+	defer requesterDevice.Close()
+
+	if err := receiverPage(receiverDevice.Window); err != nil {
+		log.Fatalf("Receiver: %v", err)
 	}
-	DefaultUserAgent.Consumer = func() ([]byte, error) {
-		log.Println("The consuming browser (requester) asks the user to enter the pin:")
-		psk := []byte("1234")
-		log.Printf("Pin: %s (entered by user)\n", string(psk))
-		return psk, nil
+	if err := requesterPage(requesterDevice.Window); err != nil {
+		log.Fatalf("Requester: %v", err)
 	}
-
-	// Track example end
-	donePresenter := make(chan struct{})
-	notifyPresenter = func() {
-		close(donePresenter)
-	}
-	doneConsumer := make(chan struct{})
-	notifyConsumer = func() {
-		close(doneConsumer)
-	}
-
-	// Spawn exampleReceive
-	go func() {
-		err := exampleReceive()
-		if err != nil {
-			log.Fatalf("Receiver error: %v\n", err)
-		}
-	}()
-
-	// Spawn exampleReceive
-	go func() {
-		err := exampleConnect()
-		if err != nil {
-			log.Fatalf("Connect error: %v\n", err)
-		}
-	}()
-
-	// Wait for completion
-	<-donePresenter
-	<-doneConsumer
 }

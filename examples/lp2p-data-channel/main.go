@@ -1,150 +1,122 @@
+// Command lp2p-data-channel chats over an LP2PDataChannel: several messages
+// each way, then a clean close.
 package main
 
 import (
+	"flag"
 	"log"
+	"time"
 
-	"net/http"
-	_ "net/http/pprof"
-
-	. "github.com/backkem/go-lp2p/lp2p-api" //lint:ignore ST1001 emulate global API
+	"github.com/backkem/go-lp2p/examples/internal/demo"
+	. "github.com/backkem/go-lp2p/lp2p-api" //lint:ignore ST1001 emulate the global web API
+	ua "github.com/backkem/go-lp2p/lp2p-api/useragent"
 )
 
-// exampleReceive shows how to make yourself discoverable
-func exampleReceive() error {
-	// Construct a LP2Receiver to receive peer connections.
-	receiver, err := NewLP2Receiver(LP2PReceiverConfig{
-		Nickname: "Receiver",
-	})
+var replies = []string{
+	"Hi requester, receiver here.",
+	"Doing fine, thanks. You?",
+	"Bye!",
+}
+
+// receiverPage runs on the receiving device: it answers each message with
+// the next reply.
+func receiverPage(w *Window, done chan<- struct{}) error {
+	receiver, err := w.NewLP2PReceiver(LP2PReceiverOptions{Nickname: "Chat receiver"})
 	if err != nil {
 		return err
 	}
 
-	// Handle incoming connections
-	receiver.OnConnection(func(e OnConnectionEvent) {
-		conn := e.Connection
-		log.Printf("Receiver: got connection\n")
+	receiver.OnConnection(func(e LP2PConnectionEvent) {
+		log.Println("Receiver: got a connection")
 
-		// Handle incoming data channels
-		conn.OnDataChannel(func(e OnDataChannelEvent) { // TODO: This is racy since OnDataChannel is set late
+		e.Connection.OnDataChannel(func(e LP2PDataChannelEvent) {
 			channel := e.Channel
+			log.Printf("Receiver: got data channel %q", channel.Label())
 
-			// Handle incoming messages
+			n := 0
 			channel.OnMessage(func(e OnMessageEvent) {
-				message := string(e.Payload.(PayloadString).Data)
-
-				log.Printf("Receiver: Received message: %s", message)
-
-				// Signals example end
-				notifyPresenter()
+				log.Printf("Receiver: got %q", e.Payload.(PayloadString))
+				if n < len(replies) {
+					channel.SendText(replies[n])
+					n++
+				}
 			})
-
-			// Send our new friend a message.
-			channel.SendText("Good day to you, requester!")
+			channel.OnClose(func(OnCloseEvent) {
+				log.Println("Receiver: channel closed")
+				close(done)
+			})
 		})
 	})
 
-	// Now that all event-handlers are set up, start receiving!
+	// Blocks until the user allowed the page to be discoverable.
 	return receiver.Start()
 }
 
-// exampleConnect shows how to connect to a peer.
-func exampleConnect() error {
-	// Construct a LP2PRequest to request a connection.
-	request, err := NewLP2PRequest(LP2PRequestConfig{
-		Nickname: "Requester",
-	})
+// requesterPage runs on the other device: it connects to a peer the user
+// picks and starts chatting.
+func requesterPage(w *Window, done chan<- struct{}) error {
+	request, err := w.NewLP2PRequest(LP2PRequestOptions{Nickname: "Chat requester"})
 	if err != nil {
 		return err
 	}
 
-	// Start the request
+	// Blocks while the user picks a device and pairs with it.
 	conn, err := request.Start()
 	if err != nil {
 		return err
 	}
+	log.Println("Requester: got a connection")
 
-	log.Printf("Requester: got connection\n")
-
-	// Create a data channel to send data
-	dc, err := conn.CreateDataChannel("My Channel", nil)
+	channel, err := conn.CreateDataChannel("chat", &LP2PDataChannelInit{Protocol: "text"})
 	if err != nil {
 		return err
 	}
 
-	// Wait for the channel to be established
-	dc.OnOpen(func(e OnOpenEvent) {
-		channel := e.Channel
-		log.Printf("Requester: got dataChannel\n")
-
-		// Handle incoming messages
-		channel.OnMessage(func(e OnMessageEvent) {
-			message := string(e.Payload.(PayloadString).Data)
-
-			log.Printf("Requester: Received message: %s\n", message)
-
-			notifyConsumer() // Signal example end
-		})
-
-		// Send our new friend a message.
-		channel.SendText("Good day to you, receiver!")
+	messages := []string{"Hello receiver!", "How are you?", "Gotta go."}
+	got := 0
+	channel.OnOpen(func(OnOpenEvent) {
+		log.Println("Requester: channel open")
+		for _, m := range messages {
+			channel.SendText(m)
+		}
 	})
-
+	channel.OnMessage(func(e OnMessageEvent) {
+		log.Printf("Requester: got %q", e.Payload.(PayloadString))
+		if got++; got == len(replies) {
+			// Closing is a handshake: onclose fires once the peer closed too.
+			channel.Close()
+		}
+	})
+	channel.OnClose(func(OnCloseEvent) {
+		log.Println("Requester: channel closed")
+		conn.Close()
+		close(done)
+	})
 	return nil
 }
 
-///
-// Below is mostly wiring to setup the example.
-///
-
-var notifyPresenter func()
-var notifyConsumer func()
-
 func main() {
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
+	flag.Parse()
+	demo.Watchdog(20 * time.Second)
 
-	// mock user interaction
-	DefaultUserAgent.IgnoreConsent = true
-	DefaultUserAgent.PSKOverride = []byte("1234")
-	DefaultUserAgent.Presenter = func(psk []byte) {
-		log.Println("The presenting browser (receiver) shows a pin:")
-		log.Printf("Pin: %s (presented to user)\n", string(psk))
+	// Two devices, each running a browser; the PIN shown on one is typed
+	// on the other.
+	presenter, consumer := demo.Pair()
+	consumer.Pick = ua.PickByName("Chat receiver") // the user picks it in the device picker
+	receiverDevice := demo.NewBrowser("Receiver device", presenter)
+	requesterDevice := demo.NewBrowser("Requester device", consumer)
+	defer receiverDevice.Close()
+	defer requesterDevice.Close()
+
+	receiverDone := make(chan struct{})
+	requesterDone := make(chan struct{})
+	if err := receiverPage(receiverDevice.Window, receiverDone); err != nil {
+		log.Fatalf("Receiver: %v", err)
 	}
-	DefaultUserAgent.Consumer = func() ([]byte, error) {
-		log.Println("The consuming browser (requester) asks the user to enter the pin:")
-		psk := []byte("1234")
-		log.Printf("Pin: %s (entered by user)\n", string(psk))
-		return psk, nil
+	if err := requesterPage(requesterDevice.Window, requesterDone); err != nil {
+		log.Fatalf("Requester: %v", err)
 	}
-
-	// Track example end
-	donePresenter := make(chan struct{})
-	notifyPresenter = func() {
-		close(donePresenter)
-	}
-	doneConsumer := make(chan struct{})
-	notifyConsumer = func() {
-		close(doneConsumer)
-	}
-
-	// Spawn exampleReceive
-	go func() {
-		err := exampleReceive()
-		if err != nil {
-			log.Fatalf("Receiver error: %v\n", err)
-		}
-	}()
-
-	// Spawn exampleReceive
-	go func() {
-		err := exampleConnect()
-		if err != nil {
-			log.Fatalf("Connect error: %v\n", err)
-		}
-	}()
-
-	// Wait for completion
-	<-donePresenter
-	<-doneConsumer
+	demo.Await(receiverDone, "the receiver to finish")
+	demo.Await(requesterDone, "the requester to finish")
+	log.Println("done")
 }
