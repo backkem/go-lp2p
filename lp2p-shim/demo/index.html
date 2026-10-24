@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lp2p-shim demos</title>
+<style>body { margin: 0 auto; padding: 16px; max-width: 70ch; font: 15px/1.5 system-ui, sans-serif; } li { margin: 6px 0; }</style>
+<h1>lp2p-shim demos</h1>
+<p>An experimental polyfill for the <a href="https://github.com/WICG/local-peer-to-peer">Local Peer-to-Peer API</a>.
+  It is <b>not secure</b>: pairing is simulated and nothing is encrypted beyond what the transport does.</p>
+<ul>
+  <li><a href="iframes.html">Two frames, one page</a>: postMessage transport, full permission/picker/PIN flow.</li>
+  <li><a href="chat.html?transport=webrtc" target="_blank">WebRTC chat</a>: open this link in two tabs of the same browser
+    (signaling over BroadcastChannel, data over RTCDataChannel).</li>
+  <li><a href="chat.html?transport=manual" target="_blank">WebRTC between two devices</a>: open on two devices on the same
+    LAN and copy the codes across by hand. Needs HTTPS (or localhost) on both.</li>
+  <li><a href="chat.html" target="_blank">postMessage chat</a>: open in several tabs.</li>
+</ul>

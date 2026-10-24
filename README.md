@@ -33,6 +33,10 @@ The repository is a stack of layers, each usable on its own:
      └── application/              application protocol messages on top of the network layer
 
  cast/                     a Go implementation of the Google Cast channel, as a sibling transport
+
+ lp2p-shim/                the LP2P web API as a JavaScript polyfill for today's browsers (TypeScript)
+     ├── api, ua, protocol         same layering as lp2p-api / useragent / ospc, speaking OSP messages
+     └── transports                postMessage (same browser) and WebRTC (pluggable signaling)
 ```
 
 | Directory | Package | What it does |
@@ -43,6 +47,7 @@ The repository is a stack of layers, each usable on its own:
 | [`openscreen-go/application`](./openscreen-go/application/) | `application` | OSP application-protocol messages, plus examples and interop tests against [openscreen-rs](https://github.com/youtube/openscreen-rs). |
 | [`cast`](./cast/) | `cast` | The Google Cast channel as used by Chromium's Open Screen Library: TLS over TCP, length-prefixed protobuf `CastMessage`s, virtual connections, heartbeat, device authentication and `_googlecast._tcp` discovery. Not yet wired into the LP2P API; see its [README](./cast/README.md). |
 | [`streams-api`](./streams-api/), [`webtransport-api`](./webtransport-api/), [`web-api`](./web-api/) | `streams`, `webtransport`, `web` | Small Go shims for the web platform APIs that LP2P builds on. |
+| [`lp2p-shim`](./lp2p-shim/) | — | A polyfill for web pages: `LP2PReceiver`, `LP2PRequest`, `LP2PConnection` and `LP2PDataChannel` over a clean transport seam, with postMessage and WebRTC transports, simulated browser UI and demos. Ships a checked-in standalone bundle (`lp2p-shim/dist/lp2p-shim.js`). Not secure; see its [README](./lp2p-shim/README.md). |
 | [`src`](./src/) | — | TypeScript typings generated from the proposal's WebIDL (`npm run idl`), plus a sketch of how the API reads from JavaScript. Reference only; the Go code doesn't depend on it. |
 
 ## Quick start

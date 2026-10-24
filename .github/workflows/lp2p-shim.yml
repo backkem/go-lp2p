@@ -1,0 +1,48 @@
+name: lp2p-shim
+
+on:
+  push:
+    paths:
+      - "lp2p-shim/**"
+      - "src/*.d.ts"
+      - ".github/workflows/lp2p-shim.yml"
+  pull_request:
+    paths:
+      - "lp2p-shim/**"
+      - "src/*.d.ts"
+      - ".github/workflows/lp2p-shim.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lp2p-shim
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: lp2p-shim/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Checked-in bundle matches a fresh build
+        run: npm run check-dist
+
+      - name: Browser tests
+        env:
+          CHROMIUM: /usr/bin/google-chrome
+        run: npm run test:browser

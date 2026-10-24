@@ -1,0 +1,172 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LP2P chat</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1f1f1f; --muted: #666; --line: #ddd; --me: #e8f0fe; --them: #f1f3f4; --accent: #1a73e8; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1f1f1f; --fg: #eee; --muted: #aaa; --line: #444; --me: #2a3b57; --them: #333; } }
+  body { margin: 0; padding: 12px 16px; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); display: flex; flex-direction: column; gap: 10px; min-height: 100vh; box-sizing: border-box; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  h1 { font-size: 16px; margin: 0; flex: 1 1 auto; }
+  .tag { font-size: 12px; color: var(--muted); }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { color: var(--muted); font-size: 13px; }
+  #log { flex: 1 1 auto; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 120px; display: flex; flex-direction: column; gap: 4px; }
+  .msg { max-width: 80%; padding: 4px 8px; border-radius: 8px; background: var(--them); align-self: flex-start; word-break: break-word; }
+  .msg.me { background: var(--me); align-self: flex-end; }
+  .msg b { font-weight: 600; margin-right: 4px; }
+  .sys { color: var(--muted); font-size: 12px; align-self: center; }
+  form { display: flex; gap: 8px; }
+  input[type=text], textarea { font: inherit; flex: 1; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); min-width: 0; }
+  #manual { border: 1px dashed var(--line); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  #manual textarea { min-height: 54px; font: 12px ui-monospace, monospace; }
+</style>
+
+<header>
+  <h1>LP2P chat <span class="tag" id="mode"></span></h1>
+  <button id="listen" class="primary">Be discoverable</button>
+  <button id="connect">Connect to a device</button>
+</header>
+<div id="status">Not connected.</div>
+<section id="manual" hidden>
+  <div class="tag">Manual signaling, three codes: (1) on the receiver, click <b>Be discoverable</b> and copy its code to the
+    other device; paste it there <i>before</i> clicking <b>Connect to a device</b>. (2) Copy the requester's code back to the
+    receiver. (3) Copy the receiver's answer to the requester.</div>
+  <textarea id="outgoing" readonly placeholder="Codes for the other device appear here"></textarea>
+  <form id="pasteForm"><textarea id="incoming" placeholder="Paste a code from the other device"></textarea><button>Paste</button></form>
+</section>
+<div id="log" aria-live="polite"></div>
+<form id="send"><input id="text" type="text" placeholder="Message" autocomplete="off" disabled><button disabled>Send</button></form>
+
+<script src="../dist/lp2p-shim.js"></script>
+<script>
+"use strict";
+// URL parameters:
+//   transport=postmessage (default) | webrtc | manual   (manual = WebRTC with copy/paste signaling)
+//   name=<nickname>   pairing=pin (default) | none   auto=1 (no dialogs: allow all, pick the first peer)
+//   role=receiver | requester   (start right away; used by the iframe demo and tests)
+const params = new URLSearchParams(location.search);
+const transportName = params.get("transport") ?? "postmessage";
+const name = params.get("name") ?? `Device ${Math.floor(Math.random() * 900 + 100)}`;
+const $ = (id) => document.getElementById(id);
+
+if (!globalThis.LP2PShim) {
+  document.body.textContent = "lp2p-shim did not load. The LP2P API needs a secure context: use https:// or http://localhost.";
+  throw new Error("no shim");
+}
+const { configure, PostMessageTransport, WebRTCTransport, ManualSignaler, AutoUI } = LP2PShim;
+const config = {};
+if (transportName === "webrtc") config.transport = new WebRTCTransport();
+if (transportName === "manual") {
+  $("manual").hidden = false;
+  const signaler = new ManualSignaler((code) => {
+    $("outgoing").value = code;
+    $("outgoing").select();
+    note("A code for the other device is ready: copy it over.");
+  });
+  config.transport = new WebRTCTransport({ signaler });
+  $("pasteForm").onsubmit = (e) => {
+    e.preventDefault();
+    try {
+      signaler.paste($("incoming").value);
+      $("incoming").value = "";
+    } catch (err) {
+      note(`That is not a valid code: ${err.message}`);
+    }
+  };
+}
+if (params.get("pairing") === "none") config.pairing = "none";
+if (params.get("auto") === "1") {
+  config.ui = new AutoUI();
+  config.pairing = params.get("pairing") ?? "none";
+}
+if (params.get("debug") === "1") config.log = (line) => console.log(`[lp2p-shim] ${line}`);
+configure(config);
+$("mode").textContent = `· ${name} · ${transportName}${LP2PShim.installed.length ? " · shim" : " · native"}`;
+
+const channels = new Set();
+function note(text) {
+  const d = document.createElement("div");
+  d.className = "sys";
+  d.textContent = text;
+  $("log").append(d);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+function show(from, text, me) {
+  const d = document.createElement("div");
+  d.className = me ? "msg me" : "msg";
+  const b = document.createElement("b");
+  b.textContent = from;
+  d.append(b, document.createTextNode(text));
+  $("log").append(d);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+function status(text) {
+  $("status").textContent = text;
+  document.body.dataset.status = text;
+}
+
+// Everything below is plain LP2P API usage.
+function adopt(channel) {
+  channel.onopen = () => {
+    channels.add(channel);
+    status(`Connected (${channels.size} peer${channels.size === 1 ? "" : "s"}).`);
+    $("text").disabled = $("send").querySelector("button").disabled = false;
+    channel.send(JSON.stringify({ hello: name }));
+  };
+  channel.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.hello) note(`${m.hello} joined.`);
+    if (m.text) {
+      show(m.from, m.text, false);
+      // The receiver relays, so every participant sees every message.
+      for (const c of channels) if (c !== channel) c.send(e.data);
+    }
+  };
+  channel.onclose = () => {
+    channels.delete(channel);
+    status(channels.size ? `Connected (${channels.size}).` : "Disconnected.");
+    note("A peer left.");
+  };
+}
+
+$("listen").onclick = async () => {
+  const receiver = new LP2PReceiver({ nickname: name });
+  receiver.onconnection = (e) => {
+    note("Incoming connection.");
+    e.connection.ondatachannel = (e) => adopt(e.channel);
+  };
+  try {
+    await receiver.start();
+    $("listen").disabled = true;
+    status("Discoverable. Waiting for connections…");
+  } catch (err) {
+    status(`Could not advertise: ${err.name}: ${err.message}`);
+  }
+};
+
+$("connect").onclick = async () => {
+  status("Picking a device…");
+  try {
+    const conn = await new LP2PRequest({ nickname: name }).start();
+    adopt(conn.createDataChannel("chat", { protocol: "lp2p-demo-chat" }));
+  } catch (err) {
+    status(`Not connected: ${err.name}: ${err.message}`);
+  }
+};
+
+$("send").onsubmit = (e) => {
+  e.preventDefault();
+  const text = $("text").value.trim();
+  if (!text) return;
+  $("text").value = "";
+  const data = JSON.stringify({ from: name, text });
+  for (const c of channels) c.send(data);
+  show(name, text, true);
+};
+
+if (params.get("role") === "receiver") $("listen").click();
+if (params.get("role") === "requester") $("connect").click();
+</script>
