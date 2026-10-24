@@ -87,6 +87,15 @@ type Agent struct {
 
 	mu sync.Mutex
 
+	// Discovery state, see discover_names.go and metadata.go.
+	// For a local agent metadataVersion is the advertised mv value. For a
+	// remote agent instanceName and metadataVersion are what it was
+	// discovered with, if it was discovered.
+	instanceName       *InstanceName
+	metadataVersion    uint64
+	hasMetadataVersion bool
+	authenticated      bool
+
 	info               *AgentInfo
 	authenticationInfo *AgentAuthenticationInfo
 
@@ -112,8 +121,8 @@ type AgentInfo struct {
 	DisplayName string
 	ModelName   string
 	// Capabilities []agentCapability
-	// StateToken string // TODO: State token
-	Locales []string
+	StateToken string // 8 characters in the range [0-9A-Za-z]
+	Locales    []string
 }
 
 func NewAgent(c AgentConfig) (*Agent, error) {
@@ -240,6 +249,7 @@ func (a *Agent) Info() *AgentInfo {
 	return &AgentInfo{
 		DisplayName: a.info.DisplayName,
 		ModelName:   a.info.ModelName,
+		StateToken:  a.info.StateToken,
 		Locales:     a.info.Locales,
 	}
 }

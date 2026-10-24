@@ -32,8 +32,8 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	expectedSN := new(big.Int).SetBytes(expectedSNBytes)
 
 	// Build OpenScreen-compliant hostname from discovered agent info
-	// Unescape DNS-SD encoding (e.g., "Test\ Receiver" -> "Test Receiver")
-	instanceName := unescapeDNSSD(ra.info.ServiceRecord.Instance)
+	// Unescaped, without the truncation marker (e.g., "Test\ Receiver" -> "Test Receiver")
+	instanceName := ra.instanceName.Name
 	domain := MdnsDomain
 	cn := buildAgentHostname(snBase64, instanceName, domain)
 
@@ -49,12 +49,12 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 				return errors.New("didn't expect cert chain")
 			}
 			peerCert := cs.PeerCertificates[0]
-			
+
 			// Verify certificate serial number matches advertised value
 			if peerCert.SerialNumber.Cmp(expectedSN) != 0 {
 				return fmt.Errorf("certificate serial number mismatch: expected %s, got %s", expectedSN.String(), peerCert.SerialNumber.String())
 			}
-			
+
 			roots := x509.NewCertPool()
 			roots.AddCert(peerCert)
 
@@ -101,6 +101,7 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	if err != nil {
 		return nil, err
 	}
+	remoteAgent.setDiscovery(ra.instanceName, ra.metadataVersion, ra.hasMetadataVersion)
 	bConn := newBaseConnection(
 		nc,
 		la,

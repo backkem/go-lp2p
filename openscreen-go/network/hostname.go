@@ -16,8 +16,11 @@ func encodeHostnamePart(input string) string {
 
 // buildAgentHostname constructs an OpenScreen-compliant agent hostname
 // Format: serialNumber.encodedInstanceName.encodedDomain
+// The instance name is the (possibly truncated) DNS-SD Instance Name, so both
+// the advertiser (from its display name) and the dialer (from the discovered
+// Instance Name) compute the same hostname.
 func buildAgentHostname(serialNumberBase64, instanceName, domain string) string {
-	encodedInstance := encodeHostnamePart(instanceName)
+	encodedInstance := encodeHostnamePart(hostnameInstanceName(instanceName))
 	encodedDomain := encodeHostnamePart(domain)
 	return fmt.Sprintf("%s.%s.%s", serialNumberBase64, encodedInstance, encodedDomain)
 }
@@ -28,10 +31,10 @@ func parseAgentHostname(hostname string) (serialNumber, instanceName, domain str
 	if len(parts) < 3 {
 		return "", "", "", fmt.Errorf("invalid hostname format: expected at least 3 parts, got %d", len(parts))
 	}
-	
+
 	serialNumber = parts[0]
 	instanceName = parts[1]
 	domain = strings.Join(parts[2:], ".")
-	
+
 	return serialNumber, instanceName, domain, nil
 }

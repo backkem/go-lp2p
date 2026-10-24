@@ -152,7 +152,7 @@ func handleConnection(ctx context.Context, conn *application.ApplicationConnecti
 			DisplayName:  localInfo.DisplayName,
 			ModelName:    localInfo.ModelName,
 			Capabilities: []ospc.AgentCapability{},
-			StateToken:   "ready",
+			StateToken:   localAgent.StateToken(),
 			Locales:      localInfo.Locales,
 		}
 		if info.Locales == nil {

@@ -1,7 +1,6 @@
 package ospc
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -40,6 +39,10 @@ type Listener struct {
 	accept chan *UnauthenticatedConnection
 
 	alpnListeners map[string]*ALPNListener
+
+	// mDNS advertisement, set once running.
+	advertiser *mdns.Server
+	txt        TXTRecordSet
 
 	close    chan struct{}
 	closeErr error
@@ -101,6 +104,27 @@ func (l *Listener) getALPNListener(alpn string) *ALPNListener {
 
 func (l *Listener) Start() error {
 	return l.run()
+}
+
+// AnnounceMetadataChange signals listening agents that the metadata of the
+// local agent changed by advertising a greater mv value, so they know to
+// reconnect to discover the updated metadata.
+func (l *Listener) AnnounceMetadataChange() error {
+	mv, err := encodeMetadataVersion(l.agent.bumpMetadataVersion())
+	if err != nil {
+		return err
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.advertiser == nil {
+		// Not advertising yet, the new mv is picked up when starting.
+		return nil
+	}
+	l.txt.Set(txtKeyMetadataVersion, mv)
+	l.advertiser.SetText(l.txt.ToSlice())
+	return nil
 }
 
 type TXTRecordSet map[string][]string
@@ -202,7 +226,7 @@ func (l *Listener) run() error {
 
 			// Extract expected hostname from peer certificate for validation
 			expectedCN := peerCert.Subject.CommonName
-			
+
 			opts := x509.VerifyOptions{
 				DNSName: expectedCN,
 				Roots:   roots,
@@ -227,17 +251,18 @@ func (l *Listener) run() error {
 		return err
 	}
 
-	mvBuf := new(bytes.Buffer)
-	writeVaruint(0, mvBuf) // TODO: metadata updates
-	mv := mvBuf.String()
+	mv, err := encodeMetadataVersion(l.agent.MetadataVersion())
+	if err != nil {
+		return err
+	}
 
 	at := randomAT(9)
 
 	// Advertise ourselves
 	txt := TXTRecordSet{}
-	txt.Set("fp", fp)
-	txt.Set("mv", mv)
-	txt.Set("at", at)
+	txt.Set(txtKeyFingerprint, fp)
+	txt.Set(txtKeyMetadataVersion, mv)
+	txt.Set(txtKeyAuthToken, at)
 	txt.Set("fn", "TODO:Remove?")
 	// Encode certificate serial number as URL-safe base64 (no padding).
 	// Spec says RFC4648 base64, but standard base64 contains +/= which are
@@ -246,10 +271,15 @@ func (l *Listener) run() error {
 	snBase64 := base64.RawURLEncoding.EncodeToString(snBytes)
 	txt.Set("sn", snBase64) // TODO: openscreenprotocol#293
 	port := listener.Addr().(*net.UDPAddr).Port
-	advertiser, err := mdns.Register(l.agent.info.DisplayName, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)
+	// The Instance Name is a prefix of the display name, truncated if needed,
+	// in DNS presentation format as expected by the mDNS library.
+	instance := escapeDNSSD(instanceNameForDisplayName(l.agent.Info().DisplayName))
+	advertiser, err := mdns.Register(instance, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)
 	if err != nil {
 		return err
 	}
+	l.advertiser = advertiser
+	l.txt = txt
 
 	acceptCtx, acceptCancel := context.WithCancel(context.Background())
 	netConns := make(chan NetworkConnection)
