@@ -66,16 +66,21 @@ func (InsecureVerifier) Verify(*AuthResponse, []byte, *x509.Certificate) error {
 
 // CertVerifier ports the checks of openscreen's AuthenticateChallengeReply /
 // VerifyCredentials: TLS certificate lifetime, nonce echo, device
-// certificate chain, hash policy and the signature binding the device key to
-// the TLS certificate.
+// certificate chain (path building and validation as in openscreen's
+// FindCertificatePath, see certpath.go), hash policy and the signature
+// binding the device key to the TLS certificate.
 //
-// Genuine Cast devices chain to Google's Cast root CAs, which are not
-// shipped here; supply them in Roots. CRL checking is not implemented: a
-// CRL in the response is ignored.
+// Genuine Cast devices chain to Google's Cast root CAs: use
+// GoogleCastRoots(). CRL checking is not implemented: a CRL in the response
+// is ignored (openscreen senders treat CRLs as optional too).
+//
+// openscreen does not enforce the sender nonce echo by default
+// (enforce_nonce_checking=false); CertVerifier always does.
 type CertVerifier struct {
-	// Roots are the trusted Cast root CAs. Required unless
-	// InsecureSkipChainVerify is set.
-	Roots *x509.CertPool
+	// Roots are the trust anchors, matched by subject name like
+	// openscreen's TrustStore. Required unless InsecureSkipChainVerify is
+	// set.
+	Roots []*x509.Certificate
 	// InsecureSkipChainVerify trusts any device certificate but still
 	// verifies the signature binding (useful for self-made test devices).
 	InsecureSkipChainVerify bool
@@ -119,24 +124,18 @@ func (v *CertVerifier) Verify(resp *AuthResponse, nonce []byte, peerCert *x509.C
 		return fail("parse device certificate: %v", err)
 	}
 	if !v.InsecureSkipChainVerify {
-		if v.Roots == nil {
+		if len(v.Roots) == 0 {
 			return fail("no trusted roots configured")
 		}
-		inter := x509.NewCertPool()
+		var inter []*x509.Certificate
 		for _, der := range resp.IntermediateCertificate {
 			c, err := x509.ParseCertificate(der)
 			if err != nil {
 				return fail("parse intermediate certificate: %v", err)
 			}
-			inter.AddCert(c)
+			inter = append(inter, c)
 		}
-		_, err = leaf.Verify(x509.VerifyOptions{
-			Roots:         v.Roots,
-			Intermediates: inter,
-			CurrentTime:   now,
-			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-		})
-		if err != nil {
+		if _, err := verifyDeviceCertPath(leaf, inter, v.Roots, now); err != nil {
 			return fail("device certificate chain: %v", err)
 		}
 	}
