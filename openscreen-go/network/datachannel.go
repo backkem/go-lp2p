@@ -23,9 +23,6 @@ func (c *Connection) AcceptDataChannel(ctx context.Context) (*DataChannel, error
 }
 
 func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannelParameters) (*DataChannel, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	msg := &msgDataChannelOpenRequest{
 		msgRequest: msgRequest{
 			RequestId: msgRequestId(c.nextRequestID()),
@@ -35,17 +32,12 @@ func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannel
 		Protocol:  params.Protocol,
 	}
 
-	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
+	stream, err := c.openStream(ctx, msg)
 	if err != nil {
 		return nil, err
 	}
 
-	err = writeMessage(msg, stream)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: await data-exchange-start-response
+	// TODO: await data-channel-open-response
 
 	return &DataChannel{
 		DataChannelParameters: params,
@@ -54,19 +46,7 @@ func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannel
 }
 
 func (c *baseConnection) AcceptDataChannel(ctx context.Context) (*DataChannel, error) {
-	c.mu.Lock()
-	close := c.close
-	accept := c.connectedState.acceptDataChannel
-	c.mu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-close:
-		return nil, c.err()
-	case dc := <-accept:
-		return dc, nil
-	}
+	return accept(ctx, c, c.app.Load().acceptDataChannel)
 }
 
 type DataChannel struct {
@@ -123,7 +103,7 @@ func (c *DataChannel) ReadDataChannel(p []byte) (int, DataEncoding, error) {
 		return 0, 0, err
 	}
 
-	dataFrame, ok := msg.(msgDataFrame)
+	dataFrame, ok := msg.(*msgDataFrame)
 	if !ok {
 		return 0, 0, fmt.Errorf("unexpected message type")
 	}
@@ -131,7 +111,7 @@ func (c *DataChannel) ReadDataChannel(p []byte) (int, DataEncoding, error) {
 	payload := dataFrame.Payload
 
 	n := copy(p, payload)
-	return int(n), DataEncoding(dataFrame.EncodingId), nil
+	return n, DataEncoding(dataFrame.EncodingId), nil
 }
 
 // Write writes len(p) bytes from p as binary data

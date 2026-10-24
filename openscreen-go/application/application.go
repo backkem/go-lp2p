@@ -69,35 +69,17 @@ func (c *ApplicationConnection) SendAgentInfoRequest(ctx context.Context) (*ospc
 	}
 	defer stream.Close()
 
-	// Create and send the request
-	reqID := c.nextRequestID()
-	req := &ospc.MsgAgentInfoRequest{
-		RequestID: ospc.RequestID(reqID),
-	}
-
-	if err := ospc.WriteTypeKey(ospc.TypeKeyAgentInfoRequest, stream); err != nil {
-		return nil, fmt.Errorf("failed to write type key: %w", err)
-	}
-	if err := ospc.EncodeCBOR(req, stream); err != nil {
-		return nil, fmt.Errorf("failed to encode request: %w", err)
-	}
-
-	// Read the response
-	typeKey, err := ospc.ReadTypeKey(stream)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response type key: %w", err)
-	}
-	if typeKey != ospc.TypeKeyAgentInfoResponse {
-		return nil, fmt.Errorf("unexpected response type: %d, expected %d", typeKey, ospc.TypeKeyAgentInfoResponse)
+	reqID := ospc.RequestID(c.nextRequestID())
+	req := &ospc.MsgAgentInfoRequest{RequestID: reqID}
+	if err := ospc.WriteTypedMessage(stream, ospc.TypeKeyAgentInfoRequest, req); err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
 	var resp ospc.MsgAgentInfoResponse
-	if err := ospc.DecodeCBOR(stream, &resp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	if err := ospc.ReadTypedMessage(stream, ospc.TypeKeyAgentInfoResponse, &resp); err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
-
-	// Verify request ID matches
-	if resp.RequestID != ospc.RequestID(reqID) {
+	if resp.RequestID != reqID {
 		return nil, fmt.Errorf("request ID mismatch: got %d, expected %d", resp.RequestID, reqID)
 	}
 
@@ -106,29 +88,19 @@ func (c *ApplicationConnection) SendAgentInfoRequest(ctx context.Context) (*ospc
 
 // ReceiveAgentInfoRequest waits for and receives an agent-info-request message.
 // Returns the request and a function to send the response.
+//
+// Incoming streams are taken from Connection.AcceptStream; a stream carrying
+// another message type is closed and an error returned.
 func (c *ApplicationConnection) ReceiveAgentInfoRequest(ctx context.Context) (*ospc.MsgAgentInfoRequest, func(*ospc.MsgAgentInfo) error, error) {
-	// Accept an incoming stream
 	stream, err := c.conn.AcceptStream(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to accept stream: %w", err)
 	}
 
-	// Read the request type key
-	typeKey, err := ospc.ReadTypeKey(stream)
-	if err != nil {
-		stream.Close()
-		return nil, nil, fmt.Errorf("failed to read type key: %w", err)
-	}
-	if typeKey != ospc.TypeKeyAgentInfoRequest {
-		stream.Close()
-		return nil, nil, fmt.Errorf("unexpected message type: %d, expected %d", typeKey, ospc.TypeKeyAgentInfoRequest)
-	}
-
-	// Decode the request
 	var req ospc.MsgAgentInfoRequest
-	if err := ospc.DecodeCBOR(stream, &req); err != nil {
+	if err := ospc.ReadTypedMessage(stream, ospc.TypeKeyAgentInfoRequest, &req); err != nil {
 		stream.Close()
-		return nil, nil, fmt.Errorf("failed to decode request: %w", err)
+		return nil, nil, fmt.Errorf("failed to read request: %w", err)
 	}
 
 	// Return a respond function that sends the response and closes the stream
@@ -139,21 +111,16 @@ func (c *ApplicationConnection) ReceiveAgentInfoRequest(ctx context.Context) (*o
 			RequestID: req.RequestID,
 			AgentInfo: *info,
 		}
-
-		if err := ospc.WriteTypeKey(ospc.TypeKeyAgentInfoResponse, stream); err != nil {
-			return fmt.Errorf("failed to write response type key: %w", err)
+		if err := ospc.WriteTypedMessage(stream, ospc.TypeKeyAgentInfoResponse, resp); err != nil {
+			return fmt.Errorf("failed to send response: %w", err)
 		}
-		if err := ospc.EncodeCBOR(resp, stream); err != nil {
-			return fmt.Errorf("failed to encode response: %w", err)
-		}
-
 		return nil
 	}
 
 	return &req, respond, nil
 }
 
-// SendMessage sends a raw typed message on a new stream.
+// SendMessage sends a typed message on a new stream.
 // The stream is closed after sending.
 func (c *ApplicationConnection) SendMessage(ctx context.Context, typeKey ospc.TypeKey, msg interface{}) error {
 	stream, err := c.conn.OpenStream(ctx)
@@ -162,18 +129,16 @@ func (c *ApplicationConnection) SendMessage(ctx context.Context, typeKey ospc.Ty
 	}
 	defer stream.Close()
 
-	if err := ospc.WriteTypeKey(typeKey, stream); err != nil {
-		return fmt.Errorf("failed to write type key: %w", err)
-	}
-	if err := ospc.EncodeCBOR(msg, stream); err != nil {
-		return fmt.Errorf("failed to encode message: %w", err)
+	if err := ospc.WriteTypedMessage(stream, typeKey, msg); err != nil {
+		return fmt.Errorf("failed to send message: %w", err)
 	}
 
 	return nil
 }
 
-// ReceiveMessage waits for and receives a raw typed message from an incoming stream.
-// Returns the type key, the raw reader for decoding, and the stream for cleanup.
+// ReceiveMessage waits for and receives a typed message from an incoming stream.
+// Returns the type key, a reader positioned at the CBOR body (see
+// ospc.DecodeCBOR), and the stream, which the caller must close.
 func (c *ApplicationConnection) ReceiveMessage(ctx context.Context) (ospc.TypeKey, io.Reader, ospc.ApplicationStream, error) {
 	stream, err := c.conn.AcceptStream(ctx)
 	if err != nil {

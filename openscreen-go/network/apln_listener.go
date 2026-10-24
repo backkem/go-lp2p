@@ -3,6 +3,7 @@ package ospc
 import (
 	"context"
 	"crypto/tls"
+	"sync"
 
 	"github.com/quic-go/quic-go"
 )
@@ -17,8 +18,9 @@ type ALPNListener struct {
 	parent *Listener
 	config *ALPNListenerConfig
 
-	accept chan quic.Connection
-	close  chan struct{}
+	accept    chan quic.Connection
+	close     chan struct{}
+	closeOnce sync.Once
 }
 
 func newALPNListener(
@@ -34,15 +36,14 @@ func newALPNListener(
 }
 
 func (l *ALPNListener) Accept(ctx context.Context) (quic.Connection, error) {
-	close := l.close
-	accept := l.accept
-
 	select {
-	case <-close:
+	case <-l.close:
+		return nil, ErrListenerClosed
+	case <-l.parent.ctx.Done():
 		return nil, ErrListenerClosed
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case conn := <-accept:
+	case conn := <-l.accept:
 		return conn, nil
 	}
 }
@@ -54,22 +55,23 @@ func (l *ALPNListener) doVerifyConnection(cs tls.ConnectionState) error {
 	return l.config.VerifyConnection(cs)
 }
 
-func (l *ALPNListener) dispatch(conn quic.Connection) {
-	close := l.close
-	accept := l.accept
-
+// dispatch hands conn to Accept. If either listener is closed first, conn
+// is closed.
+func (l *ALPNListener) dispatch(ctx context.Context, conn quic.Connection) {
 	select {
-	case accept <- conn:
-	case <-close:
+	case l.accept <- conn:
+	case <-l.close:
+		_ = conn.CloseWithError(QuicErrorCodeNoLongerNeeded, "listener closed")
+	case <-ctx.Done():
+		_ = conn.CloseWithError(QuicErrorCodeNoLongerNeeded, "listener closed")
 	}
 }
 
-// func (l *Listener) Addr() net.Addr {
-// 	return l.parent.Addr()
-// }
-
+// Close stops accepting connections for the ALPN. It is idempotent.
 func (l *ALPNListener) Close() error {
-	close(l.close)
-	l.parent.removeALPNListener(l)
+	l.closeOnce.Do(func() {
+		close(l.close)
+		l.parent.removeALPNListener(l)
+	})
 	return nil
 }

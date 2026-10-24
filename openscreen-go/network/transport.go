@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 )
 
@@ -13,19 +14,19 @@ var ErrTransportClosed = errors.New("transport closed")
 var ErrTransportHandedOff = errors.New("transport handed off")
 
 func NewNetworkTransport(typ AgentTransport) (NetworkTransport, error) {
-	return newAgentTransport(typ, KeepAliveConfig{})
+	return newAgentTransport(typ, KeepAliveConfig{}, nil)
 }
 
-func newAgentTransport(typ AgentTransport, keepAlive KeepAliveConfig) (NetworkTransport, error) {
+func newAgentTransport(typ AgentTransport, keepAlive KeepAliveConfig, log *slog.Logger) (NetworkTransport, error) {
 	switch typ {
 	case AgentTransportQUIC:
-		return &QuicTransport{KeepAlive: keepAlive}, nil
+		return &QuicTransport{KeepAlive: keepAlive, Logger: log}, nil
 
 	case AgentTransportWebRTC:
 		return &DTLSTransport{}, nil
 
 	default:
-		return nil, fmt.Errorf("unknown transport type: %T", typ)
+		return nil, fmt.Errorf("unknown transport type: %d", typ)
 	}
 }
 
@@ -37,6 +38,8 @@ type NetworkTransport interface {
 type NetworkListener interface {
 	Accept(ctx context.Context) (NetworkConnection, error)
 	Addr() net.Addr
+	// Close stops listening. Accepted connections are not closed.
+	Close() error
 }
 
 // Abstract connection for the network protocol, responsible for getting

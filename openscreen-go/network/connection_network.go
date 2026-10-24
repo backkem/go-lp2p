@@ -9,24 +9,24 @@ import (
 	spake2 "github.com/backkem/spake2-go"
 )
 
+// ErrAuthenticationFailed is the cause of a connection closed because
+// authentication failed, locally or as reported by the remote agent.
+var ErrAuthenticationFailed = errors.New("authentication failed")
+
 type exchangeInfoState struct {
 	requestId uint64
-	done      chan exchangeInfoResult
+	done      chan struct{} // Closed when the remote info is complete.
 }
 
-type exchangeInfoResult struct {
-	conn *baseConnection
-	err  error
-}
-
-func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInfoResult) error {
-	_ = ctx
+// exchangeInfo sends the local auth-capabilities and requests the remote
+// agent-info. The returned channel is closed once both the remote agent-info
+// and auth-capabilities are received.
+func (c *baseConnection) exchangeInfo() (<-chan struct{}, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.exchangeInfoState != nil {
-		fmt.Println("Already requesting remote AgentInfo")
-		return nil
+		return c.exchangeInfoState.done, nil
 	}
 
 	// Auth Info
@@ -37,15 +37,15 @@ func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInf
 		PskMinBitsOfEntropy: uint64(localAuthInfo.PSKConfig.Entropy),
 	}
 
-	err := writeMessage(authMsg, c.netConn)
+	err := c.send(authMsg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Remote AgentInfo
 	state := &exchangeInfoState{
 		requestId: c.nextRequestID(),
-		done:      done,
+		done:      make(chan struct{}),
 	}
 	infoMsg := &msgAgentInfoRequest{
 		msgRequest: msgRequest{
@@ -53,35 +53,47 @@ func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInf
 		},
 	}
 
-	err = writeMessage(infoMsg, c.netConn)
+	err = c.send(infoMsg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	c.exchangeInfoState = state
 
-	return nil
+	return state.done, nil
+}
+
+// awaitInfo runs the info exchange and waits for it to complete. It does not
+// close the connection on failure.
+func (c *baseConnection) awaitInfo(ctx context.Context) error {
+	done, err := c.exchangeInfo()
+	if err != nil {
+		return fmt.Errorf("failed to exchange info: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.ctx.Done():
+		return c.err()
+	case <-done:
+		return nil
+	}
 }
 
 // caller should hold connection lock.
 func (c *baseConnection) checkAgentInfoComplete() {
-	if c.exchangeInfoState != nil &&
-		c.remoteAgent.HasInfo() &&
-		c.remoteAgent.HasAuthenticationInfo() {
-
-		state := c.exchangeInfoState
-		c.determineAuthenticationRole()
-
-		result := exchangeInfoResult{
-			conn: c,
-		}
-		select {
-		case state.done <- result:
-			c.exchangeInfoState = nil
-		case <-c.close:
-			return
-		}
+	state := c.exchangeInfoState
+	if state == nil || !c.remoteAgent.HasInfo() || !c.remoteAgent.HasAuthenticationInfo() {
+		return
 	}
+	select {
+	case <-state.done:
+		return // Already complete.
+	default:
+	}
+	c.determineAuthenticationRole()
+	close(state.done)
 }
 
 type AuthenticationRole int
@@ -178,19 +190,19 @@ const (
 func (s authenticationStatus) String() string {
 	switch s {
 	case authStatusNew:
-		return "authStatus: New"
+		return "New"
 	case authStatusRequested:
-		return "authStatus: Requested"
+		return "Requested"
 	case authStatusAwaitPSK:
-		return "authStatus: AwaitPSK"
+		return "AwaitPSK"
 	case authStatusAwaitHandshake:
-		return "authStatus: AwaitHandshake"
+		return "AwaitHandshake"
 	case authStatusAwaitConfirmation:
-		return "authStatus: AwaitConfirmation"
+		return "AwaitConfirmation"
 	case authStatusAwaitResult:
-		return "authStatus: AwaitResult"
+		return "AwaitResult"
 	case authStatusDone:
-		return "authStatus: Done"
+		return "Done"
 	default:
 		return fmt.Sprintf("Invalid authStatus (%d)", s)
 	}
@@ -211,29 +223,24 @@ type authenticationState struct {
 }
 
 // Caller should hold connection lock
-func (c *baseConnection) newAuthenticationState() (*authenticationState, error) {
+func (c *baseConnection) newAuthenticationState() *authenticationState {
 	c.authenticationState = &authenticationState{
 		status: authStatusNew,
 		done:   make(chan struct{}),
 	}
 
-	return c.authenticationState, nil
+	return c.authenticationState
 }
 
 // AcceptAuthenticate is used to handle an incoming authentication request.
 // It has to be called for every UnauthenticatedConnection.
 func (c *baseConnection) AcceptAuthenticate(ctx context.Context) (role AuthenticationRole, err error) {
-	c.mu.Lock()
-	close := c.close
-	authNotify := c.authNotify
-	c.mu.Unlock()
-
 	select {
 	case <-ctx.Done():
 		return 0, ctx.Err()
-	case <-close:
+	case <-c.ctx.Done():
 		return 0, c.err()
-	case <-authNotify:
+	case <-c.authNotify:
 		return c.GetAuthenticationRole(), nil
 	}
 }
@@ -243,81 +250,89 @@ func (c *baseConnection) AcceptAuthenticate(ctx context.Context) (role Authentic
 // As presenting agent it's a no-op.
 func (c *baseConnection) RequestAuthenticatePSK() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.authenticationRole == AuthenticationRolePresenter {
 		// No-op as presenter
+		c.mu.Unlock()
 		return nil
 	}
-
-	authState := c.authenticationState
-	if authState != nil {
+	if c.authenticationState != nil {
+		c.mu.Unlock()
 		return errors.New("already authenticating")
 	}
+	err := c.authenticatePSKProgress()
+	c.mu.Unlock()
 
-	return c.authenticatePSKProgress()
+	return c.failOnError(err)
+}
+
+// failOnError closes the connection if err is not nil. Caller must not hold
+// the connection lock.
+func (c *baseConnection) failOnError(err error) error {
+	if err != nil {
+		c.shutdown(err)
+	}
+	return err
 }
 
 // Caller should hold connection lock
 func (c *baseConnection) doAuthNotify() {
-	// close := c.close
-	authNotify := c.authNotify
-
-	close(authNotify)
-}
-
-// Caller should hold connection lock.
-func (c *baseConnection) getAuthInitiationToken() (string, error) {
-	// TODO: wire up auth-initiation-token
-	// For an advertising agent, the at field in its mDNS TXT record must be used as the
-	// auth-initiation-token in the the first authentication message sent to or from that agent.
-	at := "todo"
-
-	return at, nil
-}
-
-// Caller should hold connection lock.
-func (c *baseConnection) validateAuthInitiationToken(token string) error {
-	// TODO: wire up auth-initiation-token
-	// Agents should discard any authentication message whose auth-initiation-token is set and
-	// does not match the at provided by the advertising agent.
-	if token == "todo" {
-		return nil
+	if c.authNotified {
+		return
 	}
+	c.authNotified = true
+	close(c.authNotify)
+}
 
-	return errors.New("invalid auth-initiation-token")
+// Caller should hold connection lock.
+//
+// Per network.bs: "For an advertising agent, the at field in its mDNS TXT
+// record must be used as the auth-initiation-token in the first
+// authentication message sent to or from that agent." The token is sent in
+// the first authentication message this agent sends, and left unset after.
+func (c *baseConnection) nextAuthInitiationToken() string {
+	if c.authTokenSent {
+		return ""
+	}
+	c.authTokenSent = true
+	return c.authToken
+}
+
+// Caller should hold connection lock.
+//
+// Per network.bs: "Agents should discard any authentication message whose
+// auth-initiation-token is set and does not match the at provided by the
+// advertising agent." If the at is unknown, e.g. the remote agent was not
+// discovered through mDNS, no token can be checked.
+func (c *baseConnection) validAuthInitiationToken(token string) bool {
+	return token == "" || c.authToken == "" || token == c.authToken
 }
 
 // Authenticate is used to authenticate. It will block until authentication is complete
 // or the context is closed.
 func (c *baseConnection) AuthenticatePSK(ctx context.Context, psk []byte) (*Connection, error) {
-	err := c.authenticatePSK(psk)
+	done, err := c.authenticatePSK(psk)
 	if err != nil {
 		return nil, err
 	}
 
-	c.mu.Lock()
-	close := c.close
-	done := c.authenticationState.done
-	c.mu.Unlock()
-
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-close:
+	case <-c.ctx.Done():
 		return nil, c.err()
 	case <-done:
-		return c.finishAuthentication()
+		conn, err := c.finishAuthentication()
+		return conn, c.failOnError(err)
 	}
 }
 
 func (c *baseConnection) finishAuthentication() (*Connection, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	remoteResult := c.authenticationState.remoteResult
+	c.mu.Unlock()
 
-	if c.authenticationState.remoteResult == nil ||
-		*c.authenticationState.remoteResult != AuthStatusResultAuthenticated {
-		return nil, fmt.Errorf("authentication failed: %d", c.authenticationState.remoteResult)
+	if remoteResult == nil || *remoteResult != AuthStatusResultAuthenticated {
+		return nil, fmt.Errorf("%w: remote result %v", ErrAuthenticationFailed, remoteResult)
 	}
 
 	appConn, err := c.netConn.IntoApplicationConnection()
@@ -325,14 +340,18 @@ func (c *baseConnection) finishAuthentication() (*Connection, error) {
 		return nil, err
 	}
 	c.remoteAgent.setAuthenticated()
-	// TODO: avoid needless goroutine by solving double locking differently.
-	go c.runApplication()
 
-	c.connectedState = &connectedState{
+	c.app.Store(&connectedState{
 		appConn:               appConn,
 		acceptDataChannel:     make(chan *DataChannel),
 		acceptTransport:       make(chan *PooledWebTransport),
-		acceptTransportStream: make(chan *baseStream),
+		acceptTransportStream: make(chan ApplicationStream),
+		acceptStream:          make(chan ApplicationStream),
+	})
+	if !c.runApplication() {
+		// Closed concurrently, make sure the application connection is too.
+		_ = appConn.Close()
+		return nil, c.err()
 	}
 
 	return &Connection{
@@ -340,63 +359,78 @@ func (c *baseConnection) finishAuthentication() (*Connection, error) {
 	}, nil
 }
 
-func (c *baseConnection) authenticatePSK(psk []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+// authenticatePSK sets the PSK and progresses authentication. The returned
+// channel is closed once authentication completes. Usage errors leave the
+// connection open, other errors close it.
+func (c *baseConnection) authenticatePSK(psk []byte) (<-chan struct{}, error) {
 	if psk == nil {
-		return errors.New("no psk provided")
+		return nil, errors.New("no psk provided")
 	}
 
+	c.mu.Lock()
 	authState := c.authenticationState
 	if authState == nil {
-		var err error
-		authState, err = c.newAuthenticationState()
-		if err != nil {
-			return err
-		}
+		authState = c.newAuthenticationState()
 	}
-
 	if authState.localPSK != nil {
-		return fmt.Errorf("already authenticating")
+		c.mu.Unlock()
+		return nil, errors.New("already authenticating")
 	}
-
 	authState.localPSK = psk
+	err := c.authenticatePSKProgress()
+	c.mu.Unlock()
 
-	return c.authenticatePSKProgress()
+	if err := c.failOnError(err); err != nil {
+		return nil, err
+	}
+	return authState.done, nil
 }
 
+// authFailed records a failed local result, informs the remote agent and
+// returns the error that closes the connection.
+//
+// Caller should hold connection lock.
+func (c *baseConnection) authFailed(result msgAuthStatusResult, err error) error {
+	c.authenticationState.localResult = &result
+	if sendErr := c.sendAuthStatus(); sendErr != nil {
+		c.log.Debug("failed to send auth-status", "err", sendErr)
+	}
+	return fmt.Errorf("%w: %v", ErrAuthenticationFailed, err)
+}
+
+// spakeFailureResult maps a SPAKE2 error to an auth-status result.
+func spakeFailureResult(err error) msgAuthStatusResult {
+	if errors.Is(err, spake2.ErrInvalidConfirmation) {
+		return AuthStatusResultProofInvalid
+	}
+	return AuthStatusResultUnknownError
+}
+
+// authenticatePSKProgress advances the authentication state machine as far as
+// the available inputs allow. A returned error is fatal for the connection.
+//
 // Caller should hold connection lock
 func (c *baseConnection) authenticatePSKProgress() error {
 	authState := c.authenticationState
 	if authState == nil {
-		var err error
-		authState, err = c.newAuthenticationState()
-		if err != nil {
-			return err
-		}
+		authState = c.newAuthenticationState()
 	}
 
-	fmt.Printf("[Auth] role=%s status=%s\n", c.authenticationRole, c.authenticationState.status)
-
 	role := c.authenticationRole
+	c.log.Debug("auth progress", "role", role, "status", authState.status)
 
 	if authState.status == authStatusNew {
-		fmt.Printf("[Auth] Entering authStatusNew, role=%s\n", role)
 		if role == AuthenticationRolePresenter {
 			if authState.localPSK == nil {
-				fmt.Printf("[Auth] Presenter: no PSK yet, notifying\n")
 				c.doAuthNotify()
 			}
 		} else {
 			if authState.remotePublic == nil {
-				fmt.Printf("[Auth] Consumer: no remote public yet, sending NeedPsk\n")
 				err := c.sendAuthSpake2NeedPsk()
 				if err != nil {
 					return err
 				}
 			} else if authState.localPSK == nil {
-				fmt.Printf("[Auth] Consumer: have remote public but no PSK, notifying\n")
 				c.doAuthNotify()
 			}
 		}
@@ -406,27 +440,19 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	if authState.status == authStatusAwaitPSK {
 		if authState.localPSK == nil {
-			fmt.Printf("[Auth] AwaitPSK: still waiting for PSK\n")
 			return nil // continue waiting
 		}
-		fmt.Printf("[Auth] AwaitPSK: have PSK (%d bytes), role=%s\n", len(authState.localPSK), role)
 		if role == AuthenticationRolePresenter {
-			clientOpts := &spake2.Options{
+			client := spake2.NewClient(authState.localPSK, &spake2.Options{
 				Ciphersuite: spake2.DefaultCiphersuite(),
 				IdentityA:   []byte(c.localAgent.PeerID),
 				IdentityB:   []byte(c.remoteAgent.PeerID),
-			}
-			fmt.Printf("[Auth] Presenter SPAKE2 Client: IdentityA(local)=%x IdentityB(remote)=%x\n", clientOpts.IdentityA, clientOpts.IdentityB)
-			client := spake2.NewClient(authState.localPSK, clientOpts)
+			})
 			authState.spakeState = client
 			localPublic, err := client.Start()
 			if err != nil {
-				fmt.Printf("[Auth] SPAKE2 Client.Start() failed: %v\n", err)
-				status := AuthStatusResultUnknownError
-				authState.localResult = &status
-				return err
+				return c.authFailed(AuthStatusResultUnknownError, err)
 			}
-			fmt.Printf("[Auth] SPAKE2 Client.Start() ok, public=%d bytes\n", len(localPublic))
 
 			err = c.sendAuthSpake2Handshake(localPublic)
 			if err != nil {
@@ -439,43 +465,30 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	if authState.status == authStatusAwaitHandshake {
 		if authState.remotePublic == nil {
-			fmt.Printf("[Auth] AwaitHandshake: still waiting for remote public\n")
 			return nil // continue waiting
 		}
-		fmt.Printf("[Auth] AwaitHandshake: have remote public (%d bytes), role=%s\n", len(authState.remotePublic), role)
 		if role == AuthenticationRolePresenter {
-			client := authState.spakeState
-			localConfirmation, err := client.Finish(authState.remotePublic)
+			localConfirmation, err := authState.spakeState.Finish(authState.remotePublic)
 			if err != nil {
-				fmt.Printf("[Auth] SPAKE2 Client.Finish() failed: %v\n", err)
-				status := AuthStatusResultUnknownError
-				authState.localResult = &status
-				return err
+				return c.authFailed(spakeFailureResult(err), err)
 			}
-			fmt.Printf("[Auth] SPAKE2 Client.Finish() ok, confirmation=%d bytes\n", len(localConfirmation))
 
 			err = c.sendAuthSpake2Confirmation(localConfirmation)
 			if err != nil {
 				return err
 			}
 		} else {
-			serverOpts := &spake2.Options{
+			server := spake2.NewServer(authState.localPSK, &spake2.Options{
 				Ciphersuite: spake2.DefaultCiphersuite(),
 				IdentityA:   []byte(c.remoteAgent.PeerID),
 				IdentityB:   []byte(c.localAgent.PeerID),
-			}
-			fmt.Printf("[Auth] Consumer SPAKE2 Server: IdentityA(remote)=%x IdentityB(local)=%x\n", serverOpts.IdentityA, serverOpts.IdentityB)
-			server := spake2.NewServer(authState.localPSK, serverOpts)
+			})
 			authState.spakeState = server
 
 			localPublic, err := server.Exchange(authState.remotePublic)
 			if err != nil {
-				fmt.Printf("[Auth] SPAKE2 Server.Exchange() failed: %v\n", err)
-				status := AuthStatusResultUnknownError
-				authState.localResult = &status
-				return err
+				return c.authFailed(spakeFailureResult(err), err)
 			}
-			fmt.Printf("[Auth] SPAKE2 Server.Exchange() ok, public=%d bytes\n", len(localPublic))
 
 			err = c.sendAuthSpake2Handshake(localPublic)
 			if err != nil {
@@ -488,37 +501,19 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	if authState.status == authStatusAwaitConfirmation {
 		if authState.remoteConfirmation == nil {
-			fmt.Printf("[Auth] AwaitConfirmation: still waiting for remote confirmation\n")
 			return nil // continue waiting
 		}
-		fmt.Printf("[Auth] AwaitConfirmation: have remote confirmation (%d bytes), role=%s\n", len(authState.remoteConfirmation), role)
 
 		if role == AuthenticationRolePresenter {
-			client := authState.spakeState
-			err := client.Verify(authState.remoteConfirmation)
+			err := authState.spakeState.Verify(authState.remoteConfirmation)
 			if err != nil {
-				fmt.Printf("[Auth] SPAKE2 Client.Verify() failed: %v\n", err)
-				status := AuthStatusResultUnknownError
-				if err == spake2.ErrInvalidConfirmation {
-					status = AuthStatusResultProofInvalid
-				}
-				authState.localResult = &status
-				return err
+				return c.authFailed(spakeFailureResult(err), err)
 			}
-			fmt.Printf("[Auth] SPAKE2 Client.Verify() ok\n")
 		} else {
-			server := authState.spakeState
-			localConfirmation, err := server.Confirm(authState.remoteConfirmation)
+			localConfirmation, err := authState.spakeState.Confirm(authState.remoteConfirmation)
 			if err != nil {
-				fmt.Printf("[Auth] SPAKE2 Server.Confirm() failed: %v\n", err)
-				status := AuthStatusResultUnknownError
-				if err == spake2.ErrInvalidConfirmation {
-					status = AuthStatusResultProofInvalid
-				}
-				authState.localResult = &status
-				return err
+				return c.authFailed(spakeFailureResult(err), err)
 			}
-			fmt.Printf("[Auth] SPAKE2 Server.Confirm() ok, confirmation=%d bytes\n", len(localConfirmation))
 
 			err = c.sendAuthSpake2Confirmation(localConfirmation)
 			if err != nil {
@@ -526,15 +521,14 @@ func (c *baseConnection) authenticatePSKProgress() error {
 			}
 		}
 
-		status := AuthStatusResultAuthenticated
-		authState.localResult = &status
 		var err error
 		authState.sharedSecret, err = authState.spakeState.SharedKey()
 		if err != nil {
-			return err
+			return c.authFailed(AuthStatusResultUnknownError, err)
 		}
-		fmt.Printf("[Auth] %v: shared secret: %x\n", role, authState.sharedSecret[:8])
 
+		status := AuthStatusResultAuthenticated
+		authState.localResult = &status
 		err = c.sendAuthStatus()
 		if err != nil {
 			return err
@@ -545,10 +539,8 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	if authState.status == authStatusAwaitResult {
 		if authState.remoteResult == nil {
-			fmt.Printf("[Auth] AwaitResult: still waiting for remote result\n")
 			return nil // continue waiting
 		}
-		fmt.Printf("[Auth] AwaitResult: got remote result\n")
 
 		close(authState.done)
 
@@ -556,7 +548,6 @@ func (c *baseConnection) authenticatePSKProgress() error {
 	}
 
 	if authState.status == authStatusDone {
-		fmt.Printf("[Auth] Done\n")
 		return nil
 	}
 
@@ -565,21 +556,9 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 // Caller should hold connection lock
 func (c *baseConnection) sendAuthSpake2NeedPsk() error {
-	at, err := c.getAuthInitiationToken()
-	if err != nil {
-		return err
-	}
-
-	msg := &msgAuthSpake2NeedPskDeprecated{
-		AuthInitiationToken: at,
-	}
-
-	err = writeMessage(msg, c.netConn)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.send(&msgAuthSpake2NeedPskDeprecated{
+		AuthInitiationToken: c.nextAuthInitiationToken(),
+	})
 }
 
 // Caller should hold connection lock
@@ -588,61 +567,35 @@ func (c *baseConnection) sendAuthSpake2Handshake(publicValue []byte) error {
 	if c.authenticationRole == AuthenticationRolePresenter {
 		pskStatus = AuthSpake2PskStatusPskShown
 	}
-	// at, err := c.getAuthInitiationToken()
-	// if err != nil {
-	// 	return err
-	// }
 
 	msg := &msgAuthSpake2Handshake{
-		AuthInitiationToken: msgAuthInitiationToken{},
-		PublicValue:         publicValue,
-		PskStatus:           pskStatus,
+		PublicValue: publicValue,
+		PskStatus:   pskStatus,
+	}
+	if at := c.nextAuthInitiationToken(); at != "" {
+		msg.AuthInitiationToken.Token = &at
 	}
 
-	err := writeMessage(msg, c.netConn)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.send(msg)
 }
 
 // Caller should hold connection lock
 func (c *baseConnection) sendAuthSpake2Confirmation(payload []byte) error {
-	msg := &msgAuthSpake2Confirmation{
+	return c.send(&msgAuthSpake2Confirmation{
 		ConfirmationValue: payload,
-	}
-
-	err := writeMessage(msg, c.netConn)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	})
 }
 
 // Caller should hold connection lock
 func (c *baseConnection) sendAuthStatus() error {
-	authState := c.authenticationState
-
-	msg := &msgAuthStatus{
-		Result: *authState.localResult,
-	}
-
-	err := writeMessage(msg, c.netConn)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.send(&msgAuthStatus{
+		Result: *c.authenticationState.localResult,
+	})
 }
 
 func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	localInfo := c.localAgent.Info()
-	infoMsg := &msgAgentInfoResponse{
+	return c.send(&msgAgentInfoResponse{
 		msgResponse: msgResponse{
 			RequestId: msg.RequestId,
 		},
@@ -656,13 +609,7 @@ func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest) error 
 			StateToken: c.localAgent.StateToken(),
 			Locales:    localInfo.Locales,
 		},
-	}
-	err := writeMessage(infoMsg, c.netConn)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	})
 }
 
 func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse) error {
@@ -670,12 +617,12 @@ func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse) erro
 	defer c.mu.Unlock()
 
 	if c.exchangeInfoState == nil {
-		fmt.Println("ignoring unsolicited AgentInfoResponse")
+		c.log.Debug("ignoring unsolicited agent-info-response")
 		return nil
 	}
 
 	if c.exchangeInfoState.requestId != uint64(msg.RequestId) {
-		fmt.Println("ignoring AgentInfoResponse with wrong request ID")
+		c.log.Debug("ignoring agent-info-response with wrong request ID", "id", msg.RequestId)
 		return nil
 	}
 
@@ -695,8 +642,6 @@ func (c *baseConnection) handleAuthCapabilities(msg *msgAuthCapabilities) error 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Printf("[Auth] handleAuthCapabilities: EaseOfInput=%d, MinBitsOfEntropy=%d\n", msg.PskEaseOfInput, msg.PskMinBitsOfEntropy)
-
 	c.remoteAgent.setAuthenticationInfo(AgentAuthenticationInfo{
 		PSKConfig: PSKConfig{
 			EaseOfInput: int(msg.PskEaseOfInput),
@@ -710,20 +655,21 @@ func (c *baseConnection) handleAuthCapabilities(msg *msgAuthCapabilities) error 
 }
 
 func (c *baseConnection) handleAuthSpake2NeedPsk(msg *msgAuthSpake2NeedPskDeprecated) error {
-	_ = msg
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.authenticationRole == AuthenticationRoleConsumer ||
-		c.authenticationState != nil {
-		fmt.Println("ignoring spake2-need-psk")
+	if !c.validAuthInitiationToken(msg.AuthInitiationToken) {
+		c.log.Warn("discarding auth-spake2-need-psk with invalid auth-initiation-token")
 		return nil
 	}
 
-	_, err := c.newAuthenticationState()
-	if err != nil {
-		return err
+	if c.authenticationRole == AuthenticationRoleConsumer ||
+		c.authenticationState != nil {
+		c.log.Debug("ignoring auth-spake2-need-psk")
+		return nil
 	}
+
+	c.newAuthenticationState()
 
 	return c.authenticatePSKProgress()
 }
@@ -732,20 +678,14 @@ func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Printf("[Auth] handleAuthSpake2Handshake: PublicValue=%d bytes, PskStatus=%d\n", len(msg.PublicValue), msg.PskStatus)
-
-	// err := c.validateAuthInitiationToken(msg.AuthInitiationToken)
-	// if err != nil {
-	// 	return err
-	// }
+	if token := msg.AuthInitiationToken.Token; token != nil && !c.validAuthInitiationToken(*token) {
+		c.log.Warn("discarding auth-spake2-handshake with invalid auth-initiation-token")
+		return nil
+	}
 
 	authState := c.authenticationState
 	if authState == nil {
-		var err error
-		authState, err = c.newAuthenticationState()
-		if err != nil {
-			return err
-		}
+		authState = c.newAuthenticationState()
 	}
 
 	authState.remotePublic = msg.PublicValue
@@ -756,8 +696,6 @@ func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake) 
 func (c *baseConnection) handleAuthSpake2Confirmation(msg *msgAuthSpake2Confirmation) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	fmt.Printf("[Auth] handleAuthSpake2Confirmation: ConfirmationValue=%d bytes\n", len(msg.ConfirmationValue))
 
 	authState := c.authenticationState
 	if authState == nil {
@@ -773,8 +711,6 @@ func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	fmt.Printf("[Auth] handleAuthStatus: Result=%v\n", msg.Result)
-
 	authState := c.authenticationState
 	if authState == nil {
 		return errors.New("unsolicited auth-status")
@@ -784,11 +720,10 @@ func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus) error {
 	// independently computes the outcome of SPAKE2 through key confirmation
 	// verification. Any value of result other than authenticated means that
 	// authentication failed, and the agent must immediately disconnect.
-
+	// Returning an error makes the read loop close the connection.
 	res := msg.Result
 	if res != AuthStatusResultAuthenticated {
-		c.closeWithError(fmt.Errorf("authentication failed, remote result: %v", msg.Result))
-		return nil
+		return fmt.Errorf("%w: remote result %v", ErrAuthenticationFailed, res)
 	}
 	authState.remoteResult = &res
 
@@ -796,72 +731,70 @@ func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus) error {
 }
 
 func (c *baseConnection) handleAgentStatusRequest(msg *msgAgentStatusRequest) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return writeMessage(&msgAgentStatusResponse{
+	return c.send(&msgAgentStatusResponse{
 		msgResponse: msgResponse{
 			RequestId: msg.RequestId,
 		},
-	}, c.netConn)
+	})
 }
 
-func (c *baseConnection) runNetwork() {
-	go func() {
+// runNetwork starts the network protocol read loop. It runs until the
+// connection is handed off to the application protocol or closed. Read and
+// handler errors close the connection.
+func (c *baseConnection) runNetwork() bool {
+	return c.goroutine(func() {
 		for {
 			msg, err := c.netConn.ReadMessage()
-			if err != nil {
-				fmt.Printf("network protocol: failed to read message: %v\n", err)
-				// c.closeWithError(fmt.Errorf("failed to read message: %v", err))
+			if errors.Is(err, ErrTransportHandedOff) {
+				return
+			} else if err != nil {
+				c.shutdown(fmt.Errorf("network protocol: read: %w", err))
 				return
 			}
+			c.log.Debug("receive", "msg", msgName(msg))
 
 			err = c.handleNetworkMessage(msg)
 			if err != nil {
-				fmt.Printf("network protocol: failed to handle message: %v\n", err)
-				// c.closeWithError(fmt.Errorf("failed to handle message: %v", err))
+				c.shutdown(fmt.Errorf("network protocol: %w", err))
 				return
 			}
 		}
-	}()
+	})
 }
 
-func (c *baseConnection) handleNetworkMessage(msg interface{}) (err error) {
+func (c *baseConnection) handleNetworkMessage(msg interface{}) error {
 	switch typedMsg := msg.(type) {
 	case *msgAgentInfoRequest:
-		err = c.handleAgentInfoRequest(typedMsg)
+		return c.handleAgentInfoRequest(typedMsg)
 
 	case *msgAgentInfoResponse:
-		err = c.handleAgentInfoResponse(typedMsg)
+		return c.handleAgentInfoResponse(typedMsg)
 
 	case *msgAuthCapabilities:
-		err = c.handleAuthCapabilities(typedMsg)
+		return c.handleAuthCapabilities(typedMsg)
 
 	case *msgAuthSpake2NeedPskDeprecated:
-		err = c.handleAuthSpake2NeedPsk(typedMsg)
+		return c.handleAuthSpake2NeedPsk(typedMsg)
 
 	case *msgAuthSpake2Handshake:
-		err = c.handleAuthSpake2Handshake(typedMsg)
+		return c.handleAuthSpake2Handshake(typedMsg)
 
 	case *msgAuthSpake2Confirmation:
-		err = c.handleAuthSpake2Confirmation(typedMsg)
+		return c.handleAuthSpake2Confirmation(typedMsg)
 
 	case *msgAuthStatus:
-		err = c.handleAuthStatus(typedMsg)
+		return c.handleAuthStatus(typedMsg)
 
 	case *msgAgentStatusRequest:
 		// Only reached on transports that don't answer keep-alives themselves.
-		err = c.handleAgentStatusRequest(typedMsg)
+		return c.handleAgentStatusRequest(typedMsg)
 
 	case *msgAgentStatusResponse:
 		// Keep-alive response, nothing to do.
+		return nil
 
 	default:
-		fmt.Printf("baseConnection: unhandled message type: %T\n", typedMsg)
+		c.log.Debug("unhandled network message", "msg", msgName(typedMsg))
+		return nil
 	}
-
-	if err != nil {
-		return err
-	}
-	return nil
 }

@@ -1,199 +1,167 @@
 package ospc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
-
-	"github.com/quic-go/quic-go"
+	"io"
 )
-
-func (c *baseConnection) openStream(ctx context.Context) (ApplicationStream, error) {
-	_ = ctx
-	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	bStream := newBaseStream(stream, c.handleApplicationMessage)
-	c.handleApplicationStream(bStream)
-
-	return stream, nil
-}
-
-func (c *baseConnection) runApplication() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	acceptCtx, acceptCancel := context.WithCancel(context.Background())
-	c.acceptCancel = acceptCancel
-
-	// Steam accept loop
-	go func() {
-		for {
-			s, err := c.connectedState.appConn.AcceptStream(acceptCtx)
-			if err != nil {
-				fmt.Printf("AcceptStream error: %s\n", err)
-				c.closeWithError(fmt.Errorf("acceptStream error: %v", err))
-				return
-			}
-
-			bStream := newBaseStream(s, c.handleApplicationMessage)
-			c.handleApplicationStream(bStream)
-		}
-	}()
-}
 
 type connectedState struct {
 	appConn ApplicationConnection
 
 	acceptDataChannel     chan *DataChannel
 	acceptTransport       chan *PooledWebTransport
-	acceptTransportStream chan *baseStream
+	acceptTransportStream chan ApplicationStream
+	acceptStream          chan ApplicationStream
 }
 
-func (c *baseConnection) handleApplicationStream(stream *baseStream) {
-	go func() {
+// runApplication starts the application stream dispatcher. It is the only
+// consumer of incoming application streams. It reports false if the
+// connection is already closed.
+func (c *baseConnection) runApplication() bool {
+	appConn := c.app.Load().appConn
+	return c.goroutine(func() {
 		for {
-			handler := stream.Handler()
-			if handler == nil {
-				return
-			}
-
-			msg, err := readMessage(stream.stream)
-			if err == quic.ErrServerClosed {
-				return
-			} else if err != nil {
-				fmt.Printf("application protocol: failed to read message: %v\n", err)
-				// c.closeWithError(fmt.Errorf("failed to read message: %v", err))
-				return
-			}
-
-			err = handler(msg, stream)
+			s, err := appConn.AcceptStream(c.ctx)
 			if err != nil {
-				fmt.Printf("failed to handle message: %v\n", err)
-				c.closeWithError(fmt.Errorf("failed to handle message: %v", err))
+				c.shutdown(fmt.Errorf("application protocol: accept stream: %w", err))
+				return
+			}
+			if !c.goroutine(func() { c.routeStream(s) }) {
+				_ = s.Close()
 				return
 			}
 		}
-	}()
+	})
 }
 
-func (c *baseConnection) handleDataChannelOpenRequest(msg *msgDataChannelOpenRequest, stream *baseStream) error {
-	dc := &DataChannel{
-		DataChannelParameters: DataChannelParameters{
-			Label:    msg.Label,
-			ID:       uint64(msg.ChannelId),
-			Protocol: msg.Protocol,
-		},
-		stream: stream.stream,
-	}
-	stream.SetHandler(nil)
-
-	// TODO: send data-exchange-start-response
-
-	c.mu.Lock()
-	close := c.close
-	accept := c.connectedState.acceptDataChannel
-	c.mu.Unlock()
-
-	select {
-	case <-close:
-		return c.err()
-	case accept <- dc:
-		return nil
-	}
-}
-
-func (c *baseConnection) handleDataTransportStartRequest(msg *msgDataTransportStartRequest, info struct{}) error {
-	// TODO: msg validation
-	_, _ = msg, info
-	c.mu.Lock()
-	t, err := c.createDataTransport()
+// routeStream reads the type key of the first message of an incoming stream
+// and hands the stream to its consumer: an internal protocol handler or, for
+// any other type key, AcceptStream.
+func (c *baseConnection) routeStream(s ApplicationStream) {
+	rec := &recordingReader{r: s}
+	typeKey, err := readTypeKey(rec)
 	if err != nil {
-		c.mu.Unlock()
-		return err
-	}
-	c.mu.Unlock()
-
-	// TODO: send data-transport-start-response
-
-	c.mu.Lock()
-	close := c.close
-	accept := c.connectedState.acceptTransport
-	c.mu.Unlock()
-
-	select {
-	case <-close:
-		return c.err()
-	case accept <- t:
-		return nil
-	}
-}
-
-// Caller should hold the connection lock
-func (c *baseConnection) createDataTransport() (*PooledWebTransport, error) {
-	t := &PooledWebTransport{
-		conn: c,
-	}
-	return t, nil
-}
-
-func (c *baseConnection) handleDataTransportStreamRequest(msg *msgDataTransportStreamRequest, stream *baseStream) error {
-	// TODO: msg validation
-	_ = msg
-	// Stop message handling for this stream
-	stream.SetHandler(nil)
-
-	// TODO: send data-transport-stream-response
-
-	c.mu.Lock()
-	close := c.close
-	accept := c.connectedState.acceptTransportStream
-	c.mu.Unlock()
-
-	if accept == nil {
-		fmt.Printf("handleDataTransportStreamRequest: no transport, ignoring stream request\n")
-		return nil // No-one is listening
+		c.log.Debug("application protocol: failed to read type key", "err", err)
+		_ = s.Close()
+		return
 	}
 
-	select {
-	case <-close:
-		return c.err()
-	case accept <- stream:
-		return nil
+	switch typeKey {
+	case typeKeyDataChannelOpenRequest, typeKeyDataTransportStartRequest, typeKeyDataTransportStreamRequest:
+	default:
+		// Not ours: hand the stream over as received.
+		deliver(c, c.app.Load().acceptStream, ApplicationStream(&prefixedStream{
+			ApplicationStream: s,
+			r:                 io.MultiReader(bytes.NewReader(rec.buf), s),
+		}), s.Close)
+		return
 	}
-}
 
-// Handoff the underlying quick connection for use by another protocol.
-// func (c *baseConnection) Handoff() (quic.Connection, error) {
-// 	c.mu.Lock()
-// 	c.acceptCancel() // Stop stream handling loop
-// 	done := c.done
-// 	c.closeErr = ErrHandedOff
-// 	c.mu.Unlock()
-//
-// 	<-done
-//
-// 	return c.conn, nil
-// }
+	msg, err := newMessageByType(typeKey)
+	if err != nil {
+		_ = s.Close()
+		return
+	}
+	if err := decodeCBOR(s, msg); err != nil {
+		c.log.Debug("application protocol: failed to decode message", "type", typeKey, "err", err)
+		_ = s.Close()
+		return
+	}
+	c.log.Debug("receive", "msg", msgName(msg))
 
-func (c *baseConnection) handleApplicationMessage(msg interface{}, stream *baseStream) (err error) {
+	app := c.app.Load()
 	switch typedMsg := msg.(type) {
 	case *msgDataChannelOpenRequest:
-		err = c.handleDataChannelOpenRequest(typedMsg, stream)
+		// TODO: send data-channel-open-response
+		deliver(c, app.acceptDataChannel, &DataChannel{
+			DataChannelParameters: DataChannelParameters{
+				Label:    typedMsg.Label,
+				ID:       uint64(typedMsg.ChannelId),
+				Protocol: typedMsg.Protocol,
+			},
+			stream: s,
+		}, s.Close)
 
 	case *msgDataTransportStartRequest:
-		err = c.handleDataTransportStartRequest(typedMsg, struct{}{})
+		// TODO: send data-transport-start-response. The stream carries no
+		// further messages.
+		deliver(c, app.acceptTransport, c.createDataTransport(), s.Close)
 
 	case *msgDataTransportStreamRequest:
-		err = c.handleDataTransportStreamRequest(typedMsg, stream)
-
-	default:
-		fmt.Printf("baseConnection: unhandled message type: %T\n", typedMsg)
+		// TODO: send data-transport-stream-response
+		deliver(c, app.acceptTransportStream, s, s.Close)
 	}
+}
 
+// deliver hands v to the consumer of ch. If the connection closes first,
+// drop is called instead.
+func deliver[T any](c *baseConnection, ch chan T, v T, drop func() error) {
+	select {
+	case ch <- v:
+	case <-c.ctx.Done():
+		_ = drop()
+	}
+}
+
+// accept waits for a value on ch.
+func accept[T any](ctx context.Context, c *baseConnection, ch chan T) (T, error) {
+	var zero T
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-c.ctx.Done():
+		return zero, c.err()
+	case v := <-ch:
+		return v, nil
+	}
+}
+
+func (c *baseConnection) acceptStream(ctx context.Context) (ApplicationStream, error) {
+	return accept(ctx, c, c.app.Load().acceptStream)
+}
+
+// openStream opens an application stream and writes its first message.
+func (c *baseConnection) openStream(ctx context.Context, msg interface{}) (ApplicationStream, error) {
+	stream, err := c.app.Load().appConn.OpenStreamSync(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	c.log.Debug("send", "msg", msgName(msg))
+	err = writeMessage(msg, stream)
+	if err != nil {
+		_ = stream.Close()
+		return nil, err
+	}
+	return stream, nil
+}
+
+func (c *baseConnection) createDataTransport() *PooledWebTransport {
+	return &PooledWebTransport{
+		conn: c,
+	}
+}
+
+// recordingReader records the bytes read through it.
+type recordingReader struct {
+	r   io.Reader
+	buf []byte
+}
+
+func (r *recordingReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	r.buf = append(r.buf, p[:n]...)
+	return n, err
+}
+
+// prefixedStream is a stream of which some bytes were already read. They are
+// replayed before reading the rest of the stream.
+type prefixedStream struct {
+	ApplicationStream
+	r io.Reader
+}
+
+func (s *prefixedStream) Read(p []byte) (int, error) {
+	return s.r.Read(p)
 }

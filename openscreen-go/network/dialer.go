@@ -88,7 +88,13 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	}
 	addr := fmt.Sprintf("%s:%d", getMdnsHost(ra.info), ra.info.Port)
 
-	t, err := newAgentTransport(transportType, la.keepAlive)
+	return ra.dial(ctx, transportType, la, addr, tlsConfig)
+}
+
+// dial connects to addr and runs the info exchange. On failure, including
+// cancellation of ctx, everything set up so far is closed.
+func (ra DiscoveredAgent) dial(ctx context.Context, transportType AgentTransport, la *Agent, addr string, tlsConfig *tls.Config) (*UnauthenticatedConnection, error) {
+	t, err := newAgentTransport(transportType, la.keepAlive, la.logger())
 	if err != nil {
 		return nil, err
 	}
@@ -99,31 +105,25 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 
 	remoteAgent, err := la.NewRemoteAgent(nc)
 	if err != nil {
+		_ = nc.Close()
 		return nil, err
 	}
 	remoteAgent.setDiscovery(ra.instanceName, ra.metadataVersion, ra.hasMetadataVersion)
-	bConn := newBaseConnection(
-		nc,
-		la,
-		remoteAgent,
-		AgentRoleClient,
-	)
 
-	bConn.runNetwork()
-
-	pendingCh := make(chan exchangeInfoResult)
-	err = bConn.exchangeInfo(ctx, pendingCh)
+	// The at of the advertising agent, used as auth-initiation-token.
+	at, err := ra.AuthToken()
 	if err != nil {
-		return nil, err
+		la.logger().Debug("dial: no usable at record", "err", err)
+		at = ""
 	}
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-pendingCh: // TODO: handle meta-discovery failure.
-		if res.err != nil {
-			return nil, res.err
-		}
+	bConn := newBaseConnection(nc, la, remoteAgent, AgentRoleClient, at)
+	bConn.runNetwork()
+
+	// TODO: handle meta-discovery failure.
+	if err := bConn.awaitInfo(ctx); err != nil {
+		_ = bConn.Close()
+		return nil, err
 	}
 
 	return &UnauthenticatedConnection{
@@ -133,13 +133,10 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 
 func getMdnsHost(entry *mdns.ServiceEntry) string {
 	for _, ipv6 := range entry.AddrIPv6 {
-		// log.Printf("Choosing IPv6 address [%s]\n", ipv6)
 		return fmt.Sprintf("[%s]", ipv6)
 	}
 	for _, ipv4 := range entry.AddrIPv4 {
-		// log.Printf("Choosing IPv4 address %s\n", ipv4)
 		return ipv4.String()
 	}
-	// log.Printf("No IP address found. Falling back to hostname %s\n", entry.HostName)
 	return entry.HostName
 }

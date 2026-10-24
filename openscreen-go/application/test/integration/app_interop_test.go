@@ -44,7 +44,7 @@ const (
 )
 
 var (
-	rustAppDir   string
+	rustAppDir     string
 	cargoAvailable bool
 )
 

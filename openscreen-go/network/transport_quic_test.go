@@ -12,7 +12,7 @@ import (
 )
 
 // newQuicPair connects two QuicNetworkConnections over loopback.
-func newQuicPair(t *testing.T, clientKA, serverKA KeepAliveConfig) (client, server *QuicNetworkConnection) {
+func newQuicPair(t *testing.T, clientKA, serverKA KeepAliveConfig) (client, server *quicNetworkConnection) {
 	t.Helper()
 
 	cert, err := generateCert("test", 1, 0)
@@ -32,8 +32,7 @@ func newQuicPair(t *testing.T, clientKA, serverKA KeepAliveConfig) (client, serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	ql := l.(*QuicNetworkListener)
-	t.Cleanup(func() { ql.listener.Close() })
+	t.Cleanup(func() { l.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -52,14 +51,14 @@ func newQuicPair(t *testing.T, clientKA, serverKA KeepAliveConfig) (client, serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	client = nc.(*QuicNetworkConnection)
+	client = nc.(*quicNetworkConnection)
 	t.Cleanup(func() { client.Close() })
 
 	snc := <-accepted
 	if snc == nil {
 		t.Fatal("accept failed")
 	}
-	server = snc.(*QuicNetworkConnection)
+	server = snc.(*quicNetworkConnection)
 	t.Cleanup(func() { server.Close() })
 
 	return client, server
@@ -67,7 +66,7 @@ func newQuicPair(t *testing.T, clientKA, serverKA KeepAliveConfig) (client, serv
 
 var noKeepAlive = KeepAliveConfig{Disabled: true}
 
-func readMessageTimeout(t *testing.T, c *QuicNetworkConnection) interface{} {
+func readMessageTimeout(t *testing.T, c *quicNetworkConnection) interface{} {
 	t.Helper()
 
 	type result struct {

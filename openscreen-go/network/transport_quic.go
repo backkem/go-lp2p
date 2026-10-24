@@ -3,8 +3,8 @@ package ospc
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -27,6 +27,15 @@ type QuicTransport struct {
 	IdleTimeout time.Duration
 	// KeepAlive configures sending agent-status-request messages.
 	KeepAlive KeepAliveConfig
+	// Logger receives transport logs. Nil discards them.
+	Logger *slog.Logger
+}
+
+func (t *QuicTransport) logger() *slog.Logger {
+	if t.Logger == nil {
+		return discardLogger
+	}
+	return t.Logger
 }
 
 func NewQuicTransport() *QuicTransport {
@@ -51,7 +60,7 @@ func (t *QuicTransport) DialAddr(ctx context.Context, addr string, tlsConf *tls.
 	if err != nil {
 		return nil, err
 	}
-	return NewQuicNetworkConnection(qConn, t.KeepAlive), nil
+	return newQuicNetworkConnection(qConn, t.KeepAlive, t.logger()), nil
 }
 
 type ospConnectionIDGenerator struct {
@@ -72,40 +81,101 @@ func (t *QuicTransport) ListenAddr(addr string, tlsConf *tls.Config) (NetworkLis
 	if err != nil {
 		return nil, err
 	}
-	qConn, err := (&quic.Transport{
+	tr := &quic.Transport{
 		Conn:                  conn,
 		ConnectionIDGenerator: &ospConnectionIDGenerator{},
-	}).Listen(tlsConf, t.quicConfig())
+	}
+	qConn, err := tr.Listen(tlsConf, t.quicConfig())
 	if err != nil {
+		conn.Close()
 		return nil, err
 	}
 
-	return &QuicNetworkListener{
+	return &quicNetworkListener{
 		listener:  qConn,
+		transport: tr,
 		keepAlive: t.KeepAlive,
+		log:       t.logger(),
 	}, nil
 }
 
-var _ NetworkListener = &QuicNetworkListener{}
+var _ NetworkListener = &quicNetworkListener{}
 
-type QuicNetworkListener struct {
+type quicNetworkListener struct {
 	listener  *quic.Listener
+	transport *quic.Transport
 	keepAlive KeepAliveConfig
+	log       *slog.Logger
+
+	mu     sync.Mutex // Protects the state below.
+	active int        // Accepted connections not yet closed.
+	closed bool
 }
 
-func (l *QuicNetworkListener) Accept(ctx context.Context) (NetworkConnection, error) {
+func (l *quicNetworkListener) Accept(ctx context.Context) (NetworkConnection, error) {
+	conn, err := l.acceptRaw(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return l.wrap(conn), nil
+}
+
+// acceptRaw accepts a QUIC connection without starting the network protocol
+// on it, so connections for other ALPNs can be handed off untouched.
+func (l *quicNetworkListener) acceptRaw(ctx context.Context) (quic.Connection, error) {
 	conn, err := l.listener.Accept(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return NewQuicNetworkConnection(conn, l.keepAlive), nil
+	l.track(conn)
+	return conn, nil
 }
 
-func (l *QuicNetworkListener) Addr() net.Addr {
+// track keeps the UDP socket open while conn is alive.
+func (l *quicNetworkListener) track(conn quic.Connection) {
+	l.mu.Lock()
+	l.active++
+	l.mu.Unlock()
+
+	go func() {
+		<-conn.Context().Done()
+
+		l.mu.Lock()
+		l.active--
+		closeTransport := l.closed && l.active == 0
+		l.mu.Unlock()
+		if closeTransport {
+			_ = l.transport.Close()
+		}
+	}()
+}
+
+func (l *quicNetworkListener) wrap(conn quic.Connection) NetworkConnection {
+	return newQuicNetworkConnection(conn, l.keepAlive, l.log)
+}
+
+// Close stops listening. Accepted connections are not closed, they share the
+// UDP socket, which is closed once the last of them is closed.
+func (l *quicNetworkListener) Close() error {
+	err := l.listener.Close()
+
+	l.mu.Lock()
+	l.closed = true
+	closeTransport := l.active == 0
+	l.mu.Unlock()
+	if closeTransport {
+		if tErr := l.transport.Close(); err == nil {
+			err = tErr
+		}
+	}
+	return err
+}
+
+func (l *quicNetworkListener) Addr() net.Addr {
 	return l.listener.Addr()
 }
 
-var _ NetworkConnection = &QuicNetworkConnection{}
+var _ NetworkConnection = &quicNetworkConnection{}
 
 // QuicNetworkConnection reads every incoming stream concurrently, so a stalled
 // stream doesn't block messages on other streams. Messages within a stream
@@ -115,9 +185,10 @@ var _ NetworkConnection = &QuicNetworkConnection{}
 // Unidirectional streams keep being read after the hand-off to the
 // application protocol, which only uses bidirectional streams. This keeps
 // agent-status messages, and with that the keep-alive, working.
-type QuicNetworkConnection struct {
+type quicNetworkConnection struct {
 	conn      quic.Connection
 	keepAlive *keepAlive
+	log       *slog.Logger
 
 	msgCh chan interface{}
 
@@ -133,18 +204,19 @@ type QuicNetworkConnection struct {
 	closeOnce sync.Once
 }
 
-func NewQuicNetworkConnection(conn quic.Connection, conf KeepAliveConfig) *QuicNetworkConnection {
+func newQuicNetworkConnection(conn quic.Connection, conf KeepAliveConfig, log *slog.Logger) *quicNetworkConnection {
 	ctx, cancel := context.WithCancel(context.Background())
 	bidiCtx, bidiCancel := context.WithCancel(ctx)
-	q := &QuicNetworkConnection{
+	q := &quicNetworkConnection{
 		conn:       conn,
 		msgCh:      make(chan interface{}),
 		ctx:        ctx,
 		cancel:     cancel,
 		bidiCancel: bidiCancel,
 		netDone:    make(chan struct{}),
+		log:        log,
 	}
-	q.keepAlive = newKeepAlive(conf, q.sendMessage)
+	q.keepAlive = newKeepAlive(conf, q.sendMessage, log)
 
 	// Accept unidirectional streams (spec-compliant peers)
 	q.wg.Add(1)
@@ -162,7 +234,7 @@ func NewQuicNetworkConnection(conn quic.Connection, conf KeepAliveConfig) *QuicN
 	return q
 }
 
-func (q *QuicNetworkConnection) acceptStreams(accept func() (quic.ReceiveStream, error)) {
+func (q *quicNetworkConnection) acceptStreams(accept func() (quic.ReceiveStream, error)) {
 	defer q.wg.Done()
 	for {
 		s, err := accept()
@@ -175,7 +247,7 @@ func (q *QuicNetworkConnection) acceptStreams(accept func() (quic.ReceiveStream,
 }
 
 // readStream reads the messages of a single stream in order.
-func (q *QuicNetworkConnection) readStream(s quic.ReceiveStream) {
+func (q *quicNetworkConnection) readStream(s quic.ReceiveStream) {
 	defer q.wg.Done()
 	for {
 		msg, err := readMessage(s)
@@ -185,7 +257,7 @@ func (q *QuicNetworkConnection) readStream(s quic.ReceiveStream) {
 			select {
 			case <-q.ctx.Done():
 			default:
-				fmt.Printf("quic: failed to read message from stream %d: %v\n", s.StreamID(), err)
+				q.log.Debug("quic: failed to read message", "stream", s.StreamID(), "err", err)
 			}
 			s.CancelRead(0)
 			return
@@ -199,7 +271,7 @@ func (q *QuicNetworkConnection) readStream(s quic.ReceiveStream) {
 
 // dispatch delivers a message read from a stream. It reports false if the
 // connection is closed.
-func (q *QuicNetworkConnection) dispatch(msg interface{}) bool {
+func (q *quicNetworkConnection) dispatch(msg interface{}) bool {
 	if q.keepAlive.handleMessage(msg) {
 		return true
 	}
@@ -215,7 +287,7 @@ func (q *QuicNetworkConnection) dispatch(msg interface{}) bool {
 			return false
 		default:
 		}
-		fmt.Printf("quic: dropping %T received after hand-off\n", msg)
+		q.log.Debug("quic: dropping message received after hand-off", "msg", msgName(msg))
 		return true
 	case <-q.ctx.Done():
 		return false
@@ -224,7 +296,7 @@ func (q *QuicNetworkConnection) dispatch(msg interface{}) bool {
 
 // ReadMessage returns the next network protocol message received on any of
 // the streams.
-func (q *QuicNetworkConnection) ReadMessage() (interface{}, error) {
+func (q *quicNetworkConnection) ReadMessage() (interface{}, error) {
 	select {
 	case msg := <-q.msgCh:
 		return msg, nil
@@ -238,14 +310,14 @@ func (q *QuicNetworkConnection) ReadMessage() (interface{}, error) {
 // Write opens a new unidirectional stream per call, writes the data,
 // and closes the stream (sending FIN). This matches the spec requirement
 // of one unidirectional stream per message.
-func (q *QuicNetworkConnection) Write(p []byte) (int, error) {
+func (q *quicNetworkConnection) Write(p []byte) (int, error) {
 	if err := q.closeError(); err != nil {
 		return 0, err
 	}
 	return q.write(p)
 }
 
-func (q *QuicNetworkConnection) write(p []byte) (int, error) {
+func (q *quicNetworkConnection) write(p []byte) (int, error) {
 	s, err := q.conn.OpenUniStreamSync(q.ctx)
 	if err != nil {
 		return 0, err
@@ -264,7 +336,7 @@ func (q *QuicNetworkConnection) write(p []byte) (int, error) {
 
 // sendMessage writes a message on a new unidirectional stream. Unlike Write
 // it keeps working after the hand-off.
-func (q *QuicNetworkConnection) sendMessage(msg interface{}) error {
+func (q *quicNetworkConnection) sendMessage(msg interface{}) error {
 	return writeMessage(msg, writerFunc(q.write))
 }
 
@@ -274,19 +346,19 @@ func (f writerFunc) Write(p []byte) (int, error) {
 	return f(p)
 }
 
-func (q *QuicNetworkConnection) setRequestIDSource(next func() uint64) {
+func (q *quicNetworkConnection) setRequestIDSource(next func() uint64) {
 	q.keepAlive.setRequestIDSource(next)
 }
 
-func (q *QuicNetworkConnection) IsReliable() bool {
+func (q *quicNetworkConnection) IsReliable() bool {
 	return true
 }
 
-func (q *QuicNetworkConnection) ConnectionState() tls.ConnectionState {
+func (q *quicNetworkConnection) ConnectionState() tls.ConnectionState {
 	return q.conn.ConnectionState().TLS
 }
 
-func (q *QuicNetworkConnection) closeError() error {
+func (q *quicNetworkConnection) closeError() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -294,7 +366,7 @@ func (q *QuicNetworkConnection) closeError() error {
 }
 
 // endNetworkPhase stops delivering messages to the network protocol.
-func (q *QuicNetworkConnection) endNetworkPhase(err error) error {
+func (q *quicNetworkConnection) endNetworkPhase(err error) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -307,20 +379,20 @@ func (q *QuicNetworkConnection) endNetworkPhase(err error) error {
 	return nil
 }
 
-func (q *QuicNetworkConnection) IntoApplicationConnection() (ApplicationConnection, error) {
+func (q *quicNetworkConnection) IntoApplicationConnection() (ApplicationConnection, error) {
 	if err := q.endNetworkPhase(ErrTransportHandedOff); err != nil {
 		return nil, err
 	}
-	return &QuicApplicationConnection{owner: q}, nil
+	return &quicApplicationConnection{owner: q}, nil
 }
 
-func (q *QuicNetworkConnection) Close() error {
+func (q *quicNetworkConnection) Close() error {
 	q.endNetworkPhase(ErrTransportClosed)
 	return q.closeConn(QuicErrorCodeNoLongerNeeded, "Closed")
 }
 
 // closeConn closes the QUIC connection and waits for the stream readers.
-func (q *QuicNetworkConnection) closeConn(code quic.ApplicationErrorCode, reason string) error {
+func (q *quicNetworkConnection) closeConn(code quic.ApplicationErrorCode, reason string) error {
 	var err error
 	q.closeOnce.Do(func() {
 		q.keepAlive.stop()
@@ -331,46 +403,46 @@ func (q *QuicNetworkConnection) closeConn(code quic.ApplicationErrorCode, reason
 	return err
 }
 
-var _ ApplicationConnection = &QuicApplicationConnection{}
+var _ ApplicationConnection = &quicApplicationConnection{}
 
-type QuicApplicationConnection struct {
-	owner *QuicNetworkConnection
+type quicApplicationConnection struct {
+	owner *quicNetworkConnection
 }
 
-func (q *QuicApplicationConnection) AcceptStream(ctx context.Context) (ApplicationStream, error) {
+func (q *quicApplicationConnection) AcceptStream(ctx context.Context) (ApplicationStream, error) {
 	s, err := q.owner.conn.AcceptStream(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &QuicApplicationStream{stream: s, keepAlive: q.owner.keepAlive}, nil
+	return &quicApplicationStream{stream: s, keepAlive: q.owner.keepAlive}, nil
 }
 
-func (q *QuicApplicationConnection) OpenStreamSync(ctx context.Context) (ApplicationStream, error) {
+func (q *quicApplicationConnection) OpenStreamSync(ctx context.Context) (ApplicationStream, error) {
 	s, err := q.owner.conn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return &QuicApplicationStream{stream: s, keepAlive: q.owner.keepAlive}, nil
+	return &quicApplicationStream{stream: s, keepAlive: q.owner.keepAlive}, nil
 }
 
-func (q *QuicApplicationConnection) Close() error {
+func (q *quicApplicationConnection) Close() error {
 	return q.owner.closeConn(QuicErrorCodeNoLongerNeeded, "Closed")
 }
 
-var _ ApplicationStream = &QuicApplicationStream{}
+var _ ApplicationStream = &quicApplicationStream{}
 
-type QuicApplicationStream struct {
+type quicApplicationStream struct {
 	stream    quic.Stream
 	keepAlive *keepAlive
 }
 
-func (s *QuicApplicationStream) Read(p []byte) (int, error) {
+func (s *quicApplicationStream) Read(p []byte) (int, error) {
 	return s.stream.Read(p)
 }
 
 // Write resets the keep-alive timer, as data sent on any stream counts as
 // connection activity.
-func (s *QuicApplicationStream) Write(p []byte) (int, error) {
+func (s *quicApplicationStream) Write(p []byte) (int, error) {
 	n, err := s.stream.Write(p)
 	if n > 0 {
 		s.keepAlive.reset()
@@ -378,6 +450,6 @@ func (s *QuicApplicationStream) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (s *QuicApplicationStream) Close() error {
+func (s *quicApplicationStream) Close() error {
 	return s.stream.Close()
 }

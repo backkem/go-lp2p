@@ -1,7 +1,7 @@
 package ospc
 
 import (
-	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +46,7 @@ func (c KeepAliveConfig) interval() time.Duration {
 type keepAlive struct {
 	interval time.Duration // Zero when sending keep-alives is disabled.
 	send     func(msg interface{}) error
+	log      *slog.Logger
 
 	mu        sync.Mutex // Protects state below
 	timer     *time.Timer
@@ -59,10 +60,11 @@ type keepAlive struct {
 	responsesReceived atomic.Uint64
 }
 
-func newKeepAlive(conf KeepAliveConfig, send func(msg interface{}) error) *keepAlive {
+func newKeepAlive(conf KeepAliveConfig, send func(msg interface{}) error, log *slog.Logger) *keepAlive {
 	return &keepAlive{
 		interval: conf.interval(),
 		send:     send,
+		log:      log,
 		pending:  make(map[msgRequestId]struct{}),
 	}
 }
@@ -129,7 +131,7 @@ func (k *keepAlive) fire() {
 		msgRequest: msgRequest{RequestId: id},
 	})
 	if err != nil {
-		fmt.Printf("keep-alive: failed to send agent-status-request: %v\n", err)
+		k.log.Debug("keep-alive: failed to send agent-status-request", "err", err)
 		k.stop()
 	}
 }
@@ -144,7 +146,7 @@ func (k *keepAlive) handleMessage(msg interface{}) bool {
 			msgResponse: msgResponse{RequestId: typedMsg.RequestId},
 		})
 		if err != nil {
-			fmt.Printf("keep-alive: failed to send agent-status-response: %v\n", err)
+			k.log.Debug("keep-alive: failed to send agent-status-response", "err", err)
 		}
 		return true
 
@@ -154,7 +156,7 @@ func (k *keepAlive) handleMessage(msg interface{}) bool {
 		delete(k.pending, typedMsg.RequestId)
 		k.mu.Unlock()
 		if !ok {
-			fmt.Printf("keep-alive: ignoring unsolicited agent-status-response %d\n", typedMsg.RequestId)
+			k.log.Debug("keep-alive: ignoring unsolicited agent-status-response", "id", typedMsg.RequestId)
 		}
 		k.responsesReceived.Add(1)
 		return true

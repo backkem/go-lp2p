@@ -28,10 +28,11 @@ func NewDTLSTransport() *DTLSTransport {
 func toConnectionState(dtlsState *dtls.State) tls.ConnectionState {
 	peerCertificates := []*x509.Certificate{}
 
-	for i, raw := range dtlsState.PeerCertificates {
+	for _, raw := range dtlsState.PeerCertificates {
 		leaf, err := x509.ParseCertificate(raw)
 		if err != nil {
-			fmt.Printf("warning: failed to parse peer certificate %d: %v", i, err)
+			// Unparsable certificates are left out, verification fails on
+			// the missing certificate.
 			continue
 		}
 		peerCertificates = append(peerCertificates, leaf)
@@ -95,7 +96,7 @@ func (t *DTLSTransport) DialAddr(ctx context.Context, addr string, tlsConf *tls.
 		return nil, fmt.Errorf("dial failed to handshake: %v", err)
 	}
 
-	return NewDTLSNetworkConnection(dtlsConn), nil
+	return newDTLSNetworkConnection(dtlsConn), nil
 }
 
 func (t *DTLSTransport) ListenAddr(addr string, tlsConf *tls.Config) (NetworkListener, error) {
@@ -110,18 +111,18 @@ func (t *DTLSTransport) ListenAddr(addr string, tlsConf *tls.Config) (NetworkLis
 		return nil, err
 	}
 
-	return &DTLSNetworkListener{
+	return &dtlsNetworkListener{
 		listener: inner,
 	}, nil
 }
 
-var _ NetworkListener = &DTLSNetworkListener{}
+var _ NetworkListener = &dtlsNetworkListener{}
 
-type DTLSNetworkListener struct {
+type dtlsNetworkListener struct {
 	listener net.Listener
 }
 
-func (l *DTLSNetworkListener) Accept(ctx context.Context) (NetworkConnection, error) {
+func (l *dtlsNetworkListener) Accept(ctx context.Context) (NetworkConnection, error) {
 	_ = ctx
 	conn, err := l.listener.Accept()
 	if err != nil {
@@ -131,10 +132,14 @@ func (l *DTLSNetworkListener) Accept(ctx context.Context) (NetworkConnection, er
 	if err := dtlsConn.HandshakeContext(ctx); err != nil {
 		return nil, fmt.Errorf("accept failed to handshake: %v", err)
 	}
-	return NewDTLSNetworkConnection(dtlsConn), nil
+	return newDTLSNetworkConnection(dtlsConn), nil
 }
 
-func (l *DTLSNetworkListener) Addr() net.Addr {
+func (l *dtlsNetworkListener) Close() error {
+	return l.listener.Close()
+}
+
+func (l *dtlsNetworkListener) Addr() net.Addr {
 	return l.listener.Addr()
 }
 
@@ -285,23 +290,23 @@ func (c *dtlsConnectionBase) Close() error {
 	return err
 }
 
-var _ NetworkConnection = &QuicNetworkConnection{}
+var _ NetworkConnection = &quicNetworkConnection{}
 
-type DTLSNetworkConnection struct {
+type dtlsNetworkConnection struct {
 	base *dtlsConnectionBase
 
 	mu       sync.Mutex // Protects state
 	closeErr error
 }
 
-func NewDTLSNetworkConnection(conn *dtls.Conn) *DTLSNetworkConnection {
+func newDTLSNetworkConnection(conn *dtls.Conn) *dtlsNetworkConnection {
 	base := newDtlsConnectionBase(conn)
-	return &DTLSNetworkConnection{
+	return &dtlsNetworkConnection{
 		base: base,
 	}
 }
 
-func (c *DTLSNetworkConnection) Read(p []byte) (int, error) {
+func (c *dtlsNetworkConnection) Read(p []byte) (int, error) {
 	err := c.closeError()
 	if err != nil {
 		return 0, err
@@ -310,11 +315,11 @@ func (c *DTLSNetworkConnection) Read(p []byte) (int, error) {
 }
 
 // ReadMessage reads the next message from the DTLS byte stream.
-func (c *DTLSNetworkConnection) ReadMessage() (interface{}, error) {
+func (c *dtlsNetworkConnection) ReadMessage() (interface{}, error) {
 	return readMessage(c)
 }
 
-func (c *DTLSNetworkConnection) Write(p []byte) (int, error) {
+func (c *dtlsNetworkConnection) Write(p []byte) (int, error) {
 	err := c.closeError()
 	if err != nil {
 		return 0, err
@@ -322,39 +327,39 @@ func (c *DTLSNetworkConnection) Write(p []byte) (int, error) {
 	return c.base.Write(p)
 }
 
-func (c *DTLSNetworkConnection) IsReliable() bool {
+func (c *dtlsNetworkConnection) IsReliable() bool {
 	return false
 }
 
-func (c *DTLSNetworkConnection) ConnectionState() tls.ConnectionState {
+func (c *dtlsNetworkConnection) ConnectionState() tls.ConnectionState {
 	dtlsState, ok := c.base.conn.ConnectionState()
 	if !ok {
-		fmt.Println("warning: ConnectionState called before ConnectionState was set")
+		// Called before the handshake completed.
 		return tls.ConnectionState{}
 	}
 
 	return toConnectionState(&dtlsState)
 }
 
-func (c *DTLSNetworkConnection) closeError() error {
+func (c *dtlsNetworkConnection) closeError() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	return c.closeErr
 }
 
-func (c *DTLSNetworkConnection) setCloseError(err error) {
+func (c *dtlsNetworkConnection) setCloseError(err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.closeErr = err
 }
 
-func (c *DTLSNetworkConnection) shutdown(err error) {
+func (c *dtlsNetworkConnection) shutdown(err error) {
 	c.setCloseError(err)
 }
 
-func (c *DTLSNetworkConnection) IntoApplicationConnection() (ApplicationConnection, error) {
+func (c *dtlsNetworkConnection) IntoApplicationConnection() (ApplicationConnection, error) {
 	c.setCloseError(ErrTransportHandedOff)
 
 	inner := c.base
@@ -372,33 +377,33 @@ func (c *DTLSNetworkConnection) IntoApplicationConnection() (ApplicationConnecti
 		return nil, err
 	}
 
-	return &SCTPApplicationConnection{sctpAssociation: sctpAssociation}, nil
+	return &sctpApplicationConnection{sctpAssociation: sctpAssociation}, nil
 }
 
-func (c *DTLSNetworkConnection) Close() error {
+func (c *dtlsNetworkConnection) Close() error {
 	c.shutdown(ErrTransportClosed)
 	return c.base.Close()
 }
 
-var _ ApplicationConnection = &QuicApplicationConnection{}
+var _ ApplicationConnection = &quicApplicationConnection{}
 
-type SCTPApplicationConnection struct {
+type sctpApplicationConnection struct {
 	sctpAssociation *sctp.Association
 
 	mu            sync.Mutex
 	streamCounter uint16
 }
 
-func (c *SCTPApplicationConnection) AcceptStream(ctx context.Context) (ApplicationStream, error) {
+func (c *sctpApplicationConnection) AcceptStream(ctx context.Context) (ApplicationStream, error) {
 	_ = ctx // TODO: can we wire this up?
 	s, err := c.sctpAssociation.AcceptStream()
 	if err != nil {
 		return nil, err
 	}
-	return NewSCTPApplicationStream(s), nil
+	return newSCTPApplicationStream(s), nil
 }
 
-func (c *SCTPApplicationConnection) nextStreamIdentifier() uint16 {
+func (c *sctpApplicationConnection) nextStreamIdentifier() uint16 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.streamCounter++
@@ -406,22 +411,22 @@ func (c *SCTPApplicationConnection) nextStreamIdentifier() uint16 {
 	return c.streamCounter
 }
 
-func (c *SCTPApplicationConnection) OpenStreamSync(ctx context.Context) (ApplicationStream, error) {
+func (c *sctpApplicationConnection) OpenStreamSync(ctx context.Context) (ApplicationStream, error) {
 	streamId := c.nextStreamIdentifier()
 	s, err := c.sctpAssociation.OpenStream(streamId, sctp.PayloadTypeWebRTCBinary)
 	if err != nil {
 		return nil, err
 	}
-	return NewSCTPApplicationStream(s), nil
+	return newSCTPApplicationStream(s), nil
 }
 
-func (c *SCTPApplicationConnection) Close() error {
+func (c *sctpApplicationConnection) Close() error {
 	return c.sctpAssociation.Close()
 }
 
-var _ ApplicationStream = &SCTPApplicationStream{}
+var _ ApplicationStream = &sctpApplicationStream{}
 
-type SCTPApplicationStream struct {
+type sctpApplicationStream struct {
 	stream *sctp.Stream
 
 	mu             sync.Mutex
@@ -429,14 +434,14 @@ type SCTPApplicationStream struct {
 	rdBufRemaining []byte
 }
 
-func NewSCTPApplicationStream(stream *sctp.Stream) *SCTPApplicationStream {
-	return &SCTPApplicationStream{
+func newSCTPApplicationStream(stream *sctp.Stream) *sctpApplicationStream {
+	return &sctpApplicationStream{
 		stream: stream,
 		rdBuf:  make([]byte, MTU),
 	}
 }
 
-func (s *SCTPApplicationStream) Read(p []byte) (int, error) {
+func (s *sctpApplicationStream) Read(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -454,17 +459,17 @@ func (s *SCTPApplicationStream) Read(p []byte) (int, error) {
 }
 
 // Caller must hold the lock.
-func (s *SCTPApplicationStream) readRemaining(p []byte) (int, error) {
+func (s *sctpApplicationStream) readRemaining(p []byte) (int, error) {
 	n := copy(p, s.rdBufRemaining)
 	s.rdBufRemaining = s.rdBufRemaining[n:]
 	return n, nil
 }
 
-func (s *SCTPApplicationStream) Write(p []byte) (int, error) {
+func (s *sctpApplicationStream) Write(p []byte) (int, error) {
 	return writeChunked(s.stream, p)
 }
 
-func (s *SCTPApplicationStream) Close() error {
+func (s *sctpApplicationStream) Close() error {
 	return s.stream.Close()
 }
 

@@ -11,139 +11,54 @@ type PooledWebTransport struct {
 	conn *baseConnection
 }
 
-// NewTransport
+// NewTransport opens a pooled WebTransport on the connection.
 func (c *Connection) NewTransport(ctx context.Context) (*PooledWebTransport, error) {
 	return c.base.NewTransport(ctx)
 }
 
 func (c *baseConnection) NewTransport(ctx context.Context) (*PooledWebTransport, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	msg := &msgDataTransportStartRequest{
+	_, err := c.openStream(ctx, &msgDataTransportStartRequest{
 		RequestID: c.nextRequestID(),
-	}
-
-	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	err = writeMessage(msg, stream)
-	if err != nil {
-		return nil, err
-	}
+	// TODO: await data-transport-start-response
 
-	// TODO: await data-exchange-start-response
-
-	t, err := c.createDataTransport()
-	if err != nil {
-		return nil, err
-	}
-
-	return t, nil
+	return c.createDataTransport(), nil
 }
 
-type TransportListener struct {
-	conn *baseConnection
-}
-
+// NewTransportListener returns a pooled WebTransport for accepting transport
+// streams, without requesting one from the remote agent.
 func (c *Connection) NewTransportListener() (*PooledWebTransport, error) {
-	return c.base.createDataTransport()
+	return c.base.createDataTransport(), nil
 }
 
-func (c *baseConnection) NewTransportListener() (*PooledWebTransport, error) {
-	t, err := c.createDataTransport()
-	return t, err
-}
-
-func (l *TransportListener) Accept(ctx context.Context) (*PooledWebTransport, error) {
-	return l.conn.AcceptTransport(ctx)
-}
-
-func (l *TransportListener) Close() error {
-	// TODO: NOP for now
-	return nil
-}
-
+// AcceptTransport accepts a pooled WebTransport opened by the remote agent.
 func (c *Connection) AcceptTransport(ctx context.Context) (*PooledWebTransport, error) {
-	return c.base.AcceptTransport(ctx)
-}
-
-func (c *baseConnection) AcceptTransport(ctx context.Context) (*PooledWebTransport, error) {
-	c.mu.Lock()
-	close := c.close
-	accept := c.connectedState.acceptTransport
-	c.mu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-close:
-		return nil, c.err()
-	case dc := <-accept:
-		return dc, nil
-	}
+	return accept(ctx, c.base, c.base.app.Load().acceptTransport)
 }
 
 func (t *PooledWebTransport) AcceptStream(ctx context.Context) (*QuicStream, error) {
-	s, err := t.conn.AcceptTransportStream(ctx)
+	s, err := accept(ctx, t.conn, t.conn.app.Load().acceptTransportStream)
 	if err != nil {
 		return nil, err
 	}
-	return s, err
-}
-
-func (c *baseConnection) AcceptTransportStream(ctx context.Context) (*QuicStream, error) {
-	c.mu.Lock()
-	close := c.close
-	accept := c.connectedState.acceptTransportStream
-	c.mu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-close:
-		return nil, c.err()
-	case s := <-accept:
-		return &QuicStream{
-			stream: s,
-		}, nil
-	}
+	return &QuicStream{stream: s}, nil
 }
 
 func (t *PooledWebTransport) OpenStreamSync(ctx context.Context) (*QuicStream, error) {
-	s, err := t.conn.OpenTransportStream(ctx)
+	s, err := t.conn.openStream(ctx, &msgDataTransportStreamRequest{
+		RequestID: t.conn.nextRequestID(),
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	return &QuicStream{
-		stream: s,
-	}, nil
-}
+	// TODO: await data-transport-stream-response
 
-func (c *baseConnection) OpenTransportStream(ctx context.Context) (*baseStream, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	msg := &msgDataTransportStreamRequest{
-		RequestID: c.nextRequestID(),
-	}
-
-	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	err = writeMessage(msg, stream)
-	if err != nil {
-		return nil, err
-	}
-
-	// TODO: await data-exchange-start-response
-
-	return newBaseStream(stream, nil), nil
+	return &QuicStream{stream: s}, nil
 }
 
 func (t *PooledWebTransport) CloseWithError(uint64, string) error {
@@ -151,31 +66,30 @@ func (t *PooledWebTransport) CloseWithError(uint64, string) error {
 	return nil
 }
 
-// Stream
+// QuicStream is a stream of a PooledWebTransport.
 type QuicStream struct {
-	stream *baseStream
+	stream ApplicationStream
 }
 
 func (s *QuicStream) StreamID() int64 {
-	switch stream := s.stream.stream.(type) {
-	case *QuicApplicationStream:
+	switch stream := s.stream.(type) {
+	case *quicApplicationStream:
 		return int64(stream.stream.StreamID())
 
 	default:
 		// TODO: move to transport interface?
-		panic(fmt.Sprintf("unknown stream type: %T", s.stream.stream))
+		panic(fmt.Sprintf("unknown stream type: %T", s.stream))
 	}
 }
 
 func (s *QuicStream) Read(p []byte) (int, error) {
-	n, err := s.stream.stream.Read(p)
-	// fmt.Printf("QuicStream.Read: %d %s %v", n, string(p[:n]), err)
-	return n, err
+	return s.stream.Read(p)
 }
 
 func (s *QuicStream) Write(p []byte) (n int, err error) {
-	return s.stream.stream.Write(p)
+	return s.stream.Write(p)
 }
+
 func (s *QuicStream) Close() error {
-	return s.stream.stream.Close()
+	return s.stream.Close()
 }

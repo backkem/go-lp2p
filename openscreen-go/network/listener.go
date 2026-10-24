@@ -7,20 +7,26 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	mdns "github.com/grandcat/zeroconf"
 )
 
 var ErrListenerClosed = errors.New("listener closed")
 
+// infoExchangeTimeout bounds the info exchange of incoming connections.
+const infoExchangeTimeout = 10 * time.Second
+
 // Listen starts an advertising agent and listens for incoming connections.
 func Listen(transportType AgentTransport, a *Agent) (*Listener, error) {
 	l := NewListener(a, transportType)
 
-	err := l.run()
+	err := l.Start()
 	if err != nil {
 		return nil, err
 	}
@@ -31,37 +37,43 @@ func Listen(transportType AgentTransport, a *Agent) (*Listener, error) {
 // Listener acts as an advertising OSP agent and listens for incoming
 // connections.
 type Listener struct {
-	mu sync.Mutex
-
 	agent         *Agent
 	transportType AgentTransport
+	log           *slog.Logger
 
 	accept chan *UnauthenticatedConnection
 
+	// Lifecycle
+	ctx       context.Context
+	cancel    context.CancelCauseFunc
+	wg        sync.WaitGroup
+	closeOnce sync.Once
+
+	mu sync.Mutex // Protects the state below.
+
+	started       bool
 	alpnListeners map[string]*ALPNListener
+	netListener   NetworkListener
 
 	// mDNS advertisement, set once running.
 	advertiser *mdns.Server
 	txt        TXTRecordSet
-
-	close    chan struct{}
-	closeErr error
-	done     chan struct{}
+	// authToken is the advertised at value.
+	authToken string
 }
 
 // NewListener creates a new Listener
 func NewListener(a *Agent, transportType AgentTransport) *Listener {
-	l := &Listener{
-		mu:            sync.Mutex{},
+	ctx, cancel := context.WithCancelCause(context.Background())
+	return &Listener{
 		agent:         a,
 		transportType: transportType,
+		log:           a.logger(),
 		accept:        make(chan *UnauthenticatedConnection),
-		close:         make(chan struct{}),
-		closeErr:      nil,
-		done:          make(chan struct{}),
+		ctx:           ctx,
+		cancel:        cancel,
+		alpnListeners: make(map[string]*ALPNListener),
 	}
-
-	return l
 }
 
 // ListenApplication allows you to listen for quic connections
@@ -70,16 +82,11 @@ func NewListener(a *Agent, transportType AgentTransport) *Listener {
 func (l *Listener) ListenApplication(alpn string, config *ALPNListenerConfig) *ALPNListener {
 	child := newALPNListener(l, config)
 
-	l.registerALPNListener(alpn, child)
-
-	return child
-}
-
-func (l *Listener) registerALPNListener(alpn string, child *ALPNListener) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
 	l.alpnListeners[alpn] = child
+
+	return child
 }
 
 func (l *Listener) removeALPNListener(child *ALPNListener) {
@@ -98,12 +105,12 @@ func (l *Listener) getALPNListener(alpn string) *ALPNListener {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	child := l.alpnListeners[alpn]
-	return child
+	return l.alpnListeners[alpn]
 }
 
+// Start listening and advertising.
 func (l *Listener) Start() error {
-	return l.run()
+	return l.start(":", true)
 }
 
 // AnnounceMetadataChange signals listening agents that the metadata of the
@@ -118,12 +125,14 @@ func (l *Listener) AnnounceMetadataChange() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.advertiser == nil {
-		// Not advertising yet, the new mv is picked up when starting.
+	if l.txt == nil {
+		// Not running yet, the new mv is picked up when starting.
 		return nil
 	}
 	l.txt.Set(txtKeyMetadataVersion, mv)
-	l.advertiser.SetText(l.txt.ToSlice())
+	if l.advertiser != nil {
+		l.advertiser.SetText(l.txt.ToSlice())
+	}
 	return nil
 }
 
@@ -183,18 +192,20 @@ func (r TXTRecordSet) ToSlice() []string {
 	return out
 }
 
-func (l *Listener) run() error {
+// start listens on addr and, if advertise is set, advertises the agent with
+// mDNS.
+func (l *Listener) start(addr string, advertise bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	var pendingConns []*baseConnection
-	pendingCh := make(chan exchangeInfoResult)
+	if l.started {
+		return errors.New("listener already started")
+	}
+	if l.ctx.Err() != nil {
+		return ErrListenerClosed
+	}
 
-	acceptCh := l.accept
-	closeCh := l.close
-	doneCh := l.done
-
-	// List all registered ALPN_OSPs.
+	// List all registered ALPNs.
 	nextProtos := []string{ALPN_OSP}
 	for k := range l.alpnListeners {
 		nextProtos = append(nextProtos, k)
@@ -217,7 +228,11 @@ func (l *Listener) run() error {
 
 			alpn := cs.NegotiatedProtocol
 			if alpn != ALPN_OSP {
-				return l.getALPNListener(alpn).doVerifyConnection(cs)
+				child := l.getALPNListener(alpn)
+				if child == nil {
+					return fmt.Errorf("unsupported ALPN %q", alpn)
+				}
+				return child.doVerifyConnection(cs)
 			}
 
 			peerCert := cs.PeerCertificates[0]
@@ -237,15 +252,6 @@ func (l *Listener) run() error {
 		},
 	}
 
-	t, err := newAgentTransport(l.transportType, l.agent.keepAlive)
-	if err != nil {
-		return err
-	}
-	listener, err := t.ListenAddr(":", tlsConfig)
-	if err != nil {
-		return err
-	}
-
 	fp, err := l.agent.CertificateFingerPrint()
 	if err != nil {
 		return err
@@ -256,9 +262,17 @@ func (l *Listener) run() error {
 		return err
 	}
 
+	t, err := newAgentTransport(l.transportType, l.agent.keepAlive, l.log)
+	if err != nil {
+		return err
+	}
+	netListener, err := t.ListenAddr(addr, tlsConfig)
+	if err != nil {
+		return err
+	}
+
 	at := randomAT(9)
 
-	// Advertise ourselves
 	txt := TXTRecordSet{}
 	txt.Set(txtKeyFingerprint, fp)
 	txt.Set(txtKeyMetadataVersion, mv)
@@ -270,168 +284,160 @@ func (l *Listener) run() error {
 	snBytes := l.agent.Certificate.Leaf.SerialNumber.Bytes()
 	snBase64 := base64.RawURLEncoding.EncodeToString(snBytes)
 	txt.Set("sn", snBase64) // TODO: openscreenprotocol#293
-	port := listener.Addr().(*net.UDPAddr).Port
-	// The Instance Name is a prefix of the display name, truncated if needed,
-	// in DNS presentation format as expected by the mDNS library.
-	instance := escapeDNSSD(instanceNameForDisplayName(l.agent.Info().DisplayName))
-	advertiser, err := mdns.Register(instance, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)
-	if err != nil {
-		return err
+
+	if advertise {
+		port := netListener.Addr().(*net.UDPAddr).Port
+		// The Instance Name is a prefix of the display name, truncated if
+		// needed, in DNS presentation format as expected by the mDNS library.
+		instance := escapeDNSSD(instanceNameForDisplayName(l.agent.Info().DisplayName))
+		advertiser, err := mdns.Register(instance, MdnsServiceType, MdnsDomain, port, txt.ToSlice(), nil)
+		if err != nil {
+			_ = netListener.Close()
+			return err
+		}
+		l.advertiser = advertiser
 	}
-	l.advertiser = advertiser
+
+	l.started = true
+	l.netListener = netListener
 	l.txt = txt
+	l.authToken = at
 
-	acceptCtx, acceptCancel := context.WithCancel(context.Background())
-	netConns := make(chan NetworkConnection)
+	l.wg.Add(1)
 	go func() {
-		for {
-			nc, err := listener.Accept(acceptCtx)
-			if err != nil {
-				fmt.Printf("AcceptListener error: %s\n", err)
-				// TODO: Close early here?
-				return
-			}
-
-			alpn := nc.ConnectionState().NegotiatedProtocol
-			if alpn != ALPN_OSP {
-				if qnc, ok := nc.(*QuicNetworkConnection); ok {
-					l.getALPNListener(alpn).dispatch(qnc.conn)
-				} else {
-					panic("TODO: generalize ALPNListener")
-				}
-				continue
-			}
-
-			select {
-			case netConns <- nc:
-			case <-closeCh:
-				return
-			}
-		}
-	}()
-
-	// Run loop
-	go func() {
-		for {
-			select {
-			case <-closeCh: // Shutdown initiated
-				advertiser.Shutdown()
-				acceptCancel()
-
-				for _, conn := range pendingConns {
-					_ = conn.Close()
-				}
-
-				close(doneCh)
-				return
-
-			case nc := <-netConns: // Incoming connection
-				remoteAgent, err := l.agent.NewRemoteAgent(nc)
-				if err != nil {
-					fmt.Printf("failed to create remote agent: %v\n", err)
-					continue
-				}
-				bConn := newBaseConnection(
-					nc,
-					l.agent,
-					remoteAgent,
-					AgentRoleServer,
-				)
-
-				bConn.runNetwork()
-
-				err = bConn.exchangeInfo(context.Background(), pendingCh)
-				if err != nil {
-					fmt.Printf("failed to exchange metadata: %v\n", err)
-					bConn.closeWithError(fmt.Errorf("failed to exchange metadata: %v", err))
-				} else {
-					pendingConns = append(pendingConns, bConn)
-				}
-
-			case res := <-pendingCh: // Connection with metadata available
-				bConn, err := res.conn, res.err
-
-				pendingConns = removeConn(pendingConns, bConn)
-
-				if err != nil {
-					break
-				}
-				uConn := &UnauthenticatedConnection{
-					base: bConn,
-				}
-
-				select {
-				case acceptCh <- uConn:
-				case <-closeCh:
-				}
-			}
-		}
+		defer l.wg.Done()
+		l.acceptLoop(netListener)
 	}()
 
 	return nil
 }
 
-func removeConn(set []*baseConnection, conn *baseConnection) []*baseConnection {
-	for i := 0; i < len(set); i++ {
-		if set[i] == conn {
-			set[i] = set[len(set)-1]
-			return set[:len(set)-1]
+// acceptLoop accepts incoming connections until the listener is closed.
+func (l *Listener) acceptLoop(netListener NetworkListener) {
+	for {
+		nc, err := l.acceptNetworkConnection(netListener)
+		if err != nil {
+			if l.ctx.Err() == nil {
+				l.log.Warn("listener: accept failed, no longer accepting connections", "err", err)
+			}
+			return
+		}
+		if nc != nil {
+			l.handleNetworkConnection(nc)
 		}
 	}
-	return set
 }
 
-// Accept returns an a discovered agent. It should be called in a loop.
-func (l *Listener) Accept(ctx context.Context) (*UnauthenticatedConnection, error) {
+// acceptNetworkConnection accepts the next connection. Connections for other
+// ALPNs are dispatched to their ALPNListener, a nil connection is returned
+// for those.
+func (l *Listener) acceptNetworkConnection(netListener NetworkListener) (NetworkConnection, error) {
+	ql, ok := netListener.(*quicNetworkListener)
+	if !ok {
+		return netListener.Accept(l.ctx)
+	}
+
+	conn, err := ql.acceptRaw(l.ctx)
+	if err != nil {
+		return nil, err
+	}
+	alpn := conn.ConnectionState().TLS.NegotiatedProtocol
+	if alpn == ALPN_OSP {
+		return ql.wrap(conn), nil
+	}
+
+	child := l.getALPNListener(alpn)
+	if child == nil {
+		_ = conn.CloseWithError(QuicErrorCodeNoLongerNeeded, "unsupported ALPN")
+		return nil, nil
+	}
+	l.wg.Add(1)
+	go func() {
+		defer l.wg.Done()
+		child.dispatch(l.ctx, conn)
+	}()
+	return nil, nil
+}
+
+// handleNetworkConnection runs the info exchange on an incoming connection and
+// hands it to Accept once complete.
+func (l *Listener) handleNetworkConnection(nc NetworkConnection) {
+	remoteAgent, err := l.agent.NewRemoteAgent(nc)
+	if err != nil {
+		l.log.Debug("listener: failed to create remote agent", "err", err)
+		_ = nc.Close()
+		return
+	}
+
 	l.mu.Lock()
-	acceptCh := l.accept
-	closeCh := l.close
+	at := l.authToken
 	l.mu.Unlock()
 
+	bConn := newBaseConnection(nc, l.agent, remoteAgent, AgentRoleServer, at)
+	bConn.runNetwork()
+
+	l.wg.Add(1)
+	go func() {
+		defer l.wg.Done()
+
+		ctx, cancel := context.WithTimeout(l.ctx, infoExchangeTimeout)
+		err := bConn.awaitInfo(ctx)
+		cancel()
+		if err != nil {
+			l.log.Debug("listener: info exchange failed", "err", err)
+			_ = bConn.Close()
+			return
+		}
+
+		select {
+		case l.accept <- &UnauthenticatedConnection{base: bConn}:
+		case <-l.ctx.Done():
+			_ = bConn.Close()
+		}
+	}()
+}
+
+// Accept returns the next incoming connection. It should be called in a loop.
+func (l *Listener) Accept(ctx context.Context) (*UnauthenticatedConnection, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case a := <-acceptCh:
+	case a := <-l.accept:
 		return a, nil
-	case <-closeCh:
-		return nil, l.err()
+	case <-l.ctx.Done():
+		return nil, ErrListenerClosed
 	}
 }
 
-// func (l *Listener) Addr() net.Addr {
-// }
-
-// Close closes the listener.
-// Any blocked Accept operations will be unblocked and return errors.
+// Close closes the listener and the connections it didn't hand out yet.
+// Connections returned by Accept are not closed. Any blocked Accept
+// operations are unblocked and return ErrListenerClosed. Close is idempotent.
 func (l *Listener) Close() error {
-	l.mu.Lock()
-	if l.closeErr != nil {
+	l.closeOnce.Do(func() {
+		l.cancel(ErrListenerClosed)
+
+		l.mu.Lock()
+		netListener := l.netListener
+		advertiser := l.advertiser
 		l.mu.Unlock()
-		return l.closeErr
-	}
 
-	l.closeErr = ErrListenerClosed
+		if advertiser != nil {
+			advertiser.Shutdown()
+		}
+		if netListener != nil {
+			_ = netListener.Close()
+		}
+	})
 
-	close(l.close)
-	done := l.done
-	l.mu.Unlock()
-
-	// Block till runLoop is gone
-	<-done
+	l.wg.Wait()
 	return nil
-}
-
-func (l *Listener) err() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	return l.closeErr
 }
 
 // UnauthenticatedConnection represents an OSPC connection that didn't pass
 // authentication yet.
 type UnauthenticatedConnection struct {
-	base *baseConnection
+	base          *baseConnection
+	authenticated atomic.Bool
 }
 
 // LocalAgent provides info about local agent
@@ -469,15 +475,13 @@ func (c *UnauthenticatedConnection) AcceptAuthenticate(ctx context.Context) (rol
 // Authenticate is used to authenticate. It will block until authentication is complete
 // or the context is closed.
 func (c *UnauthenticatedConnection) AuthenticatePSK(ctx context.Context, psk []byte) (*Connection, error) {
-	base := c.base
-
-	conn, err := base.AuthenticatePSK(ctx, psk)
+	conn, err := c.base.AuthenticatePSK(ctx, psk)
 	if err != nil {
 		return nil, err
 	}
 
-	// detach the UnauthenticatedConnection
-	c.base = nil
+	// Detach the UnauthenticatedConnection, Close no longer applies.
+	c.authenticated.Store(true)
 
 	return conn, nil
 }
@@ -486,7 +490,7 @@ func (c *UnauthenticatedConnection) AuthenticatePSK(ctx context.Context, psk []b
 // If the connection has progressed to authenticated, it is not closed
 // but an error is returned. This allows for defer closing regardless.
 func (c *UnauthenticatedConnection) Close() error {
-	if c.base == nil {
+	if c.authenticated.Load() {
 		return errors.New("already authenticated")
 	}
 	return c.base.Close()

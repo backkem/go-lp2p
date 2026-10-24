@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"log/slog"
 	"math/big"
 	"sync"
 	"time"
@@ -48,6 +49,10 @@ type AgentConfig struct {
 
 	// KeepAlive configures the connection keep-alive.
 	KeepAlive KeepAliveConfig
+
+	// Logger receives the logs of the agent and its connections. Per-message
+	// logs are at debug level. Nil discards all logs.
+	Logger *slog.Logger
 }
 
 func NewAgentConfig(nickname string) AgentConfig {
@@ -63,11 +68,13 @@ func (c *AgentConfig) WithPSKConfig(easeOfInput, entropy int) {
 	}
 }
 
-func (c *AgentConfig) WithModelName(easeOfInput, entropy int) {
-	c.PSKConfig = PSKConfig{
-		EaseOfInput: easeOfInput,
-		Entropy:     entropy,
-	}
+func (c *AgentConfig) WithModelName(modelName string) {
+	c.ModelName = modelName
+}
+
+// WithLogger sets the logger of the agent, see AgentConfig.Logger.
+func (c *AgentConfig) WithLogger(logger *slog.Logger) {
+	c.Logger = logger
 }
 
 func (c *AgentConfig) WithCertificateSNBase(snBase uint32) {
@@ -77,6 +84,17 @@ func (c *AgentConfig) WithCertificateSNBase(snBase uint32) {
 // PeerID is a unique identifier for a peer, it is equal tot the
 // OSP agent fingerprint (FP) of the peer.
 type PeerID string
+
+// short returns an abbreviated PeerID for logging.
+func (id PeerID) short() string {
+	if len(id) > 8 {
+		return string(id[:8])
+	}
+	return string(id)
+}
+
+// discardLogger is used when no logger is configured.
+var discardLogger = slog.New(slog.DiscardHandler)
 
 type Agent struct {
 	PeerID PeerID
@@ -99,18 +117,12 @@ type Agent struct {
 	info               *AgentInfo
 	authenticationInfo *AgentAuthenticationInfo
 
-	knownPeers map[PeerID]knownPeer
-
 	keepAlive KeepAliveConfig
+	log       *slog.Logger // Only set for local agents.
 
 	// Local agent state, see request_id.go. Initialized lazily.
 	stateToken string
 	requestIDs *RequestIDAllocator
-}
-
-type knownPeer struct {
-	Agent         *Agent
-	Authenticated bool
 }
 
 type AgentAuthenticationInfo struct {
@@ -191,12 +203,24 @@ func NewAgent(c AgentConfig) (*Agent, error) {
 	}
 
 	agent.keepAlive = c.KeepAlive
+	agent.log = c.Logger
 
 	return agent, nil
 }
 
+// logger returns the logger of a local agent.
+func (a *Agent) logger() *slog.Logger {
+	if a.log == nil {
+		return discardLogger
+	}
+	return a.log
+}
+
 func (a *Agent) NewRemoteAgent(nc NetworkConnection) (*Agent, error) {
 	certs := nc.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil, errors.New("no peer certificate")
+	}
 	cert := &tls.Certificate{
 		Certificate: [][]byte{},
 		Leaf:        certs[0],
@@ -209,11 +233,6 @@ func (a *Agent) NewRemoteAgent(nc NetworkConnection) (*Agent, error) {
 		return nil, err
 	}
 	peerID := PeerID(rawPeerID)
-
-	if agent, ok := a.knownPeers[peerID]; ok {
-		// TODO: avoid re-authenticating known peers.
-		return agent.Agent, nil
-	}
 
 	return &Agent{
 		PeerID:               peerID,
