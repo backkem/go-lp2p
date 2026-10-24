@@ -51,6 +51,7 @@ type keepAlive struct {
 	timer     *time.Timer
 	stopped   bool
 	requestID uint64
+	nextID    func() uint64 // Optional request ID source, see setRequestIDSource.
 	pending   map[msgRequestId]struct{}
 
 	// Counters of handled keep-alive traffic.
@@ -64,6 +65,15 @@ func newKeepAlive(conf KeepAliveConfig, send func(msg interface{}) error) *keepA
 		send:     send,
 		pending:  make(map[msgRequestId]struct{}),
 	}
+}
+
+// setRequestIDSource makes keep-alive requests draw their IDs from next, so
+// they don't collide with other requests sent to the same peer.
+func (k *keepAlive) setRequestIDSource(next func() uint64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+
+	k.nextID = next
 }
 
 // start arms the keep-alive timer.
@@ -104,8 +114,13 @@ func (k *keepAlive) fire() {
 		k.mu.Unlock()
 		return
 	}
-	k.requestID++
-	id := msgRequestId(k.requestID)
+	var id msgRequestId
+	if k.nextID != nil {
+		id = msgRequestId(k.nextID())
+	} else {
+		k.requestID++
+		id = msgRequestId(k.requestID)
+	}
 	k.pending[id] = struct{}{}
 	k.mu.Unlock()
 

@@ -21,7 +21,7 @@ func (c *baseConnection) NewTransport(ctx context.Context) (*PooledWebTransport,
 	defer c.mu.Unlock()
 
 	msg := &msgDataTransportStartRequest{
-		RequestID: c.agentState.nextRequestID(),
+		RequestID: c.nextRequestID(),
 	}
 
 	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)
@@ -128,7 +128,7 @@ func (c *baseConnection) OpenTransportStream(ctx context.Context) (*baseStream, 
 	defer c.mu.Unlock()
 
 	msg := &msgDataTransportStreamRequest{
-		RequestID: c.agentState.nextRequestID(),
+		RequestID: c.nextRequestID(),
 	}
 
 	stream, err := c.connectedState.appConn.OpenStreamSync(ctx)

@@ -46,30 +46,6 @@ func (c *Connection) Close() error {
 	return c.base.Close()
 }
 
-type AgentState struct {
-	StateToken string // 8 characters in the range [0-9A-Za-z]
-	RequestId  uint64
-}
-
-func newAgentState() AgentState {
-	s := AgentState{
-		RequestId: 1,
-	}
-	s.newStateToken()
-
-	return s
-}
-
-func (s *AgentState) newStateToken() {
-	s.StateToken = randomAlphaNum(8)
-}
-
-func (s *AgentState) nextRequestID() uint64 {
-	id := s.RequestId
-	s.RequestId++
-	return id
-}
-
 func randomAlphaNum(length int) string {
 	const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 	return randomCharset(chars, length)
@@ -98,8 +74,7 @@ type baseConnection struct {
 
 	mu sync.Mutex
 
-	agentRole  AgentRole
-	agentState AgentState
+	agentRole AgentRole
 
 	localAgent  *Agent
 	remoteAgent *Agent
@@ -125,7 +100,6 @@ func newBaseConnection(nc NetworkConnection, localAgent *Agent, remoteAgent *Age
 	bConn := &baseConnection{
 		mu:          sync.Mutex{},
 		agentRole:   role,
-		agentState:  newAgentState(), // TODO: reconnect
 		localAgent:  localAgent,
 		remoteAgent: remoteAgent,
 		netConn:     nc,
@@ -134,7 +108,19 @@ func newBaseConnection(nc NetworkConnection, localAgent *Agent, remoteAgent *Age
 		done:        make(chan struct{}),
 	}
 
+	// Transport-level keep-alive requests share the per-peer request IDs.
+	if src, ok := nc.(interface{ setRequestIDSource(func() uint64) }); ok {
+		src.setRequestIDSource(bConn.nextRequestID)
+	}
+
 	return bConn
+}
+
+// nextRequestID returns the next request ID for a message sent to the remote
+// agent. IDs are tracked by the local agent per remote PeerID so they survive
+// reconnects.
+func (c *baseConnection) nextRequestID() uint64 {
+	return c.localAgent.NextRequestID(c.remoteAgent.PeerID)
 }
 
 func (c *baseConnection) RemoteAgent() *Agent {

@@ -93,6 +93,10 @@ type Agent struct {
 	knownPeers map[PeerID]knownPeer
 
 	keepAlive KeepAliveConfig
+
+	// Local agent state, see request_id.go. Initialized lazily.
+	stateToken string
+	requestIDs *RequestIDAllocator
 }
 
 type knownPeer struct {
@@ -282,7 +286,7 @@ func generateCert(displayName string, certificateSNBase, certificateSNCounter ui
 	snBig := new(big.Int).SetUint64(serialNumber)
 	snBytes := snBig.Bytes()
 	snBase64 := base64.RawURLEncoding.EncodeToString(snBytes)
-	
+
 	// Build OpenScreen-compliant hostname: serialNumber.encodedInstanceName.encodedDomain
 	cn := buildAgentHostname(snBase64, displayName, MdnsDomain)
 	names := []string{cn}

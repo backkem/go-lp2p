@@ -274,6 +274,10 @@ func (f writerFunc) Write(p []byte) (int, error) {
 	return f(p)
 }
 
+func (q *QuicNetworkConnection) setRequestIDSource(next func() uint64) {
+	q.keepAlive.setRequestIDSource(next)
+}
+
 func (q *QuicNetworkConnection) IsReliable() bool {
 	return true
 }

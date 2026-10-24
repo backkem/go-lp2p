@@ -28,7 +28,7 @@ func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannel
 
 	msg := &msgDataChannelOpenRequest{
 		msgRequest: msgRequest{
-			RequestId: msgRequestId(c.agentState.nextRequestID()),
+			RequestId: msgRequestId(c.nextRequestID()),
 		},
 		ChannelId: params.ID,
 		Label:     params.Label,

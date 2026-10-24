@@ -10,24 +10,25 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sync/atomic"
 
 	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
 // ApplicationConnection wraps an authenticated ospc.Connection and provides
 // application-level message exchange capabilities.
+//
+// Request IDs are not tracked per connection: they are allocated by the local
+// agent per remote agent (keyed by its certificate fingerprint), so they keep
+// increasing when reconnecting to the same peer.
 type ApplicationConnection struct {
-	conn      *ospc.Connection
-	requestID uint64
+	conn *ospc.Connection
 }
 
 // NewApplicationConnection creates a new ApplicationConnection from an authenticated
 // ospc.Connection.
 func NewApplicationConnection(conn *ospc.Connection) *ApplicationConnection {
 	return &ApplicationConnection{
-		conn:      conn,
-		requestID: 0,
+		conn: conn,
 	}
 }
 
@@ -52,8 +53,10 @@ func (c *ApplicationConnection) Close() error {
 }
 
 // nextRequestID returns the next request ID for message correlation.
+// The counter is shared with the network layer and all other connections
+// to the same remote agent.
 func (c *ApplicationConnection) nextRequestID() uint64 {
-	return atomic.AddUint64(&c.requestID, 1)
+	return c.LocalAgent().NextRequestID(c.RemoteAgent().PeerID)
 }
 
 // SendAgentInfoRequest sends an agent-info-request message and waits for the response.
