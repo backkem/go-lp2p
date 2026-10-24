@@ -3,22 +3,21 @@
 Interop between `openscreen-go/network` (package `ospc`) plus `openscreen-go/application`
 and the Open Screen Library's C++ OSP stack, driven through its `osp_demo` binary.
 
-- C++: `/work/openscreen`, branch `osp-spake2-interop` at 2639d78d plus uncommitted
-  work in progress (`agent_authenticator.cc`, message gate), `out/debug` built
-  2026-10-24 12:32. Debug build: DCHECKs abort.
-- Go: branch `osp-interop-relax`. quic-go v0.39.0, fxamacker/cbor v2.9.0,
+- C++: `/work/openscreen`, branch `osp-spec-gaps` at 33430be1, `out/debug/osp_demo`
+  built 2026-10-24 13:44. Debug build: DCHECKs abort.
+- Go: branch `osp-spec-gaps`. quic-go v0.39.0, fxamacker/cbor v2.9.0,
   grandcat/zeroconf v1.0.0, backkem/spake2-go ef71e299b11a.
 - Spec: w3c/openscreenprotocol `network.bs`, `application.bs`, `*.cddl` (main @ 71b1412).
 
-**Bottom line.** Both directions now get through mDNS, QUIC/TLS 1.3 with SPKI
-fingerprint pinning, and the metadata/auth-capabilities exchange using the real
-ospc `Dial`/`Listen` paths, **with no interop quirks**. The one remaining blocker
-is SPAKE2. ospc's SPAKE2 parameters don't match network.bs or osp_demo (see
-[SPAKE2](#spake2-the-remaining-blocker)). osp_demo now correctly holds back
-application messages from unauthenticated peers, so no application stage gets
-through. With the `AllowSkipAuthentication` quirk ospc hands the connection over
-unauthenticated, but osp_demo still holds the messages back. That is the
-spec-correct behavior.
+**Bottom line.** With **one** accepted deviation on each side, the SPAKE2
+P-256 suite (ospc `InteropQuirks.Spake2SuiteP256`, osp_demo
+`--spake2_suite=p256`), both directions pass every stage: mDNS, QUIC/TLS 1.3
+with SPKI fingerprint pinning, metadata discovery, spec SPAKE2 authentication
+(SHA-512 password hash, client/server fingerprint identities, Appendix B PSK),
+and the full Presentation API flow (availability, start, connection messages
+both ways, termination), whichever side presents the PSK. No other quirk and no
+other non-spec osp_demo flag (`--spake2_identities`, `--spake2_password_hash`,
+`--no_auth`, `--allow_unauthenticated`) is used.
 
 ## How to run
 
@@ -34,9 +33,13 @@ OSP_DEMO_LOG_DIR=/tmp/osp-logs \   # optional: osp_demo and ospc logs per test
   with a `BLOCKER (...)` reason at a known incompatibility. A stage that depends on
   an earlier one is skipped when that one didn't pass. The `-v` output is the
   progress gauge.
-- `OSP_DEMO_TRY_SPAKE2=1` attempts real SPAKE2 with the PSK that osp_demo shows as
-  presenter, or with `$OSP_DEMO_PSK`. It is expected to fail until the SPAKE2
-  mismatches are fixed.
+- Authentication always runs. osp_demo is started with
+  `--spake2_suite=p256 --psk=<PSK>`, ospc agents with `Spake2SuiteP256`. The PSK
+  is `$OSP_DEMO_PSK` or a random 6-digit one per run; since both sides know it,
+  either can be the PSK presenter.
+- Who presents (network.bs: lower `psk-ease-of-input`, the server on a tie):
+  `OSP_GO_EASE_OF_INPUT` sets the ospc agents' ease of input (default 0),
+  `OSP_DEMO_EASE_OF_INPUT` osp_demo's `--psk_ease_of_input` (default 50).
 - Harness mechanics: osp_demo runs in a temp cwd containing
   `osp/impl/quic/certificates/`. Its log is read from the `_recv_fifo`/`_cntl_fifo`
   FIFO, and it is driven through stdin. Cleanup kills its process group.
@@ -67,58 +70,62 @@ OSP_DEMO_LOG_DIR=/tmp/osp-logs \   # optional: osp_demo and ospc logs per test
 
 ## Per-stage results
 
-### Before / after (ospc paths)
+Recorded 2026-10-24 with `OSP_DEMO_PSK=123456`,
+`go test -tags interop -count=1 -v -run TestOSPC`. Flags on each side, every run:
+ospc `InteropQuirks{Spake2SuiteP256: true}` (plus `AllowSkipAuthentication`,
+which only enables the API and was not used); osp_demo
+`-v --spake2_suite=p256 --psk=123456` (plus `--psk_ease_of_input=0` in run C).
 
-"Before" is ospc on main (f7b7205) against the osp_demo of the first exploration
-(2a78d154: whole-certificate `fp`, zero-length CID bug, no network phase).
-"After" is this branch against the current osp_demo, recorded 2026-10-24 in two
-consecutive identical runs: `ok ... 33.4s`.
+| Run | Env | Dial direction: PSK presenter (SPAKE2 Alice) | Listen direction: PSK presenter (SPAKE2 Alice) |
+|---|---|---|---|
+| A | defaults (Go ease 0, osp_demo 50) | ospc (ospc, `psk-shown`) | ospc (ospc, `psk-shown`) |
+| B | `OSP_GO_EASE_OF_INPUT=100` | osp_demo (osp_demo, `psk-shown`) | osp_demo (osp_demo, `psk-shown`) |
+| C | `OSP_DEMO_EASE_OF_INPUT=0` (tie: server presents) | osp_demo (server) | ospc (server) |
 
-**osp_demo publisher → ospc `Dial`** (`TestOSPCDialPublisher`)
+The Bob side answered with `psk-input` in every run.
 
-| Stage | Before | After | Quirks needed (after) | Evidence (after) |
+**osp_demo publisher → ospc `Dial`** (`TestOSPCDialPublisher`), runs A, B, C
+
+| Stage | A | B | C | Quirks |
 |---|---|---|---|---|
-| 01 mDNS discover | PASS | PASS | none | TXT `fp` (SPKI), `mv`, `at`; no `sn`. |
-| 02 Dial (TLS + agent-info + auth-capabilities) | SKIP (Go: `failed to get sn record`) | PASS | none | fp pinning only; agent-info-request resent once (see below). |
-| 03 authenticate | n/a | SKIP (Go: SPAKE2 params) | `AllowSkipAuthentication` | osp_demo presents and sends `auth-spake2-handshake`; ospc can't complete it. |
-| 04 URL availability (14/15) | n/a | SKIP (auth) | none | osp_demo: `holding back message type 14 from instance 1`. |
-| 05-07 start / message / terminate | n/a | SKIP | — | depend on 04 |
+| 01 mDNS discover | PASS | PASS | PASS | none |
+| 02 Dial (TLS + agent-info + auth-capabilities) | PASS | PASS | PASS | none |
+| 03 authenticate (SPAKE2) | PASS | PASS | PASS | `Spake2SuiteP256` |
+| 04 URL availability | PASS | PASS | PASS | none |
+| 05 presentation start (26-char presentation-id) | PASS | PASS | PASS | none |
+| 06 connection message (Go → C++, echo C++ → Go) | PASS | PASS | PASS | none |
+| 07 termination (controller-initiated) | PASS | PASS | PASS | none |
 
-**osp_demo controller → ospc `Listen`** (`TestOSPCListenController`)
+**osp_demo controller → ospc `Listen`** (`TestOSPCListenController`), runs A, B, C
 
-| Stage | Before | After | Quirks needed (after) | Evidence (after) |
+| Stage | A | B | C | Quirks |
 |---|---|---|---|---|
-| 01 connect (mDNS, TLS, info exchange, `Accept`) | SKIP (fp definition; `Accept` would also wait for agent-info) | PASS | none | osp_demo: `agent-info from GoIopOspc… (unverified)`. |
-| 02 authenticate | n/a | SKIP (Go: SPAKE2 params) | `AllowSkipAuthentication` | |
-| 03 URL availability | n/a | SKIP (auth) | none | osp_demo controller sends no request on the unauthenticated connection. |
-| 04-05 start / message | n/a | SKIP | — | depend on 03 |
+| 01 connect (mDNS, TLS, info exchange, `Accept`) | PASS | PASS | PASS | none |
+| 02 authenticate (SPAKE2) | PASS | PASS | PASS | `Spake2SuiteP256` |
+| 03 URL availability | PASS | PASS | PASS | none |
+| 04 presentation start (presentation-id validated, ≥16 chars) | PASS | PASS | PASS | none |
+| 05 connection message (C++ → Go, Go → C++) | PASS | PASS | PASS | none |
+| 06 termination (controller-initiated, new) | PASS | PASS | PASS | none |
 
-Against the old osp_demo the quirks would have been needed as follows. These are
-covered by unit tests; that binary no longer exists.
+Not exercised against osp_demo: the PSK consumer initiating with
+`psk-needs-presentation`. osp_demo never initiates as consumer, and as presenter
+it initiates as soon as it has the peer's auth-capabilities, before ospc's
+consumer is given the PSK. ospc covers it Go-to-Go (`TestAuthenticationFlows`),
+including the both-initiate race, which it resolves the way osp_demo does (the
+presenter's initiation wins).
 
-| Old osp_demo behavior | Quirk |
-|---|---|
-| Whole-certificate `fp` | `AcceptCertificateFingerprint` (Dial) and `AdvertiseCertificateFingerprint` (Listen) |
-| No agent-info / auth-capabilities | `TolerateMissingAgentInfo` |
-| No authentication | `AllowSkipAuthentication` |
+### Raw probe (fallback gauge)
 
-The zero-length-CID crash had no Go-side workaround. It is fixed in C++ (6a9786ae).
-
-### Raw probe (fallback gauge), after
-
-| Test / stage | Result | Notes |
-|---|---|---|
-| Publisher 01 discover, 03 resolve, 04 QUIC+TLS | PASS | `fp` matches the SPKI definition. |
-| Publisher 05 agent-info | SKIP | The probe sends one request right after the handshake. osp_demo drops a request that arrives before its network phase starts. |
-| Publisher 06 auth-capabilities | SKIP | Not in reply to the probe's. |
-| Publisher 07-10 presentation | SKIP | osp_demo holds back application messages until authentication. |
-| Controller (SPKI fp) 01 discover, 02 QUIC+TLS | PASS | osp_demo connects to an SPKI-advertising receiver. |
-| Controller 03-05 presentation | SKIP | osp_demo doesn't send application messages unauthenticated. |
-| Controller 06 network messages | PASS | osp_demo sent `auth-capabilities` (1001) and `agent-info-request` (10). |
-
-Before (old osp_demo), the raw probe got through availability, start and
-connection messages in the controller direction (9 PASS / 10 SKIP overall). That
-was only possible because osp_demo didn't authenticate.
+`interop_test.go` speaks the wire protocol without the ospc state machine and
+without authentication. Since osp_demo correctly holds back application
+messages from unauthenticated peers, its presentation stages SKIP; it remains a
+gauge for discovery, QUIC/TLS and the network-phase messages only. Run A
+(`-run TestRawProbe`): publisher 01, 03, 04, 05 (agent-info) PASS, 06
+auth-capabilities and 07-10 presentation SKIP; controller (SPKI fp) 01, 02, 06
+PASS, 03-05 SKIP. Its
+presentation-ids now come from `application.NewPresentationID` (the previous
+`"go-iop-" + 8 chars` was 15 characters, below application.bs's minimum of 16;
+osp_demo answers such an id with `invalid-presentation-id` (11)).
 
 ## Interop quirks (`ospc.AgentConfig.InteropQuirks`)
 
@@ -127,6 +134,7 @@ is created.
 
 | Quirk | Effect | Spec rule violated |
 |---|---|---|
+| `Spake2SuiteP256` | SPAKE2 with the RFC 9382 P-256 suite (SPAKE2-P256-SHA256-HKDF-HMAC) and otherwise network.bs parameters. Without it `AuthenticatePSK` fails with `ErrSpake2SuiteUnsupported`. **The accepted deviation**: neither side implements edwards25519 | network.bs "Authentication with SPAKE2": "Elliptic curve is edwards25519" |
 | `AcceptCertificateFingerprint` | Dial also accepts `fp` = base64 SHA-256 of the whole DER certificate | network.bs "Computing the Agent Fingerprint" (SPKI per RFC 7469) and "TLS 1.3" (computed fingerprint must match `fp`) |
 | `AdvertiseCertificateFingerprint` | Listener advertises the whole-certificate hash as `fp`. PeerID and SPAKE2 identities stay SPKI | network.bs "Computing the Agent Fingerprint" |
 | `TolerateMissingAgentInfo` | Dial/Accept proceed after a 2s grace period without agent-info-response / auth-capabilities. Remote `Info()` is then nil and equal auth capabilities are assumed | network.bs metadata discovery / authentication (peer must answer agent-info-request; auth starts from exchanged auth-capabilities) |
@@ -175,24 +183,24 @@ is created.
 - **Missing `mv` stays tolerated.** network.bs obliges the *advertising* agent to
   include it but sets no rule for a listener that finds it missing.
 
-## SPAKE2: the remaining blocker
+## SPAKE2
 
-Comparison of `agent_authenticator.cc` / `util/crypto/spake2.cc` with spake2-go
-and `connection_network.go`:
+Comparison of `agent_authenticator.cc` / `util/crypto/spake2.cc` with
+`connection_network.go` / `psk.go`, both at their defaults plus the P-256 opt-in:
 
-| Item | network.bs | osp_demo | ospc | Who deviates |
-|---|---|---|---|---|
-| Curve | edwards25519 | P-256 | P-256 | both |
-| Password hash | SHA-512 | SHA-512 | **SHA-256** (spake2-go has no option) | Go |
-| `pw` bytes | "the PSK presented to the user" (underspecified) | canonical decimal digit string | raw bytes given to `AuthenticatePSK` | unclear, spec gap |
-| Identities A/B | fingerprints of client / server | client / server | **presenter / consumer** | Go |
-| Consumer starts | `auth-spake2-handshake` with `psk-needs-presentation` | same | **`auth-spake2-need-psk` (99001)**, a deprecated WIP type | Go |
-| Hash / KDF / MAC, M/N, transcript | SHA-256, HKDF, HMAC | match ospc | match osp_demo | — |
-
-Fixing the Go side means a SHA-512 password hash in spake2-go, client/server
-identities, and the `psk-needs-presentation` start. These change Go-to-Go and
-Go-to-Rust behavior, so they are not part of this branch. Both implementations
-also need to move to edwards25519, or the spec to P-256.
+| Item | network.bs | osp_demo | ospc |
+|---|---|---|---|
+| Curve | edwards25519 | P-256 (`--spake2_suite=p256`) | P-256 (`Spake2SuiteP256`) |
+| Transcript hash / KDF / MAC | SHA-256 / HKDF / HMAC | same | same |
+| Password hash | SHA-512 | SHA-512 | SHA-512 (`newSpake2`; spake2-go has a single hash, so ospc builds the instance with SHA-512 and switches the transcript hash back to SHA-256) |
+| `pw` bytes | "the PSK presented to the user"; Appendix B: remove dashes and leading zeros | canonical decimal digits | canonical decimal digits (`ParsePSK`) |
+| Identities A/B | fingerprints of client / server | same (base64 text) | same (base64 text) |
+| Presenter | lower ease of input; server on tie | same | same |
+| Presenter initiates | `psk-shown` + pA; reply `psk-input` + pB | same | same |
+| Consumer initiates | `psk-needs-presentation` + pA; reply `psk-input` + pB | answers it; never initiates | initiates when given the PSK before the presenter's handshake; answers it |
+| Both initiate | unspecified | presenter's wins | presenter's wins |
+| confirmation-value | CDDL `bytes .size 64` | 32 bytes (HMAC-SHA-256) | 32 bytes; size not checked (spec inconsistency, commented) |
+| Bob's cB | after pA, pB known | sent with pB | sent after verifying cA (spake2-go API); Alice doesn't wait for it |
 
 ## Comparison (current)
 
@@ -207,30 +215,35 @@ also need to move to edwards25519, or the spec to P-256.
 | QUIC CIDs | "should be zero length" | listener zero-length | non-zero (6a9786ae) |
 | Framing | uni stream per message (group) | uni streams in both phases | uni stream per protocol connection |
 | Metadata discovery | agent-info-request/response | sends, answers, resends request | sends, answers; drops a request that arrives before its network phase |
-| Authentication | SPAKE2 mandatory | SPAKE2 (parameters differ, see above) | SPAKE2 (P-256) |
+| Authentication | SPAKE2 mandatory, edwards25519 | SPAKE2 per spec, P-256 opt-in | SPAKE2 per spec, P-256 opt-in |
 | App messages before auth | not allowed | held until hand-off | held back until authenticated |
-| Unknown type key | close with 404 | not implemented (deliberately) | buffered |
+| Unknown type key | close with 404 | not implemented (deliberately); the deprecated `auth-spake2-need-psk` (99001) is gone | buffered |
+| presentation-id | ≥ 16 ASCII chars | `application.ValidatePresentationID` / `NewPresentationID` | enforced (result 11) |
 | Extension capability IDs (≥1000) | allowed | sends 1100, 1200 | decoded without range check |
 
 ## Remaining work
 
+**Both / spec**
+- edwards25519 (network.bs) vs. the P-256 opt-in on both sides; BoringSSL has
+  no general edwards25519 group operations. Owner decision: P-256 is the
+  accepted, documented deviation.
+- Spec issues: confirmation-value `.size 64` vs. 32-byte HMAC-SHA-256; the
+  consumer-initiated flow needs pA, i.e. the PSK, before the presenter has shown
+  it; both-initiate resolution unspecified; Appendix B padding rule ("3 - len(N)
+  mod 3" pads a full group, 9 digits uncovered); `pw` encoding only implied by
+  Appendix B; `sn` / hostname computation (#293, #365); CBOR map key order;
+  zero-length CID guidance.
+
 **Go**
-- SPAKE2 parameters (table above): password hash, identities, consumer start.
-- Pre-existing, found here: `Listener.Close` closes connections already returned
-  by `Accept`, contrary to its doc comment. quic-go v0.39 `Listener.Close`:
-  "All active connections will be closed."
+- `Listener.Close` closes connections already returned by `Accept`, contrary to
+  its doc comment (quic-go v0.39 `Listener.Close`).
 - Unknown type key → close with 404: not implemented, by owner decision.
+- Older Go/Rust peers (SHA-256 password hash, presenter/consumer identities,
+  `auth-spake2-need-psk`) no longer authenticate with ospc; the Rust interop in
+  `application/test/integration` needs the Rust side updated.
 
 **Chromium**
 - Drop of an agent-info-request that arrives before the network phase starts
-  (`handling message type 10` is logged before `Network phase with …`).
-- A PSK input path for the consumer role: osp_demo has no `--psk`, so as a
-  controller against an ospc presenter it can't authenticate.
-- Curve: P-256 vs. the spec's edwards25519.
+  (ospc works around it by resending, which is spec-compatible).
 - Older items: certificate fields per network.bs (CN=agent hostname), SNI = agent
-  hostname, sync `osp_messages.cddl`, cwd-relative certificate path, fixed port.
-
-**Spec**
-- `sn` / hostname computation (#293, #365); SPAKE2 `pw` encoding; CBOR map key
-  order (osp_demo depends on deterministic order); zero-length CID guidance
-  (agents using zero-length CIDs must not issue NEW_CONNECTION_ID).
+  hostname, cwd-relative certificate path, fixed port.

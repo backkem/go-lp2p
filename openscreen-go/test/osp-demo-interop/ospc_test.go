@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +34,9 @@ const maxQuirkAttempts = 4
 // quirkNames lists the enabled quirks.
 func quirkNames(q ospc.InteropQuirks) []string {
 	var names []string
+	if q.Spake2SuiteP256 {
+		names = append(names, "Spake2SuiteP256")
+	}
 	if q.AcceptCertificateFingerprint {
 		names = append(names, "AcceptCertificateFingerprint")
 	}
@@ -131,6 +134,17 @@ func newQuirkAgent(t *testing.T, name string, q ospc.InteropQuirks, logs *logBuf
 	t.Helper()
 	conf := ospc.NewAgentConfig(name)
 	conf.InteropQuirks = q
+	// The one accepted deviation: SPAKE2 over P-256, as osp_demo with
+	// --spake2_suite=p256 (see demoAuthArgs). network.bs requires
+	// edwards25519, which neither side implements.
+	conf.InteropQuirks.Spake2SuiteP256 = true
+	if ease := os.Getenv("OSP_GO_EASE_OF_INPUT"); ease != "" {
+		n, err := strconv.Atoi(ease)
+		if err != nil {
+			t.Fatalf("OSP_GO_EASE_OF_INPUT: %v", err)
+		}
+		conf.WithPSKConfig(n, 0)
+	}
 	conf.WithLogger(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	a, err := ospc.NewAgent(conf)
 	if err != nil {
@@ -139,64 +153,32 @@ func newQuirkAgent(t *testing.T, name string, q ospc.InteropQuirks, logs *logBuf
 	return a
 }
 
-// spake2Blocker is why real SPAKE2 with osp_demo is not attempted by
-// default, see INTEROP.md.
-const spake2Blocker = "SPAKE2 parameters differ: ospc (spake2-go) hashes the password with SHA-256 where " +
-	"network.bs requires SHA-512 (osp_demo uses SHA-512), uses the presenter's fingerprint as identity A where " +
-	"network.bs requires the client's, and starts as PSK consumer with the deprecated auth-spake2-need-psk " +
-	"(type 99001) instead of auth-spake2-handshake psk-needs-presentation; both sides use P-256, not the " +
-	"spec's edwards25519. Set OSP_DEMO_TRY_SPAKE2=1 to attempt it anyway"
-
-// pskFromDemo returns the PSK to authenticate with osp_demo: $OSP_DEMO_PSK,
-// or the PSK osp_demo shows as presenter, as canonical digits.
-func pskFromDemo(d *ospDemo, timeout time.Duration) []byte {
-	if psk := os.Getenv("OSP_DEMO_PSK"); psk != "" {
-		return []byte(psk)
-	}
-	l, ok := d.WaitFor(`show this PSK to the user: [0-9]`, timeout)
-	if !ok {
-		return nil
-	}
-	shown := l[strings.Index(l, "show this PSK to the user: ")+len("show this PSK to the user: "):]
-	digits := strings.TrimLeft(regexp.MustCompile(`[^0-9]`).ReplaceAllString(shown, ""), "0")
-	return []byte(digits)
-}
-
-// authenticateOrSkip authenticates uc with osp_demo if it took part in the
-// auth-capabilities exchange and a PSK is available. Otherwise it hands the
-// connection over unauthenticated with the AllowSkipAuthentication quirk and
+// authenticateOrSkip authenticates uc with osp_demo using SPAKE2 with the
+// harness PSK (see harnessPSK), which osp_demo gets with --psk. If osp_demo
+// didn't take part in the auth-capabilities exchange it hands the connection
+// over unauthenticated with the AllowSkipAuthentication quirk instead and
 // returns the BLOCKER reason, for the caller to skip the stage with once it
 // stored the connection. It fails t if neither works.
 func authenticateOrSkip(t *testing.T, uc *ospc.UnauthenticatedConnection, d *ospDemo, quirks *[]string) (*ospc.Connection, string) {
 	t.Helper()
 	remote := uc.RemoteAgent()
-	reason := ""
-	switch {
-	case !remote.HasAuthenticationInfo() || remote.Info() == nil:
-		reason = "(Chromium side) osp_demo did not send auth-capabilities / agent-info-response, so SPAKE2 can't start"
-	case os.Getenv("OSP_DEMO_TRY_SPAKE2") == "":
-		reason = "(Go side) osp_demo took part in the auth-capabilities exchange, but " + spake2Blocker
-	default:
-		psk := pskFromDemo(d, stepTimeout)
-		if psk == nil {
-			reason = "(harness) osp_demo sent auth-capabilities but no PSK is known (set OSP_DEMO_PSK or have osp_demo log it)"
-			break
-		}
-		t.Logf("authenticating as %v with PSK %q", uc.GetAuthenticationRole(), psk)
+	if remote.HasAuthenticationInfo() && remote.Info() != nil {
+		role := uc.GetAuthenticationRole()
+		t.Logf("authenticating as PSK %v with PSK %q", role, harnessPSK)
 		ctx := withTimeout(t, 3*stepTimeout)
-		if uc.GetAuthenticationRole() == ospc.AuthenticationRoleConsumer {
-			if err := uc.RequestAuthenticatePSK(); err != nil {
-				t.Fatalf("RequestAuthenticatePSK: %v", err)
-			}
-		}
-		conn, err := uc.AuthenticatePSK(ctx, psk)
+		conn, err := uc.AuthenticatePSK(ctx, []byte(harnessPSK))
 		if err != nil {
+			for _, line := range d.Grep(`(?i)spake2|auth-|PSK|authenticat`) {
+				t.Logf("osp_demo: %s", line)
+			}
 			t.Fatalf("SPAKE2 authentication with osp_demo failed: %v", err)
 		}
-		t.Logf("authenticated with osp_demo")
+		*quirks = append(*quirks, "Spake2SuiteP256")
+		t.Logf("authenticated with osp_demo as PSK %v (Go quirks: Spake2SuiteP256; osp_demo flags: %s)", role, strings.Join(demoAuthArgs(), " "))
 		return conn, ""
 	}
 
+	reason := "(Chromium side) osp_demo did not send auth-capabilities / agent-info-response, so SPAKE2 can't start"
 	conn, err := uc.SkipAuthentication()
 	if err != nil {
 		t.Fatalf("SkipAuthentication: %v", err)
@@ -351,7 +333,8 @@ func TestOSPCDialPublisher(t *testing.T) {
 		}
 	})
 
-	presentationID := "go-iop-" + randToken(8)
+	// application.bs: at least 16 ASCII characters.
+	presentationID := application.NewPresentationID()
 	var connectionID uint64
 	availOK, startOK := false, false
 
@@ -560,6 +543,7 @@ func TestOSPCListenController(t *testing.T) {
 	})
 
 	var connectionID uint64 = 7
+	var presentationID string
 	startOK := false
 	t.Run("04-presentation-start", func(t *testing.T) {
 		var quirks []string
@@ -571,6 +555,12 @@ func TestOSPCListenController(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		id := fmt.Sprint(m[1])
+		if err := application.ValidatePresentationID(id); err != nil {
+			send(ctx, t, app, tkPresentationStartResponse, map[uint64]any{0: m[0], 1: uint64(11)}) // invalid-presentation-id
+			t.Fatalf("osp_demo sent an invalid presentation-id: %v", err)
+		}
+		presentationID = id
 		send(ctx, t, app, tkPresentationStartResponse, map[uint64]any{0: m[0], 1: uint64(1), 2: connectionID})
 		l, ok := ctrl.WaitFor(`request successful|on request error|presentation connection connected`, stepTimeout)
 		if !ok || strings.Contains(l, "error") {
@@ -598,6 +588,25 @@ func TestOSPCListenController(t *testing.T) {
 			t.Logf("osp_demo: %s", l)
 		} else {
 			t.Errorf("osp_demo did not log our message")
+		}
+	})
+
+	t.Run("06-presentation-termination", func(t *testing.T) {
+		var quirks []string
+		defer report.record(t, &quirks)
+		requireStage(t, startOK, "04-presentation-start")
+		ctx := withTimeout(t, stepTimeout)
+		ctrl.Send("term")
+		m, err := expectMessage(ctx, t, app, tkPresentationTerminationRequest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprint(m[1]); got != presentationID {
+			t.Errorf("presentation-id = %q, want %q", got, presentationID)
+		}
+		send(ctx, t, app, tkPresentationTerminationResponse, map[uint64]any{0: m[0], 1: uint64(1)})
+		if l, ok := ctrl.WaitFor(`(?i)terminat`, stepTimeout); ok {
+			t.Logf("osp_demo: %s", l)
 		}
 	})
 }

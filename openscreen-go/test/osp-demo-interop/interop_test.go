@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/backkem/go-lp2p/openscreen-go/application"
 	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 	"github.com/grandcat/zeroconf"
 	"github.com/quic-go/quic-go"
@@ -256,7 +257,7 @@ func TestRawProbePublisher(t *testing.T) {
 		}
 	})
 
-	presentationID := "go-iop-" + randToken(8)
+	presentationID := application.NewPresentationID()
 	var connectionID uint64
 	availOK, startOK := false, false
 
