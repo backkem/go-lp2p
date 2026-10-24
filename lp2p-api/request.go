@@ -1,59 +1,60 @@
 package lp2p
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
-type LP2PReceiverConfig struct {
+// LP2PRequestOptions configures an LP2PRequest.
+type LP2PRequestOptions struct {
+	// Nickname the page presents itself with to the peer.
 	Nickname string
 }
 
-type LP2PRequestConfig struct {
-	Nickname string
-	// TODO: Some device type filters (name/type/PeerID)
-}
-
-// LP2PRequest
-// Rename to LP2PConnectionRequest?
+// LP2PRequest requests a connection to a peer the user picks.
 type LP2PRequest struct {
-	config LP2PRequestConfig
+	window  *Window
+	options LP2PRequestOptions
 
-	mu                sync.Mutex
-	transportListener *LP2PQuicTransportListener
+	mu sync.Mutex
+	// listener receives transports on the connections this request makes.
+	listener *LP2PQuicTransportListener
 }
 
-// NewLP2PRequest
-func NewLP2PRequest(config LP2PRequestConfig) (*LP2PRequest, error) {
-	// Discover early
-	_ = DefaultUserAgent.PeerManager()
-
-	return &LP2PRequest{
-		config: config,
-	}, nil
-}
-
-// Start the request.
-func (r *LP2PRequest) Start() (*LP2PConnection, error) {
-	pm := DefaultUserAgent.PeerManager()
-	oConn, err := pm.PickAndDial(r.config.Nickname)
-	if err != nil {
-		return nil, err
+// NewLP2PRequest creates an LP2PRequest in this window. The user agent
+// starts discovering peers right away, so the picker is populated by the
+// time Start is called.
+func (w *Window) NewLP2PRequest(options LP2PRequestOptions) (*LP2PRequest, error) {
+	if err := w.UserAgent.StartDiscovery(); err != nil {
+		return nil, toDOMException(err)
 	}
-
-	r.mu.Lock()
-	transportListener := r.transportListener
-	r.mu.Unlock()
-
-	conn := newLP2PConnection(oConn)
-	conn.run(transportListener)
-
-	return conn, nil
+	return &LP2PRequest{window: w, options: options}, nil
 }
 
-func (r *LP2PRequest) registerLP2PQuicTransportListener(listener *LP2PQuicTransportListener) error {
-	r.mu.Lock()
-	r.transportListener = listener
-	r.mu.Unlock()
+// Start shows the device picker and connects to the peer the user picks,
+// pairing with it if needed. It blocks until connected or failed. Every
+// call makes a new connection.
+//
+// It fails with an AbortError DOMException if the user dismisses the picker
+// and a NotAllowedError if pairing fails.
+func (r *LP2PRequest) Start() (*LP2PConnection, error) {
+	u := r.window.UserAgent
+	conn, err := u.Connect(context.Background(), r.window.Origin, r.options.Nickname)
+	if err != nil {
+		return nil, toDOMException(err)
+	}
+	return newLP2PConnection(conn, r.transportListener), nil
+}
 
-	// Ensure LP2PRequest is started
-	_, err := r.Start()
-	return err
+func (r *LP2PRequest) transportListener() *LP2PQuicTransportListener {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.listener
+}
+
+func (r *LP2PRequest) registerLP2PQuicTransportListener(l *LP2PQuicTransportListener) error {
+	r.mu.Lock()
+	r.listener = l
+	r.mu.Unlock()
+	return nil
 }

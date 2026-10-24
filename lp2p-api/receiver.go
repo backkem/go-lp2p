@@ -4,75 +4,124 @@ import (
 	"context"
 	"sync"
 
-	ua "github.com/backkem/go-lp2p/lp2p-api/internal/useragent"
-	"github.com/backkem/go-lp2p/web-api"
+	ua "github.com/backkem/go-lp2p/lp2p-api/useragent"
 )
 
-// LP2PReceiver advertises itself and receives incoming peer connections.
+// LP2PReceiverOptions configures an LP2PReceiver.
+type LP2PReceiverOptions struct {
+	// Nickname the device is advertised under.
+	Nickname string
+}
+
+// LP2PReceiver makes the device discoverable and receives connections from
+// peers.
 type LP2PReceiver struct {
-	config       LP2PReceiverConfig
-	peerListener *ua.PeerListener
+	window  *Window
+	options LP2PReceiverOptions
 
-	OnConnection        web.CallbackSetter[OnConnectionEvent]
-	onConnectionHandler *web.EventHandler[OnConnectionEvent]
+	onConnection eventSlot[LP2PConnectionEvent]
 
-	mu                sync.Mutex
-	transportListener *LP2PQuicTransportListener
+	startMu sync.Mutex // held while starting
+	mu      sync.Mutex
+	advert  *ua.Advertisement
+	closed  bool
+	cancel  context.CancelFunc
+	// listener receives transports on the connections this receiver
+	// accepts.
+	listener *LP2PQuicTransportListener
 }
 
-// NewLP2Receiver
-func NewLP2Receiver(config LP2PReceiverConfig) (*LP2PReceiver, error) {
-	onConnectionHandler := web.NewEventHandler[OnConnectionEvent]()
-	return &LP2PReceiver{
-		config:              config,
-		OnConnection:        onConnectionHandler.SetCallback,
-		onConnectionHandler: onConnectionHandler,
-	}, nil
+// NewLP2PReceiver creates an LP2PReceiver in this window.
+func (w *Window) NewLP2PReceiver(options LP2PReceiverOptions) (*LP2PReceiver, error) {
+	return &LP2PReceiver{window: w, options: options}, nil
 }
 
-// Start advertising and receiving peers.
+// OnConnection sets the onconnection event handler.
+func (r *LP2PReceiver) OnConnection(cb func(LP2PConnectionEvent)) { r.onConnection.set(cb) }
+
+// Start asks the user for permission to advertise and, once granted,
+// advertises the device and receives connections. It blocks until the user
+// decided. Calling Start on a started receiver does nothing.
+//
+// It fails with a NotAllowedError DOMException if the user denies.
 func (r *LP2PReceiver) Start() error {
-	var err error
-	r.peerListener, err = DefaultUserAgent.PeerManager().ListenConnection(r.config.Nickname)
-	if err != nil {
-		return err
+	r.startMu.Lock()
+	defer r.startMu.Unlock()
+
+	r.mu.Lock()
+	started, closed := r.advert != nil, r.closed
+	r.mu.Unlock()
+	if closed {
+		return errClosed("LP2PReceiver")
+	}
+	if started {
+		return nil
 	}
 
-	r.run()
+	u := r.window.UserAgent
+	advert, err := u.Advertise(context.Background(), r.window.Origin, r.options.Nickname)
+	if err != nil {
+		return toDOMException(err)
+	}
 
-	return nil
-}
-
-func (r *LP2PReceiver) run() error {
-	// Connection
-	go func() {
-		for {
-			oConn, err := r.peerListener.AcceptConnection(context.Background())
-			if err != nil {
-				return
-			}
-
-			r.mu.Lock()
-			transportListener := r.transportListener
-			r.mu.Unlock()
-
-			conn := newLP2PConnection(oConn)
-			conn.run(transportListener)
-
-			r.onConnectionHandler.OnCallback(OnConnectionEvent{
-				Connection: conn,
-			})
-		}
-	}()
-
-	return nil
-}
-
-func (r *LP2PReceiver) registerLP2PQuicTransportListener(listener *LP2PQuicTransportListener) error {
+	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
-	r.transportListener = listener
+	if r.closed { // closed while the user was deciding
+		r.mu.Unlock()
+		cancel()
+		_ = advert.Close()
+		return errClosed("LP2PReceiver")
+	}
+	r.advert, r.cancel = advert, cancel
 	r.mu.Unlock()
 
-	// Ensure LP2PReceiver is started
+	go r.acceptConnections(ctx, advert)
+	return nil
+}
+
+func (r *LP2PReceiver) acceptConnections(ctx context.Context, advert *ua.Advertisement) {
+	for {
+		conn, err := advert.Accept(ctx)
+		if err != nil {
+			return
+		}
+		c := newLP2PConnection(conn, r.transportListener)
+		r.onConnection.fire(LP2PConnectionEvent{Connection: c})
+	}
+}
+
+// Close stops advertising and receiving connections. Connections already
+// received stay open. Go-only: the proposal has no way to stop a receiver
+// yet.
+func (r *LP2PReceiver) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	advert, cancel := r.advert, r.cancel
+	r.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if advert != nil {
+		return advert.Close()
+	}
+	return nil
+}
+
+func (r *LP2PReceiver) transportListener() *LP2PQuicTransportListener {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.listener
+}
+
+func (r *LP2PReceiver) registerLP2PQuicTransportListener(l *LP2PQuicTransportListener) error {
+	r.mu.Lock()
+	r.listener = l
+	r.mu.Unlock()
+	// Listening for transports implies receiving connections.
 	return r.Start()
 }
