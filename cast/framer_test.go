@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"time"
 )
 
 func testMessage() *CastMessage {
@@ -136,4 +137,35 @@ func FuzzReadMessage(f *testing.F) {
 			t.Fatalf("round trip: %v %v %v", m, m2, err)
 		}
 	})
+}
+
+// TestSocketSendsMessageInOneTLSRecord: openscreen's CastSocket logs an error
+// for every TLS read that ends mid-frame, so each CastMessage should travel
+// in a single TLS record (found in interop with cast_sender, whose auth
+// response read failed once with InsufficientBuffer before Go's dynamic
+// record sizing was disabled).
+func TestSocketSendsMessageInOneTLSRecord(t *testing.T) {
+	snd, rcv := socketPair(t, nil)
+	payload := make([]byte, 8*1024) // larger than Go's initial ~1 KiB records
+	msg := NewBinaryMessage("a", "b", AuthNamespace, payload)
+	want := len(msg.Marshal()) + 4
+
+	for _, dir := range []struct {
+		name     string
+		from, to *Socket
+	}{{"dialer to listener", snd, rcv}, {"listener to dialer", rcv, snd}} {
+		if err := dir.from.Send(msg); err != nil {
+			t.Fatal(err)
+		}
+		// tls.Conn.Read returns data from at most one record.
+		buf := make([]byte, 64*1024)
+		_ = dir.to.Conn().SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := dir.to.Conn().Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != want {
+			t.Errorf("%s: first TLS record carried %d of %d frame bytes", dir.name, n, want)
+		}
+	}
 }

@@ -87,9 +87,24 @@ func (s *Socket) SetLocalCertificate(der []byte) { s.localCert = der }
 // Authenticate). Do not use a socket for anything sensitive before that.
 func SenderTLSConfig() *tls.Config {
 	return &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // verified by device auth
-		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify:          true, //nolint:gosec // verified by device auth
+		MinVersion:                  tls.VersionTLS12,
+		DynamicRecordSizingDisabled: true,
 	}
+}
+
+// castTLS returns a copy of c with dynamic TLS record sizing disabled.
+//
+// Go otherwise starts every connection with ~1 KiB records, so a device
+// auth response (~3 KiB) spans several records. openscreen's CastSocket
+// tries to deserialize after every TLS read and logs an ERROR
+// ("failed to deserialize a message. InsufficientBuffer") for each partial
+// frame; with full-size records a CastMessage (<= 64 KiB, usually far
+// smaller) arrives in as few records as possible, as from a C++ peer.
+func castTLS(c *tls.Config) *tls.Config {
+	c = c.Clone()
+	c.DynamicRecordSizingDisabled = true
+	return c
 }
 
 // Dial connects to a Cast receiver at addr (host:port) over TLS. A nil
@@ -98,6 +113,7 @@ func Dial(ctx context.Context, addr string, tlsConf *tls.Config) (*Socket, error
 	if tlsConf == nil {
 		tlsConf = SenderTLSConfig()
 	}
+	tlsConf = castTLS(tlsConf)
 	d := tls.Dialer{Config: tlsConf}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -128,7 +144,7 @@ func Listen(addr string, tlsConf *tls.Config) (*Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{ln: ln, tlsConf: tlsConf, localCert: tlsConf.Certificates[0].Certificate[0]}, nil
+	return &Listener{ln: ln, tlsConf: castTLS(tlsConf), localCert: tlsConf.Certificates[0].Certificate[0]}, nil
 }
 
 // Accept waits for the next sender and completes the TLS handshake.

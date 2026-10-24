@@ -43,9 +43,9 @@ func TestDeviceAuthSuccess(t *testing.T) {
 }
 
 func TestDeviceAuthWrongRoot(t *testing.T) {
-	creds, other := newDeviceCreds(t), x509.NewCertPool()
+	creds := newDeviceCreds(t)
 	otherKey := testRSAKey(t, 0)
-	other.AddCert(makeCert(t, "Other Root", otherKey.Public(), nil, otherKey, true, time.Hour))
+	other := []*x509.Certificate{makeCert(t, "Other Root", otherKey.Public(), nil, otherKey, true, time.Hour)}
 	s := authPair(t, &DeviceAuthResponder{Chain: creds.chain, Key: creds.key}, 48*time.Hour)
 	err := authenticate(s, &CertVerifier{Roots: other})
 	if !errors.Is(err, ErrAuthFailed) {

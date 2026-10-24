@@ -69,7 +69,7 @@ func testRSAKey(t testing.TB, i int) *rsa.PrivateKey {
 
 // deviceCreds is a fake Cast PKI: root -> intermediate -> device.
 type deviceCreds struct {
-	roots *x509.CertPool
+	roots []*x509.Certificate
 	chain [][]byte
 	key   crypto.Signer
 }
@@ -79,9 +79,7 @@ func newDeviceCreds(t testing.TB) *deviceCreds {
 	root := makeCert(t, "Test Cast Root CA", rootKey.Public(), nil, rootKey, true, 24*time.Hour)
 	inter := makeCert(t, "Test Cast ICA", interKey.Public(), root, rootKey, true, 24*time.Hour)
 	dev := makeCert(t, "test-device", devKey.Public(), inter, interKey, false, 24*time.Hour)
-	pool := x509.NewCertPool()
-	pool.AddCert(root)
-	return &deviceCreds{roots: pool, chain: [][]byte{dev.Raw, inter.Raw}, key: devKey}
+	return &deviceCreds{roots: []*x509.Certificate{root}, chain: [][]byte{dev.Raw, inter.Raw}, key: devKey}
 }
 
 // receiverTLSConfig returns a short-lived self-signed TLS certificate, as
