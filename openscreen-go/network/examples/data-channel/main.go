@@ -140,7 +140,7 @@ func simPeerB(peerADone <-chan struct{}) error {
 	log.Printf("Peer B: Authentication successful!\n")
 
 	dc, err := conn.OpenDataChannel(context.Background(),
-		ospc.DataChannelParameters{
+		ospc.DataChannelInit{
 			Label: "My Channel",
 		})
 	if err != nil {

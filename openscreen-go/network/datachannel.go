@@ -2,56 +2,264 @@ package ospc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
+	"time"
 )
 
-// DataChannelParameters
+// MaxDataChannelID is the largest channel-id (LP2P "Data channel extension":
+// "between 0 and 65,534").
+const MaxDataChannelID = 65534
+
+// DataChannelOpenTimeout bounds how long OpenDataChannel waits for the
+// data-channel-open-response when the context has no earlier deadline.
+var DataChannelOpenTimeout = 10 * time.Second
+
+var (
+	// ErrDataChannelIDOutOfRange is returned when an explicit channel ID is
+	// above MaxDataChannelID, or no ID is free.
+	ErrDataChannelIDOutOfRange = errors.New("data channel ID out of range")
+	// ErrDataChannelIDInUse is returned when an explicit channel ID is used
+	// by another open data channel of the connection.
+	ErrDataChannelIDInUse = errors.New("data channel ID in use")
+	// ErrDataChannelRejected is returned when the peer answers the
+	// data-channel-open-request with a result other than success.
+	ErrDataChannelRejected = errors.New("data channel rejected by the peer")
+)
+
+// DataChannelParameters describes an open data channel.
 type DataChannelParameters struct {
 	Label    string
 	Protocol string
 	ID       uint64
 }
 
-// OpenDataChannel opens a data channel
-func (c *Connection) OpenDataChannel(ctx context.Context, params DataChannelParameters) (*DataChannel, error) {
-	return c.base.OpenDataChannel(ctx, params)
+// DataChannelInit configures a data channel to open.
+type DataChannelInit struct {
+	Label    string
+	Protocol string
+	// ID is the channel-id to use. If nil, one is allocated: the lowest ID
+	// not used by an open data channel of the connection, in either
+	// direction. This matches the openscreen (C++) implementation; the spec
+	// leaves ID allocation open. As the sides allocate independently, two
+	// channels opened concurrently from both sides can get the same ID.
+	// IDs only label channels; channels are told apart by their QUIC stream,
+	// so such a collision is harmless and duplicate IDs from the peer are
+	// accepted.
+	ID *uint64
 }
 
-// AcceptStream accepts a data channel
+// OpenDataChannel opens a data channel. It returns once the peer accepted
+// it with a data-channel-open-response.
+func (c *Connection) OpenDataChannel(ctx context.Context, init DataChannelInit) (*DataChannel, error) {
+	return c.base.OpenDataChannel(ctx, init)
+}
+
+// AcceptDataChannel accepts a data channel opened by the peer.
 func (c *Connection) AcceptDataChannel(ctx context.Context) (*DataChannel, error) {
 	return c.base.AcceptDataChannel(ctx)
 }
 
-func (c *baseConnection) OpenDataChannel(ctx context.Context, params DataChannelParameters) (*DataChannel, error) {
-	msg := &msgDataChannelOpenRequest{
+// dataChannelIDs tracks the channel IDs in use on a connection.
+type dataChannelIDs struct {
+	mu   sync.Mutex
+	used map[uint64]int // ID -> number of open channels using it
+}
+
+// reserve takes id, or the lowest free ID if id is nil.
+func (d *dataChannelIDs) reserve(id *uint64) (uint64, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.used == nil {
+		d.used = make(map[uint64]int)
+	}
+	if id != nil {
+		if *id > MaxDataChannelID {
+			return 0, fmt.Errorf("%w: %d", ErrDataChannelIDOutOfRange, *id)
+		}
+		if d.used[*id] > 0 {
+			return 0, fmt.Errorf("%w: %d", ErrDataChannelIDInUse, *id)
+		}
+		d.used[*id]++
+		return *id, nil
+	}
+	for i := uint64(0); i <= MaxDataChannelID; i++ {
+		if d.used[i] == 0 {
+			d.used[i]++
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("%w: no free ID", ErrDataChannelIDOutOfRange)
+}
+
+// add records a channel opened by the peer.
+func (d *dataChannelIDs) add(id uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.used == nil {
+		d.used = make(map[uint64]int)
+	}
+	d.used[id]++
+}
+
+func (d *dataChannelIDs) release(id uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.used[id] <= 1 {
+		delete(d.used, id)
+		return
+	}
+	d.used[id]--
+}
+
+func (c *baseConnection) OpenDataChannel(ctx context.Context, init DataChannelInit) (*DataChannel, error) {
+	ids := &c.app.Load().dataChannelIDs
+	id, err := ids.reserve(init.ID)
+	if err != nil {
+		return nil, err
+	}
+	dc, err := c.openDataChannel(ctx, id, init)
+	if err != nil {
+		ids.release(id)
+		return nil, err
+	}
+	return dc, nil
+}
+
+func (c *baseConnection) openDataChannel(ctx context.Context, id uint64, init DataChannelInit) (*DataChannel, error) {
+	ctx, cancel := context.WithTimeout(ctx, DataChannelOpenTimeout)
+	defer cancel()
+	// Stop waiting when the connection closes, too.
+	defer context.AfterFunc(c.ctx, cancel)()
+
+	req := &msgDataChannelOpenRequest{
 		msgRequest: msgRequest{
 			RequestId: msgRequestId(c.nextRequestID()),
 		},
-		ChannelId: params.ID,
-		Label:     params.Label,
-		Protocol:  params.Protocol,
+		ChannelId: id,
+		Label:     init.Label,
+		Protocol:  init.Protocol,
 	}
-
-	stream, err := c.openStream(ctx, msg)
+	stream, err := c.openStream(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO: await data-channel-open-response
+	if err := awaitDataChannelOpenResponse(ctx, stream, req.RequestId); err != nil {
+		abortStream(stream)
+		if c.ctx.Err() != nil {
+			return nil, c.err()
+		}
+		return nil, err
+	}
+	c.log.Debug("receive", "msg", "msgDataChannelOpenResponse")
 
 	return &DataChannel{
-		DataChannelParameters: params,
-		stream:                stream,
+		DataChannelParameters: DataChannelParameters{
+			Label:    init.Label,
+			Protocol: init.Protocol,
+			ID:       id,
+		},
+		stream: stream,
+		ids:    &c.app.Load().dataChannelIDs,
 	}, nil
+}
+
+// awaitDataChannelOpenResponse waits for the data-channel-open-response to
+// request reqID. The peer sends it on the request's (bidirectional) stream
+// before any data-frame. The caller aborts the stream on error, which also
+// ends the read left behind when ctx is done.
+func awaitDataChannelOpenResponse(ctx context.Context, stream ApplicationStream, reqID msgRequestId) error {
+	type result struct {
+		msg interface{}
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		msg, err := readMessage(stream)
+		ch <- result{msg, err}
+	}()
+	var res result
+	select {
+	case res = <-ch:
+	case <-ctx.Done():
+		return fmt.Errorf("awaiting data-channel-open-response: %w", ctx.Err())
+	}
+	if res.err != nil {
+		return fmt.Errorf("awaiting data-channel-open-response: %w", res.err)
+	}
+	resp, ok := res.msg.(*msgDataChannelOpenResponse)
+	if !ok {
+		return fmt.Errorf("awaiting data-channel-open-response: got %s", msgName(res.msg))
+	}
+	if resp.RequestId != reqID {
+		return fmt.Errorf("data-channel-open-response to request %d, want %d", resp.RequestId, reqID)
+	}
+	if resp.Result != ResultSuccess {
+		// The spec defines no failure codes for data channels; any result
+		// other than success fails the open.
+		return fmt.Errorf("%w: result %d", ErrDataChannelRejected, resp.Result)
+	}
+	return nil
+}
+
+// acceptDataChannelRequest answers a data-channel-open-request received on
+// stream s and hands the channel to AcceptDataChannel.
+func (c *baseConnection) acceptDataChannelRequest(req *msgDataChannelOpenRequest, s ApplicationStream) {
+	app := c.app.Load()
+	resp := &msgDataChannelOpenResponse{
+		msgResponse: msgResponse{RequestId: req.RequestId},
+		Result:      ResultSuccess,
+	}
+	if req.ChannelId > MaxDataChannelID {
+		// The spec defines no failure codes; use permanent-error, as
+		// openscreen does.
+		resp.Result = ResultPermanentError
+	}
+	c.log.Debug("send", "msg", msgName(resp), "result", resp.Result)
+	// The response goes out before the channel is handed over, so it
+	// precedes any data-frame we send.
+	if err := writeMessage(resp, s); err != nil || resp.Result != ResultSuccess {
+		if err != nil {
+			c.log.Debug("data channel: failed to send open response", "err", err)
+		}
+		_ = s.Close()
+		return
+	}
+
+	app.dataChannelIDs.add(req.ChannelId)
+	dc := &DataChannel{
+		DataChannelParameters: DataChannelParameters{
+			Label:    req.Label,
+			ID:       req.ChannelId,
+			Protocol: req.Protocol,
+		},
+		stream: s,
+		ids:    &app.dataChannelIDs,
+	}
+	deliver(c, app.acceptDataChannel, dc, dc.Close)
+}
+
+// abortStream aborts both directions of a stream, unblocking pending reads.
+func abortStream(s ApplicationStream) {
+	if a, ok := s.(interface{ cancel() }); ok {
+		a.cancel()
+		return
+	}
+	_ = s.Close()
 }
 
 func (c *baseConnection) AcceptDataChannel(ctx context.Context) (*DataChannel, error) {
 	return accept(ctx, c, c.app.Load().acceptDataChannel)
 }
 
+// DataChannel is an open data channel.
 type DataChannel struct {
 	DataChannelParameters
-	stream ApplicationStream
+	stream    ApplicationStream
+	ids       *dataChannelIDs
+	closeOnce sync.Once
 }
 
 // SendMessage
@@ -135,6 +343,8 @@ func (c *DataChannel) WriteDataChannel(p []byte, enc DataEncoding) (n int, err e
 }
 
 // Close closes the DataChannel and the underlying Quic stream.
+// The channel's ID is free for reuse from then on.
 func (c *DataChannel) Close() error {
+	c.closeOnce.Do(func() { c.ids.release(c.ID) })
 	return c.stream.Close()
 }

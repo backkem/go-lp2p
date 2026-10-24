@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	ua "github.com/backkem/go-lp2p/lp2p-api/useragent"
+	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
 // DOMException names used by this package.
@@ -16,6 +17,8 @@ const (
 	NetworkError      = "NetworkError"
 	TimeoutError      = "TimeoutError"
 	OperationError    = "OperationError"
+	// TypeError stands for a JavaScript TypeError.
+	TypeError = "TypeError"
 )
 
 // DOMException is the error a rejected promise or throwing method returns.
@@ -58,6 +61,12 @@ func toDOMException(err error) error {
 		return newDOMException(AbortError, "the user canceled the request", err)
 	case errors.Is(err, context.DeadlineExceeded):
 		return newDOMException(TimeoutError, "the request timed out", err)
+	case errors.Is(err, ospc.ErrDataChannelIDOutOfRange):
+		return newDOMException(TypeError, err.Error(), err)
+	case errors.Is(err, ospc.ErrDataChannelIDInUse):
+		return newDOMException(OperationError, err.Error(), err)
+	case errors.Is(err, ospc.ErrDataChannelRejected):
+		return newDOMException(OperationError, err.Error(), err)
 	case errors.Is(err, ua.ErrClosed):
 		return newDOMException(InvalidStateError, "the user agent is closed", err)
 	default:

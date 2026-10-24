@@ -9,8 +9,8 @@
 //	OPENSCREEN_OUT_DIR=/work/openscreen/out/debug \
 //	  go test -tags interop -v ./openscreen-go/test/lp2p-demo-interop/
 //
-// The only non-spec options in use are SPAKE2 over P-256 (both sides) and
-// lp2p_demo's --skip_data_channel_open_response, because ospc neither sends
-// nor waits for data-channel-open-response. TestSpecOpenResponse shows what
-// happens without the latter.
+// Run them with -p 1 when other interop packages run too. The only non-spec
+// option in use is SPAKE2 over P-256 (both sides); data-channel-open-response
+// is sent and awaited as the spec says (TestSpecOpenResponse), and both
+// implementations allocate channel IDs the same way (TestChannelIDs).
 package lp2pdemointerop

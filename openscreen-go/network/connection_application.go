@@ -14,6 +14,8 @@ type connectedState struct {
 	acceptTransport       chan *PooledWebTransport
 	acceptTransportStream chan ApplicationStream
 	acceptStream          chan ApplicationStream
+
+	dataChannelIDs dataChannelIDs
 }
 
 // runApplication starts the application stream dispatcher. It is the only
@@ -74,15 +76,7 @@ func (c *baseConnection) routeStream(s ApplicationStream) {
 	app := c.app.Load()
 	switch typedMsg := msg.(type) {
 	case *msgDataChannelOpenRequest:
-		// TODO: send data-channel-open-response
-		deliver(c, app.acceptDataChannel, &DataChannel{
-			DataChannelParameters: DataChannelParameters{
-				Label:    typedMsg.Label,
-				ID:       uint64(typedMsg.ChannelId),
-				Protocol: typedMsg.Protocol,
-			},
-			stream: s,
-		}, s.Close)
+		c.acceptDataChannelRequest(typedMsg, s)
 
 	case *msgDataTransportStartRequest:
 		// TODO: send data-transport-start-response. The stream carries no

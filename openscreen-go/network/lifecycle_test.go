@@ -437,7 +437,7 @@ func TestStreamRouting(t *testing.T) {
 		dcErr <- err
 	}()
 
-	dc, err := client.conn.OpenDataChannel(ctx, DataChannelParameters{Label: "test"})
+	dc, err := client.conn.OpenDataChannel(ctx, DataChannelInit{Label: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

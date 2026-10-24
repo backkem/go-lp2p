@@ -30,6 +30,27 @@ Agents must opt in to the RFC 9382 P-256 suite with
 `InteropQuirks.Spake2SuiteP256` (Chromium's `osp_demo --spake2_suite=p256`);
 without it `AuthenticatePSK` fails with `ErrSpake2SuiteUnsupported`.
 
+### Data channels
+
+The LP2P data channel extension (local-peer-to-peer index.bs "Data channel
+extension") follows the spec and interoperates with openscreen's `lp2p_demo`
+(`test/lp2p-demo-interop`). Where the spec is silent, ospc does what
+openscreen does:
+
+- The acceptor answers a `data-channel-open-request` with a
+  `data-channel-open-response` on the request's bidirectional stream, before
+  any `data-frame`. `OpenDataChannel` returns only after a success response;
+  any other result fails it with `ErrDataChannelRejected`, and no response
+  within `DataChannelOpenTimeout` (or the context) fails it too.
+- A `channel-id` above 65,534 is answered with `permanent-error`.
+- Without an explicit ID, a channel gets the lowest ID not used by an open
+  channel of the connection, in either direction. Two channels opened at
+  once from both sides can share an ID; that is harmless, as channels are
+  told apart by their stream. An explicit ID that is in use fails with
+  `ErrDataChannelIDInUse`.
+- Closing a channel closes the sending side of its stream (there is no close
+  message).
+
 ### License
 
 MIT License

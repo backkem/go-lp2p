@@ -29,10 +29,6 @@ const (
 	stepTimeout      = 10 * time.Second
 )
 
-// skipOpenResponse is the lp2p_demo flag for ospc's handling of
-// data-channel-open-response, which it neither sends nor waits for.
-const skipOpenResponse = "--skip_data_channel_open_response"
-
 func randInt(max int64) int64 {
 	n, err := rand.Int(rand.Reader, big.NewInt(max))
 	if err != nil {
@@ -301,11 +297,12 @@ func expectMessage(t *testing.T, dc *ospc.DataChannel, payload []byte, encoding 
 func TestGoRequestCppReceiver(t *testing.T) {
 	name := uniqueName("CppLp2pRecv")
 	port := fmt.Sprint(20000 + randInt(20000))
-	demo := startDemo(t, "--listen="+name, "--port="+port, skipOpenResponse)
+	demo := startDemo(t, "--listen="+name, "--port="+port)
 	demo.MustSee(`lp2p_demo: listening as `+name, stepTimeout)
 
 	conn := dialDemo(t, name)
-	dc, err := conn.OpenDataChannel(withTimeout(t, stepTimeout), ospc.DataChannelParameters{Label: "chat", Protocol: "test", ID: 3})
+	id := uint64(3)
+	dc, err := conn.OpenDataChannel(withTimeout(t, stepTimeout), ospc.DataChannelInit{Label: "chat", Protocol: "test", ID: &id})
 	if err != nil {
 		t.Fatalf("OpenDataChannel: %v", err)
 	}
@@ -372,7 +369,7 @@ func awaitConnection(t *testing.T, conns <-chan *ospc.Connection) *ospc.Connecti
 func TestCppRequestGoReceiver(t *testing.T) {
 	name := uniqueName("GoLp2pRecv")
 	conns := listenGo(t, name)
-	demo := startDemo(t, "--connect="+name, "--label=chat", "--protocol=test", skipOpenResponse)
+	demo := startDemo(t, "--connect="+name, "--label=chat", "--protocol=test")
 	conn := awaitConnection(t, conns)
 
 	dc, err := conn.AcceptDataChannel(withTimeout(t, stepTimeout))
@@ -393,9 +390,10 @@ func TestCppRequestGoReceiver(t *testing.T) {
 	demo.MustSee(`lp2p_demo: received on 0 \(string\): hi from Go$`, stepTimeout)
 }
 
-// TestSpecOpenResponse runs lp2p_demo as the spec says, sending and waiting
-// for data-channel-open-response. ospc neither sends nor expects it, so this
-// logs what goes wrong rather than failing.
+// TestSpecOpenResponse checks data-channel-open-response both ways: ospc
+// waits for lp2p_demo's response before the channel is open, so the first
+// message it reads is lp2p_demo's echo; lp2p_demo's channel opens only once
+// ospc responded.
 func TestSpecOpenResponse(t *testing.T) {
 	t.Run("GoRequest", func(t *testing.T) {
 		name := uniqueName("CppLp2pRecv")
@@ -403,16 +401,18 @@ func TestSpecOpenResponse(t *testing.T) {
 		demo := startDemo(t, "--listen="+name, "--port="+port)
 		demo.MustSee(`lp2p_demo: listening as `+name, stepTimeout)
 		conn := dialDemo(t, name)
-		dc, err := conn.OpenDataChannel(withTimeout(t, stepTimeout), ospc.DataChannelParameters{Label: "chat"})
+		dc, err := conn.OpenDataChannel(withTimeout(t, stepTimeout), ospc.DataChannelInit{Label: "chat"})
 		if err != nil {
 			t.Fatalf("OpenDataChannel: %v", err)
 		}
 		defer dc.Close()
+		// The response arrived before OpenDataChannel returned, so lp2p_demo
+		// has the channel already.
+		demo.MustSee(`lp2p_demo: data channel 0 "chat" open`, stepTimeout)
 		if err := dc.SendMessageWithEncoding([]byte("hello"), ospc.DataEncodingString); err != nil {
 			t.Fatal(err)
 		}
-		m := receive(dc, stepTimeout)
-		t.Logf("SPEC DEVIATION (Go side): ospc reads lp2p_demo's data-channel-open-response as data: payload %q, err %v", m.payload, m.err)
+		expectMessage(t, dc, []byte("echo: hello"), ospc.DataEncodingString)
 	})
 	t.Run("CppRequest", func(t *testing.T) {
 		name := uniqueName("GoLp2pRecv")
@@ -424,10 +424,40 @@ func TestSpecOpenResponse(t *testing.T) {
 			t.Fatalf("AcceptDataChannel: %v", err)
 		}
 		defer dc.Close()
-		if _, ok := demo.WaitFor(`lp2p_demo: data channel 0 "chat" open`, stepTimeout); ok {
-			t.Logf("lp2p_demo's data channel opened")
-		} else {
-			t.Logf("SPEC DEVIATION (Go side): ospc accepted the data channel without sending data-channel-open-response, so lp2p_demo's channel stays connecting")
-		}
+		demo.MustSee(`lp2p_demo: data channel 0 "chat" open`, stepTimeout)
 	})
+}
+
+// TestChannelIDs checks channel-id allocation on a connection with channels
+// opened from both sides. Both implementations take the lowest ID no open
+// channel of the connection uses: lp2p_demo opens 0, so ospc's next channel
+// on that connection gets 1.
+func TestChannelIDs(t *testing.T) {
+	name := uniqueName("GoLp2pRecv")
+	conns := listenGo(t, name)
+	demo := startDemo(t, "--connect="+name, "--label=chat")
+	conn := awaitConnection(t, conns)
+	rx, err := conn.AcceptDataChannel(withTimeout(t, stepTimeout))
+	if err != nil {
+		t.Fatalf("AcceptDataChannel: %v", err)
+	}
+	defer rx.Close()
+	if rx.ID != 0 {
+		t.Errorf("lp2p_demo's channel has ID %d, want 0", rx.ID)
+	}
+	demo.MustSee(`lp2p_demo: data channel 0 "chat" open`, stepTimeout)
+
+	tx, err := conn.OpenDataChannel(withTimeout(t, stepTimeout), ospc.DataChannelInit{Label: "back"})
+	if err != nil {
+		t.Fatalf("OpenDataChannel: %v", err)
+	}
+	defer tx.Close()
+	if tx.ID != 1 {
+		t.Errorf("ospc's channel has ID %d, want 1", tx.ID)
+	}
+	demo.MustSee(`lp2p_demo: data channel 1 "back" open`, stepTimeout)
+	if err := tx.SendMessageWithEncoding([]byte("on 1"), ospc.DataEncodingString); err != nil {
+		t.Fatal(err)
+	}
+	demo.MustSee(`lp2p_demo: received on 1 \(string\): on 1$`, stepTimeout)
 }

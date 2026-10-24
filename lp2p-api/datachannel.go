@@ -45,7 +45,9 @@ type LP2PDataChannel struct {
 // LP2PDataChannelInit configures a data channel.
 type LP2PDataChannelInit struct {
 	Protocol string
-	ID       uint64
+	// ID is the channel-id (0 to 65,534). If nil, the lowest ID not used
+	// by an open channel of the connection is taken.
+	ID *uint64
 }
 
 // LP2PDataChannelEvent is fired at an LP2PConnection (ondatachannel) when
@@ -80,16 +82,18 @@ func (c *LP2PConnection) CreateDataChannel(label string, init *LP2PDataChannelIn
 	if c.isClosed() {
 		return nil, errClosed("LP2PConnection")
 	}
-	props := ospc.DataChannelParameters{Label: label}
+	props := ospc.DataChannelInit{Label: label}
 	if init != nil {
 		props.Protocol = init.Protocol
 		props.ID = init.ID
 	}
+	// Blocks until the peer accepted the channel with a
+	// data-channel-open-response (or DataChannelOpenTimeout passed).
 	oDc, err := c.conn.OpenDataChannel(c.ctx, props)
 	if err != nil {
 		return nil, toDOMException(err)
 	}
-	return c.adoptDataChannel(oDc, props), nil
+	return c.adoptDataChannel(oDc, oDc.DataChannelParameters), nil
 }
 
 func (c *LP2PConnection) adoptDataChannel(oDc *ospc.DataChannel, p ospc.DataChannelParameters) *LP2PDataChannel {
