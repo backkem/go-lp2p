@@ -494,3 +494,93 @@ func TestDeterministicCBOR(t *testing.T) {
 		t.Fatalf("WriteTypedMessage: got %x", buf.Bytes())
 	}
 }
+
+func TestNilContainersEncodeEmpty(t *testing.T) {
+	got, err := EncodeCBOR(&msgAgentInfo{DisplayName: "a", ModelName: "b", StateToken: "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// {0: "a", 1: "b", 2: [], 3: "c", 4: []}
+	want := []byte{0xa5, 0x00, 0x61, 'a', 0x01, 0x61, 'b', 0x02, 0x80, 0x03, 0x61, 'c', 0x04, 0x80}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("got %x, want %x", got, want)
+	}
+}
+
+func TestDialAddressPrefersIPv4(t *testing.T) {
+	ra, err := DirectAgent("x", &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1}, TXTRecordSet{"fp": {"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ra.info.AddrIPv6 = []net.IP{net.ParseIP("fe80::1")}
+	if got := getMdnsHost(ra.info); got != "10.0.0.1" {
+		t.Fatalf("got %q", got)
+	}
+	ra.info.AddrIPv4 = nil
+	if got := getMdnsHost(ra.info); got == "[fe80::1]" {
+		t.Fatal("dialing a link-local address without zone")
+	}
+}
+
+// TestAgentInfoRequestRetry dials a peer that drops the first
+// agent-info-request, as osp_demo does when it arrives too early.
+func TestAgentInfoRequestRetry(t *testing.T) {
+	checkNoLeaks(t)
+	cert := newPlainCert(t)
+	ln, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{*cert},
+		NextProtos:   []string{ALPN_OSP},
+		ClientAuth:   tls.RequireAnyClientCert,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() { ln.Close(); <-done })
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept(context.Background())
+		if err != nil {
+			return
+		}
+		send := func(msg interface{}) {
+			s, err := conn.OpenUniStream()
+			if err == nil {
+				_ = writeMessage(msg, s)
+				_ = s.Close()
+			}
+		}
+		send(&msgAuthCapabilities{PskInputMethods: []msgPskInputMethod{PskInputMethodNumeric}, PskMinBitsOfEntropy: 20})
+		requests := 0
+		for {
+			s, err := conn.AcceptUniStream(conn.Context())
+			if err != nil {
+				return
+			}
+			msg, err := readMessage(s)
+			if req, ok := msg.(*msgAgentInfoRequest); ok && err == nil {
+				requests++
+				if requests >= 2 {
+					send(&msgAgentInfoResponse{msgResponse: msgResponse{RequestId: req.RequestId}, AgentInfo: msgAgentInfo{DisplayName: "Retry"}})
+				}
+			}
+		}
+	}()
+
+	fp, _ := certificateFingerPrint(cert.Leaf)
+	ra, err := DirectAgent("Retry", ln.Addr().(*net.UDPAddr), TXTRecordSet{txtKeyFingerprint: {fp}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	uc, err := ra.Dial(ctx, AgentTransportQUIC, newTestAgent(t, "Client"))
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer uc.Close()
+	if info := uc.RemoteAgent().Info(); info == nil || info.DisplayName != "Retry" {
+		t.Fatalf("remote info %+v", info)
+	}
+}

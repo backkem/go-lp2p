@@ -107,12 +107,17 @@ func (ra DiscoveredAgent) dial(ctx context.Context, transportType AgentTransport
 	}, nil
 }
 
+// getMdnsHost returns the address to dial a discovered agent at. IPv4 is
+// preferred: a link-local IPv6 address is unusable without its zone, which
+// the mDNS resolver doesn't report.
 func getMdnsHost(entry *mdns.ServiceEntry) string {
-	for _, ipv6 := range entry.AddrIPv6 {
-		return fmt.Sprintf("[%s]", ipv6)
-	}
 	for _, ipv4 := range entry.AddrIPv4 {
 		return ipv4.String()
+	}
+	for _, ipv6 := range entry.AddrIPv6 {
+		if !ipv6.IsLinkLocalUnicast() {
+			return fmt.Sprintf("[%s]", ipv6)
+		}
 	}
 	return entry.HostName
 }

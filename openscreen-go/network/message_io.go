@@ -73,8 +73,14 @@ func ReadTypeKey(r io.Reader) (TypeKey, error) {
 // deterministic order of RFC 8949 section 4.2.1, i.e. ascending integer keys.
 // The spec doesn't require any order, but some decoders, notably Chromium's
 // Open Screen Library, reject maps with keys out of order.
+//
+// Nil slices and maps are encoded as empty arrays and maps rather than null:
+// the CDDL types (e.g. `[* text]`) don't allow null.
 var cborEncMode = func() cbor.EncMode {
-	em, err := cbor.EncOptions{Sort: cbor.SortCoreDeterministic}.EncMode()
+	em, err := cbor.EncOptions{
+		Sort:          cbor.SortCoreDeterministic,
+		NilContainers: cbor.NilContainerAsEmpty,
+	}.EncMode()
 	if err != nil {
 		panic(err)
 	}

@@ -16,8 +16,8 @@ import (
 var ErrAuthenticationFailed = errors.New("authentication failed")
 
 type exchangeInfoState struct {
-	requestId uint64
-	done      chan struct{} // Closed when the remote info is complete.
+	requestIds map[uint64]bool // Of the agent-info-requests sent.
+	done       chan struct{}   // Closed when the remote info is complete.
 }
 
 // exchangeInfo sends the local auth-capabilities and requests the remote
@@ -46,23 +46,41 @@ func (c *baseConnection) exchangeInfo() (<-chan struct{}, error) {
 
 	// Remote AgentInfo
 	state := &exchangeInfoState{
-		requestId: c.nextRequestID(),
-		done:      make(chan struct{}),
+		requestIds: make(map[uint64]bool),
+		done:       make(chan struct{}),
 	}
-	infoMsg := &msgAgentInfoRequest{
-		msgRequest: msgRequest{
-			RequestId: msgRequestId(state.requestId),
-		},
-	}
-
-	err = c.send(infoMsg)
-	if err != nil {
+	c.exchangeInfoState = state
+	if err := c.sendAgentInfoRequest(); err != nil {
 		return nil, err
 	}
 
-	c.exchangeInfoState = state
-
 	return state.done, nil
+}
+
+// sendAgentInfoRequest sends an agent-info-request with a new request ID.
+//
+// Caller should hold connection lock.
+func (c *baseConnection) sendAgentInfoRequest() error {
+	id := c.nextRequestID()
+	c.exchangeInfoState.requestIds[id] = true
+	return c.send(&msgAgentInfoRequest{
+		msgRequest: msgRequest{
+			RequestId: msgRequestId(id),
+		},
+	})
+}
+
+// retryAgentInfoRequest resends the agent-info-request if no response
+// arrived yet.
+func (c *baseConnection) retryAgentInfoRequest() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.remoteAgent.HasInfo() {
+		return nil
+	}
+	c.log.Debug("no agent-info-response yet, resending agent-info-request")
+	return c.sendAgentInfoRequest()
 }
 
 // ErrNoAgentInfo is returned by Dial and the listener when the peer doesn't
@@ -74,6 +92,10 @@ var ErrNoAgentInfo = errors.New("peer did not complete metadata discovery")
 
 // infoExchangeTimeout bounds the info exchange of new connections.
 const infoExchangeTimeout = 10 * time.Second
+
+// infoRetryInterval is how often the agent-info-request is resent while
+// waiting for the response.
+const infoRetryInterval = 1500 * time.Millisecond
 
 // tolerateInfoGrace is how long the info exchange waits with the
 // TolerateMissingAgentInfo quirk before proceeding without it.
@@ -94,20 +116,32 @@ func (c *baseConnection) awaitInfo(ctx context.Context) error {
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	// A request can get lost if it reaches the peer before the peer is ready
+	// for it, as seen with osp_demo. Resending it is harmless: responses to
+	// any of the requests are accepted.
+	retry := time.NewTicker(infoRetryInterval)
+	defer retry.Stop()
 
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("%w (missing %s): %w", ErrNoAgentInfo, c.missingInfo(), ctx.Err())
-	case <-c.ctx.Done():
-		return c.err()
-	case <-done:
-		return nil
-	case <-timer.C:
-		if tolerate {
-			c.proceedWithoutInfo()
+	for {
+		select {
+		case <-retry.C:
+			if err := c.retryAgentInfoRequest(); err != nil {
+				return fmt.Errorf("failed to exchange info: %w", err)
+			}
+			continue
+		case <-ctx.Done():
+			return fmt.Errorf("%w (missing %s): %w", ErrNoAgentInfo, c.missingInfo(), ctx.Err())
+		case <-c.ctx.Done():
+			return c.err()
+		case <-done:
 			return nil
+		case <-timer.C:
+			if tolerate {
+				c.proceedWithoutInfo()
+				return nil
+			}
+			return fmt.Errorf("%w within %v (missing %s)", ErrNoAgentInfo, timeout, c.missingInfo())
 		}
-		return fmt.Errorf("%w within %v (missing %s)", ErrNoAgentInfo, timeout, c.missingInfo())
 	}
 }
 
@@ -709,7 +743,7 @@ func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse) erro
 		return nil
 	}
 
-	if c.exchangeInfoState.requestId != uint64(msg.RequestId) {
+	if !c.exchangeInfoState.requestIds[uint64(msg.RequestId)] {
 		c.log.Debug("ignoring agent-info-response with wrong request ID", "id", msg.RequestId)
 		return nil
 	}
