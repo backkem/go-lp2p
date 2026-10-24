@@ -234,7 +234,8 @@ Comparison of `agent_authenticator.cc` / `util/crypto/spake2.cc` with
   it; both-initiate resolution unspecified; Appendix B padding rule ("3 - len(N)
   mod 3" pads a full group, 9 digits uncovered); `pw` encoding only implied by
   Appendix B; `sn` / hostname computation (#293, #365); CBOR map key order;
-  zero-length CID guidance.
+  zero-length CID guidance; connection-count is required in every
+  presentation-connection-close-event but only defined for the receiver's.
 
 **Go**
 - `Listener.Close` closes connections already returned by `Accept`, contrary to
@@ -247,5 +248,11 @@ Comparison of `agent_authenticator.cc` / `util/crypto/spake2.cc` with
 **Chromium**
 - Drop of an agent-info-request that arrives before the network phase starts
   (ospc works around it by resending, which is spec-compatible).
+- Presentation messages, seen with `examples/presentation-messages` (which also
+  exercises close + reconnect): the controller's termination request always
+  carries reason user-request (2), also for `terminate()` (application-request);
+  the receiver's presentation-connection-open-response omits connection-count;
+  the controller's presentation-id is the placeholder `<instance>:<url>`
+  (valid, but not random).
 - Older items: certificate fields per network.bs (CN=agent hostname), SNI = agent
   hostname, cwd-relative certificate path, fixed port.

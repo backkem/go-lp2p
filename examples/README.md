@@ -13,6 +13,13 @@ the repository root:
 | [pairing-failures](./pairing-failures/) | What a page sees when the user denies advertising, dismisses the picker, types the wrong PIN or refuses a connection. |
 | [webtransport-pooled](./webtransport-pooled/) | Streams 4 MiB over an `LP2PQuicTransport` and verifies it with SHA-256. |
 
+[presentation-messages](./presentation-messages/) is different: it runs one Go
+Open Screen agent against Chromium's `osp_demo` and sends the Presentation
+Protocol messages (availability, start, connection messages, reconnect,
+termination) by hand, printing each one. It is not a Presentation API
+implementation. It needs a built `osp_demo`, and its one deviation from the
+spec, `-spake2-p256`, must be turned on explicitly. See its README.
+
 ```sh
 go run ./examples/lp2p-data-channel
 ```
