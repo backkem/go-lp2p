@@ -2,7 +2,6 @@ package ospc
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -172,6 +171,7 @@ func (c *baseConnection) proceedWithoutInfo() {
 		c.remoteAgent.setAuthenticationInfo(*c.localAgent.AuthenticationInfo())
 	}
 	c.determineAuthenticationRole()
+	c.doAuthNotify()
 }
 
 // caller should hold connection lock.
@@ -186,6 +186,7 @@ func (c *baseConnection) checkAgentInfoComplete() {
 	default:
 	}
 	c.determineAuthenticationRole()
+	c.doAuthNotify()
 	close(state.done)
 }
 
@@ -241,98 +242,68 @@ func (c *baseConnection) getAuthenticationRole() AuthenticationRole {
 	return AuthenticationRoleConsumer
 }
 
-// GeneratePSK creates a PSK based on the negotiated config.
+// GeneratePSK creates a random PSK for the PSK presenter to show to the user.
+// network.bs: "The PSK presenter must generate a PSK that has at least as
+// many bits of entropy as it receives in this field, and at least as many
+// bits of entropy as it sends in this field." It returns the PSK as canonical
+// decimal text (see ParsePSK), to be shown with FormatPSK and passed to
+// AuthenticatePSK.
 func (c *baseConnection) GeneratePSK() ([]byte, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	localAuthInfo := c.localAgent.AuthenticationInfo()
 	remoteAuthInfo := c.remoteAgent.AuthenticationInfo()
+	c.mu.Unlock()
 	if remoteAuthInfo == nil {
 		remoteAuthInfo = localAuthInfo
 	}
-	minBits := maxInt(
-		localAuthInfo.PSKConfig.Entropy,
-		remoteAuthInfo.PSKConfig.Entropy,
-	)
-
-	// We round up to full byte
-	buf := make([]byte, (minBits+7)/8)
-
-	_, err := rand.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-
-	return buf, nil
+	bits := max(localAuthInfo.PSKConfig.Entropy, remoteAuthInfo.PSKConfig.Entropy, minPSKEntropy)
+	// A peer asking for more than the spec's maximum of 60 bits is out of
+	// range; don't let it force an unusable PSK.
+	bits = min(bits, maxPSKEntropy)
+	return generatePSK(bits)
 }
 
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-type authenticationStatus int
-
-const (
-	authStatusNew = iota + 1
-	authStatusRequested
-	authStatusAwaitPSK
-	authStatusAwaitHandshake
-	authStatusAwaitConfirmation
-	authStatusAwaitResult
-	authStatusDone
-)
-
-func (s authenticationStatus) String() string {
-	switch s {
-	case authStatusNew:
-		return "New"
-	case authStatusRequested:
-		return "Requested"
-	case authStatusAwaitPSK:
-		return "AwaitPSK"
-	case authStatusAwaitHandshake:
-		return "AwaitHandshake"
-	case authStatusAwaitConfirmation:
-		return "AwaitConfirmation"
-	case authStatusAwaitResult:
-		return "AwaitResult"
-	case authStatusDone:
-		return "Done"
-	default:
-		return fmt.Sprintf("Invalid authStatus (%d)", s)
-	}
-}
-
+// authenticationState is the state of the SPAKE2 authentication
+// (network.bs "Authentication with SPAKE2") of one connection.
 type authenticationState struct {
-	status authenticationStatus
+	// psk is the canonical PSK (SPAKE2 pw), nil until AuthenticatePSK.
+	psk []byte
+	// remoteHandshake is the peer's initiating auth-spake2-handshake (pA),
+	// kept until the PSK is known.
+	remoteHandshake *msgAuthSpake2Handshake
 
-	localPSK           []byte
-	spakeState         *spake2.SPAKE2
+	spakeState *spake2.SPAKE2 // Nil until the local PSK is known.
+	alice      bool           // The local agent initiated.
+	// remotePublic is pB, for Alice.
 	remotePublic       []byte
-	sharedSecret       []byte
+	sentConfirmation   bool
 	remoteConfirmation []byte
-	localResult        *msgAuthStatusResult
-	remoteResult       *msgAuthStatusResult
+	verified           bool // The peer's confirmation is valid.
+	failed             bool
 
-	done chan struct{}
+	localResult  *msgAuthStatusResult
+	remoteResult *msgAuthStatusResult
+
+	finished bool
+	done     chan struct{} // Closed once verified and the peer's auth-status received.
 }
 
-// Caller should hold connection lock
-func (c *baseConnection) newAuthenticationState() *authenticationState {
-	c.authenticationState = &authenticationState{
-		status: authStatusNew,
-		done:   make(chan struct{}),
+// authState returns the authentication state, creating it if needed.
+//
+// Caller should hold connection lock.
+func (c *baseConnection) authState() *authenticationState {
+	if c.authenticationState == nil {
+		c.authenticationState = &authenticationState{
+			done: make(chan struct{}),
+		}
 	}
-
 	return c.authenticationState
 }
 
-// AcceptAuthenticate is used to handle an incoming authentication request.
-// It has to be called for every UnauthenticatedConnection.
+// AcceptAuthenticate waits until the authentication role is known, after the
+// auth-capabilities exchange. The presenter then shows a PSK to the user
+// (GeneratePSK, FormatPSK), the consumer asks the user for it; both pass it
+// to AuthenticatePSK.
 func (c *baseConnection) AcceptAuthenticate(ctx context.Context) (role AuthenticationRole, err error) {
 	select {
 	case <-ctx.Done():
@@ -342,26 +313,6 @@ func (c *baseConnection) AcceptAuthenticate(ctx context.Context) (role Authentic
 	case <-c.authNotify:
 		return c.GetAuthenticationRole(), nil
 	}
-}
-
-// RequestAuthenticatePSK is used to request authentication.
-// As collecting agent it sends a auth-spake2-need-psk message.
-// As presenting agent it's a no-op.
-func (c *baseConnection) RequestAuthenticatePSK() error {
-	c.mu.Lock()
-	if c.authenticationRole == AuthenticationRolePresenter {
-		// No-op as presenter
-		c.mu.Unlock()
-		return nil
-	}
-	if c.authenticationState != nil {
-		c.mu.Unlock()
-		return errors.New("already authenticating")
-	}
-	err := c.authenticatePSKProgress()
-	c.mu.Unlock()
-
-	return c.failOnError(err)
 }
 
 // failOnError closes the connection if err is not nil. Caller must not hold
@@ -406,8 +357,15 @@ func (c *baseConnection) validAuthInitiationToken(token string) bool {
 	return token == "" || c.authToken == "" || token == c.authToken
 }
 
-// Authenticate is used to authenticate. It will block until authentication is complete
-// or the context is closed.
+// AuthenticatePSK authenticates with SPAKE2 using psk, a base-10 numeric PSK
+// in any form ParsePSK accepts. It blocks until authentication is complete
+// or ctx is done.
+//
+// If the peer already initiated, the local agent answers as Bob. Otherwise it
+// initiates as Alice: as PSK presenter with psk-status psk-shown, as PSK
+// consumer with psk-needs-presentation (network.bs "Authentication with
+// SPAKE2"). If both initiate, the presenter's initiation wins, as in
+// Chromium's openscreen: the consumer abandons its own and answers.
 func (c *baseConnection) AuthenticatePSK(ctx context.Context, psk []byte) (*Connection, error) {
 	done, err := c.authenticatePSK(psk)
 	if err != nil {
@@ -481,21 +439,23 @@ func (c *baseConnection) handOff(authenticated bool) (*Connection, error) {
 // channel is closed once authentication completes. Usage errors leave the
 // connection open, other errors close it.
 func (c *baseConnection) authenticatePSK(psk []byte) (<-chan struct{}, error) {
-	if psk == nil {
-		return nil, errors.New("no psk provided")
+	pw, err := ParsePSK(string(psk))
+	if err != nil {
+		return nil, err
 	}
 
 	c.mu.Lock()
-	authState := c.authenticationState
-	if authState == nil {
-		authState = c.newAuthenticationState()
-	}
-	if authState.localPSK != nil {
+	authState := c.authState()
+	if authState.psk != nil {
 		c.mu.Unlock()
 		return nil, errors.New("already authenticating")
 	}
-	authState.localPSK = psk
-	err := c.authenticatePSKProgress()
+	authState.psk = []byte(pw)
+	if !c.localAgent.quirks.Spake2SuiteP256 {
+		err = c.authFailed(AuthStatusResultUnknownError, ErrSpake2SuiteUnsupported)
+	} else {
+		err = c.authenticatePSKProgress()
+	}
 	c.mu.Unlock()
 
 	if err := c.failOnError(err); err != nil {
@@ -509,11 +469,13 @@ func (c *baseConnection) authenticatePSK(psk []byte) (<-chan struct{}, error) {
 //
 // Caller should hold connection lock.
 func (c *baseConnection) authFailed(result msgAuthStatusResult, err error) error {
-	c.authenticationState.localResult = &result
+	authState := c.authState()
+	authState.failed = true
+	authState.localResult = &result
 	if sendErr := c.sendAuthStatus(); sendErr != nil {
 		c.log.Debug("failed to send auth-status", "err", sendErr)
 	}
-	return fmt.Errorf("%w: %v", ErrAuthenticationFailed, err)
+	return fmt.Errorf("%w: %w", ErrAuthenticationFailed, err)
 }
 
 // spakeFailureResult maps a SPAKE2 error to an auth-status result.
@@ -524,171 +486,149 @@ func spakeFailureResult(err error) msgAuthStatusResult {
 	return AuthStatusResultUnknownError
 }
 
+// spake2Identities returns the SPAKE2 identities. network.bs: "The values A
+// and B used in SPAKE2 are the agent fingerprints of the client and server,
+// respectively." The client is the agent that opened the QUIC connection,
+// regardless of who initiates SPAKE2. The fingerprints are used as their
+// base64 text (network.bs "Computing the Agent Fingerprint"), as Chromium's
+// openscreen does.
+func (c *baseConnection) spake2Identities() (a, b []byte) {
+	local, remote := []byte(c.localAgent.PeerID), []byte(c.remoteAgent.PeerID)
+	if c.agentRole == AgentRoleClient {
+		return local, remote
+	}
+	return remote, local
+}
+
+// authInitiate starts SPAKE2 as Alice.
+//
+// Caller should hold connection lock.
+func (c *baseConnection) authInitiate() error {
+	authState := c.authenticationState
+	a, b := c.spake2Identities()
+	authState.spakeState = newSpake2(true, authState.psk, a, b)
+	authState.alice = true
+	pA, err := authState.spakeState.Start()
+	if err != nil {
+		return c.authFailed(AuthStatusResultUnknownError, err)
+	}
+	// network.bs: the presenter initiates with psk-status psk-shown, the
+	// consumer with psk-needs-presentation, both with pA.
+	status := AuthSpake2PskStatusPskNeedsPresentation
+	if c.authenticationRole == AuthenticationRolePresenter {
+		status = AuthSpake2PskStatusPskShown
+	}
+	c.log.Debug("SPAKE2: initiating as Alice", "role", c.authenticationRole, "psk-status", status)
+	return c.sendAuthSpake2Handshake(status, pA)
+}
+
+// authRespond answers the peer's initiating handshake as Bob.
+//
+// Caller should hold connection lock.
+func (c *baseConnection) authRespond(msg *msgAuthSpake2Handshake) error {
+	authState := c.authenticationState
+	a, b := c.spake2Identities()
+	authState.spakeState = newSpake2(false, authState.psk, a, b)
+	authState.alice = false
+	pB, err := authState.spakeState.Exchange(msg.PublicValue)
+	if err != nil {
+		return c.authFailed(AuthStatusResultProofInvalid, err)
+	}
+	// network.bs: the consumer answers psk-shown with psk-input and pB; "The
+	// PSK presenter, on receiving this message [psk-needs-presentation],
+	// creates a PSK and presents it to the the user. Once that is done, it
+	// sends an auth-spake2-handshake message to the PSK consumer with
+	// psk-status set to psk-input and the public-value field set to pB."
+	c.log.Debug("SPAKE2: responding as Bob", "role", c.authenticationRole, "peer-psk-status", msg.PskStatus)
+	return c.sendAuthSpake2Handshake(AuthSpake2PskStatusPskInput, pB)
+}
+
 // authenticatePSKProgress advances the authentication state machine as far as
 // the available inputs allow. A returned error is fatal for the connection.
 //
 // Caller should hold connection lock
 func (c *baseConnection) authenticatePSKProgress() error {
-	authState := c.authenticationState
-	if authState == nil {
-		authState = c.newAuthenticationState()
-	}
-
-	role := c.authenticationRole
-	c.log.Debug("auth progress", "role", role, "status", authState.status)
-
-	if authState.status == authStatusNew {
-		if role == AuthenticationRolePresenter {
-			if authState.localPSK == nil {
-				c.doAuthNotify()
-			}
-		} else {
-			if authState.remotePublic == nil {
-				err := c.sendAuthSpake2NeedPsk()
-				if err != nil {
-					return err
-				}
-			} else if authState.localPSK == nil {
-				c.doAuthNotify()
-			}
-		}
-
-		authState.status = authStatusAwaitPSK
-	}
-
-	if authState.status == authStatusAwaitPSK {
-		if authState.localPSK == nil {
-			return nil // continue waiting
-		}
-		if role == AuthenticationRolePresenter {
-			client := spake2.NewClient(authState.localPSK, &spake2.Options{
-				Ciphersuite: spake2.DefaultCiphersuite(),
-				IdentityA:   []byte(c.localAgent.PeerID),
-				IdentityB:   []byte(c.remoteAgent.PeerID),
-			})
-			authState.spakeState = client
-			localPublic, err := client.Start()
-			if err != nil {
-				return c.authFailed(AuthStatusResultUnknownError, err)
-			}
-
-			err = c.sendAuthSpake2Handshake(localPublic)
-			if err != nil {
-				return err
-			}
-		}
-
-		authState.status = authStatusAwaitHandshake
-	}
-
-	if authState.status == authStatusAwaitHandshake {
-		if authState.remotePublic == nil {
-			return nil // continue waiting
-		}
-		if role == AuthenticationRolePresenter {
-			localConfirmation, err := authState.spakeState.Finish(authState.remotePublic)
-			if err != nil {
-				return c.authFailed(spakeFailureResult(err), err)
-			}
-
-			err = c.sendAuthSpake2Confirmation(localConfirmation)
-			if err != nil {
-				return err
-			}
-		} else {
-			server := spake2.NewServer(authState.localPSK, &spake2.Options{
-				Ciphersuite: spake2.DefaultCiphersuite(),
-				IdentityA:   []byte(c.remoteAgent.PeerID),
-				IdentityB:   []byte(c.localAgent.PeerID),
-			})
-			authState.spakeState = server
-
-			localPublic, err := server.Exchange(authState.remotePublic)
-			if err != nil {
-				return c.authFailed(spakeFailureResult(err), err)
-			}
-
-			err = c.sendAuthSpake2Handshake(localPublic)
-			if err != nil {
-				return err
-			}
-		}
-
-		authState.status = authStatusAwaitConfirmation
-	}
-
-	if authState.status == authStatusAwaitConfirmation {
-		if authState.remoteConfirmation == nil {
-			return nil // continue waiting
-		}
-
-		if role == AuthenticationRolePresenter {
-			err := authState.spakeState.Verify(authState.remoteConfirmation)
-			if err != nil {
-				return c.authFailed(spakeFailureResult(err), err)
-			}
-		} else {
-			localConfirmation, err := authState.spakeState.Confirm(authState.remoteConfirmation)
-			if err != nil {
-				return c.authFailed(spakeFailureResult(err), err)
-			}
-
-			err = c.sendAuthSpake2Confirmation(localConfirmation)
-			if err != nil {
-				return err
-			}
-		}
-
-		var err error
-		authState.sharedSecret, err = authState.spakeState.SharedKey()
-		if err != nil {
-			return c.authFailed(AuthStatusResultUnknownError, err)
-		}
-
-		status := AuthStatusResultAuthenticated
-		authState.localResult = &status
-		err = c.sendAuthStatus()
-		if err != nil {
-			return err
-		}
-
-		authState.status = authStatusAwaitResult
-	}
-
-	if authState.status == authStatusAwaitResult {
-		if authState.remoteResult == nil {
-			return nil // continue waiting
-		}
-
-		close(authState.done)
-
-		authState.status = authStatusDone
-	}
-
-	if authState.status == authStatusDone {
+	authState := c.authState()
+	if authState.failed || authState.finished {
 		return nil
 	}
 
-	return errors.New("invalid authentication status")
-}
-
-// Caller should hold connection lock
-func (c *baseConnection) sendAuthSpake2NeedPsk() error {
-	return c.send(&msgAuthSpake2NeedPskDeprecated{
-		AuthInitiationToken: c.nextAuthInitiationToken(),
-	})
-}
-
-// Caller should hold connection lock
-func (c *baseConnection) sendAuthSpake2Handshake(publicValue []byte) error {
-	pskStatus := AuthSpake2PskStatusPskInput
-	if c.authenticationRole == AuthenticationRolePresenter {
-		pskStatus = AuthSpake2PskStatusPskShown
+	// Start SPAKE2 once the PSK is known.
+	if authState.spakeState == nil {
+		if authState.psk == nil {
+			return nil // Waiting for AuthenticatePSK.
+		}
+		var err error
+		if hs := authState.remoteHandshake; hs != nil {
+			err = c.authRespond(hs)
+		} else {
+			err = c.authInitiate()
+		}
+		if err != nil || authState.failed {
+			return err
+		}
 	}
 
+	// network.bs: "Once an agent knows both pA and pB from
+	// auth-spake2-handshake messages, it computes and sends a
+	// auth-spake2-confirmation". Alice sends cA once she has pB. Bob sends cB
+	// once he has verified cA, as spake2-go only derives cB then; Alice
+	// doesn't wait for cB, so the order doesn't matter.
+	if authState.alice && authState.remotePublic != nil && !authState.sentConfirmation {
+		cA, err := authState.spakeState.Finish(authState.remotePublic)
+		if err != nil {
+			return c.authFailed(spakeFailureResult(err), err)
+		}
+		if err := c.sendAuthSpake2Confirmation(cA); err != nil {
+			return err
+		}
+		authState.sentConfirmation = true
+	}
+
+	// network.bs: "Once an agent receives an auth-spake2-confirmation
+	// message, it validates that message using the procedure in [SPAKE2] and
+	// then replies with an auth-status authenticated message".
+	if authState.remoteConfirmation != nil && !authState.verified {
+		if authState.alice {
+			if !authState.sentConfirmation {
+				return nil // Waiting for pB.
+			}
+			if err := authState.spakeState.Verify(authState.remoteConfirmation); err != nil {
+				return c.authFailed(spakeFailureResult(err), err)
+			}
+		} else {
+			cB, err := authState.spakeState.Confirm(authState.remoteConfirmation)
+			if err != nil {
+				return c.authFailed(spakeFailureResult(err), err)
+			}
+			if err := c.sendAuthSpake2Confirmation(cB); err != nil {
+				return err
+			}
+			authState.sentConfirmation = true
+		}
+		authState.verified = true
+
+		status := AuthStatusResultAuthenticated
+		authState.localResult = &status
+		if err := c.sendAuthStatus(); err != nil {
+			return err
+		}
+	}
+
+	// Hand off once both agents report success, so the peer is ready for
+	// application messages.
+	if authState.verified && authState.remoteResult != nil {
+		authState.finished = true
+		close(authState.done)
+	}
+	return nil
+}
+
+// Caller should hold connection lock
+func (c *baseConnection) sendAuthSpake2Handshake(status msgAuthSpake2PskStatus, publicValue []byte) error {
 	msg := &msgAuthSpake2Handshake{
 		PublicValue: publicValue,
-		PskStatus:   pskStatus,
+		PskStatus:   status,
 	}
 	if at := c.nextAuthInitiationToken(); at != "" {
 		msg.AuthInitiationToken.Token = &at
@@ -772,26 +712,6 @@ func (c *baseConnection) handleAuthCapabilities(msg *msgAuthCapabilities) error 
 	return nil
 }
 
-func (c *baseConnection) handleAuthSpake2NeedPsk(msg *msgAuthSpake2NeedPskDeprecated) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if !c.validAuthInitiationToken(msg.AuthInitiationToken) {
-		c.log.Warn("discarding auth-spake2-need-psk with invalid auth-initiation-token")
-		return nil
-	}
-
-	if c.authenticationRole == AuthenticationRoleConsumer ||
-		c.authenticationState != nil {
-		c.log.Debug("ignoring auth-spake2-need-psk")
-		return nil
-	}
-
-	c.newAuthenticationState()
-
-	return c.authenticatePSKProgress()
-}
-
 func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -801,12 +721,44 @@ func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake) 
 		return nil
 	}
 
-	authState := c.authenticationState
-	if authState == nil {
-		authState = c.newAuthenticationState()
+	authState := c.authState()
+	if authState.failed || authState.finished {
+		return nil
 	}
 
-	authState.remotePublic = msg.PublicValue
+	switch {
+	case authState.spakeState == nil:
+		// The peer initiated. Answer once the PSK is known.
+		if authState.remoteHandshake != nil {
+			c.log.Debug("ignoring repeated initiating auth-spake2-handshake")
+			return nil
+		}
+		authState.remoteHandshake = msg
+
+	case authState.alice && authState.remotePublic == nil:
+		if msg.PskStatus == AuthSpake2PskStatusPskNeedsPresentation {
+			// Both agents initiated, network.bs doesn't say how to resolve
+			// this. The presenter's initiation wins: as presenter, ignore the
+			// consumer's. If both claim to be the consumer the roles disagree
+			// and the peer's psk-input reply will never come; ignore it too.
+			c.log.Debug("both agents initiated SPAKE2, ignoring the peer's psk-needs-presentation", "role", c.authenticationRole)
+			return nil
+		}
+		if msg.PskStatus == AuthSpake2PskStatusPskShown && c.authenticationRole == AuthenticationRoleConsumer {
+			// Both agents initiated and the peer is the presenter: abandon
+			// the local initiation and answer as Bob.
+			c.log.Debug("both agents initiated SPAKE2, answering the presenter's")
+			authState.spakeState = nil
+			authState.alice = false
+			authState.remoteHandshake = msg
+			break
+		}
+		authState.remotePublic = msg.PublicValue
+
+	default:
+		c.log.Debug("ignoring unexpected auth-spake2-handshake", "psk-status", msg.PskStatus)
+		return nil
+	}
 
 	return c.authenticatePSKProgress()
 }
@@ -819,7 +771,16 @@ func (c *baseConnection) handleAuthSpake2Confirmation(msg *msgAuthSpake2Confirma
 	if authState == nil {
 		return errors.New("unsolicited auth-spake2-confirmation")
 	}
+	if authState.remoteConfirmation != nil {
+		c.log.Debug("ignoring repeated auth-spake2-confirmation")
+		return nil
+	}
 
+	// The CDDL declares confirmation-value as "bytes .size 64", but the
+	// network.bs suite's MAC is HMAC-SHA-256, whose output (cA, cB in
+	// RFC 9382) is 32 bytes. That is a spec inconsistency: like Chromium's
+	// openscreen, send and accept the 32-byte MAC, and don't check the
+	// declared size; SPAKE2 verification rejects wrong values.
 	authState.remoteConfirmation = msg.ConfirmationValue
 
 	return c.authenticatePSKProgress()
@@ -829,11 +790,6 @@ func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	authState := c.authenticationState
-	if authState == nil {
-		return errors.New("unsolicited auth-status")
-	}
-
 	// The auth-status message is merely informative as each agent
 	// independently computes the outcome of SPAKE2 through key confirmation
 	// verification. Any value of result other than authenticated means that
@@ -842,6 +798,11 @@ func (c *baseConnection) handleAuthStatus(msg *msgAuthStatus) error {
 	res := msg.Result
 	if res != AuthStatusResultAuthenticated {
 		return fmt.Errorf("%w: remote result %v", ErrAuthenticationFailed, res)
+	}
+
+	authState := c.authenticationState
+	if authState == nil {
+		return errors.New("unsolicited auth-status")
 	}
 	authState.remoteResult = &res
 
@@ -890,9 +851,6 @@ func (c *baseConnection) handleNetworkMessage(msg interface{}) error {
 
 	case *msgAuthCapabilities:
 		return c.handleAuthCapabilities(typedMsg)
-
-	case *msgAuthSpake2NeedPskDeprecated:
-		return c.handleAuthSpake2NeedPsk(typedMsg)
 
 	case *msgAuthSpake2Handshake:
 		return c.handleAuthSpake2Handshake(typedMsg)

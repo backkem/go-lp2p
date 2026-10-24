@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
-	"strings"
 	"sync"
 
 	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
@@ -48,7 +46,7 @@ func (u *UserAgent) Advertise(ctx context.Context, origin, nickname string) (*Ad
 		return nil, ErrPermissionDenied
 	}
 
-	agent, err := ospc.NewAgent(ospc.NewAgentConfig(nickname))
+	agent, err := newAgent(nickname)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +184,7 @@ func (u *UserAgent) Connect(ctx context.Context, origin, nickname string) (*Conn
 	hctx, cancel := u.handshakeContext(ctx)
 	defer cancel()
 
-	agent, err := ospc.NewAgent(ospc.NewAgentConfig(nickname))
+	agent, err := newAgent(nickname)
 	if err != nil {
 		return nil, err
 	}
@@ -199,6 +197,15 @@ func (u *UserAgent) Connect(ctx context.Context, origin, nickname string) (*Conn
 	return u.authenticate(hctx, uc, origin, nickname, peer)
 }
 
+// newAgent creates the local OSP agent of a connection.
+func newAgent(nickname string) (*ospc.Agent, error) {
+	conf := ospc.NewAgentConfig(nickname)
+	// Non-spec opt-in: SPAKE2 over P-256 rather than the spec's edwards25519,
+	// which isn't implemented (see ospc.InteropQuirks.Spake2SuiteP256).
+	conf.InteropQuirks.Spake2SuiteP256 = true
+	return ospc.NewAgent(conf)
+}
+
 // authenticate pairs with the peer: one side shows a PIN, the other enters
 // it. Which side does what is negotiated by OSP.
 func (u *UserAgent) authenticate(ctx context.Context, uc *ospc.UnauthenticatedConnection, origin, nickname string, peer Peer) (*Connection, error) {
@@ -208,17 +215,16 @@ func (u *UserAgent) authenticate(ctx context.Context, uc *ospc.UnauthenticatedCo
 		if err != nil {
 			return nil, err
 		}
-		pin := EncodePIN(raw)
 		if err := u.cfg.UI.PresentPIN(ctx, PINPresentation{
-			PIN: pin, Origin: origin, Nickname: nickname, Peer: peer,
+			PIN: EncodePIN(raw), Origin: origin, Nickname: nickname, Peer: peer,
 		}); err != nil {
 			return nil, err
 		}
-		psk = pinPSK(pin)
+		psk = raw
 	} else {
-		if err := uc.RequestAuthenticatePSK(); err != nil {
-			return nil, err
-		}
+		// The presenter initiates when its user is shown the PIN; this side
+		// answers once the user entered it, or initiates itself if the
+		// presenter hasn't yet.
 		pin, err := u.cfg.UI.EnterPIN(ctx, PINPrompt{Origin: origin, Nickname: nickname, Peer: peer})
 		if err != nil {
 			return nil, err
@@ -254,41 +260,24 @@ func verifiedPeer(a *ospc.Agent, p Peer) Peer {
 	return p
 }
 
-// EncodePIN renders raw PSK bytes as a numeric PIN, zero-padded to the
-// width of the largest value, in dash-separated groups of four digits.
-func EncodePIN(raw []byte) string {
-	n := new(big.Int).SetBytes(raw)
-	maxVal := new(big.Int).Lsh(big.NewInt(1), uint(8*len(raw)))
-	width := len(maxVal.Sub(maxVal, big.NewInt(1)).String())
-	digits := fmt.Sprintf("%0*s", width, n.String())
-
-	var sb strings.Builder
-	for i, r := range digits {
-		if i > 0 && (len(digits)-i)%4 == 0 {
-			sb.WriteByte('-')
-		}
-		sb.WriteRune(r)
+// EncodePIN renders a numeric PSK, as returned by GeneratePSK, as a PIN
+// for display: dash-separated groups of three digits below 9 digits, four
+// otherwise (network.bs Appendix B, see ospc.FormatPSK).
+func EncodePIN(psk []byte) string {
+	pin, err := ospc.FormatPSK(string(psk))
+	if err != nil {
+		return string(psk)
 	}
-	return sb.String()
+	return pin
 }
 
 // ParsePIN turns a PIN as typed by the user into the PSK used for
-// authentication. Dashes and spaces are ignored.
+// authentication: dashes, spaces and leading zeros are dropped (network.bs
+// Appendix B, see ospc.ParsePSK).
 func ParsePIN(pin string) ([]byte, error) {
-	psk := pinPSK(pin)
-	if len(psk) == 0 {
-		return nil, errors.New("empty PIN")
+	psk, err := ospc.ParsePSK(pin)
+	if err != nil {
+		return nil, err
 	}
-	for _, c := range psk {
-		if c < '0' || c > '9' {
-			return nil, fmt.Errorf("PIN must be numeric, got %q", pin)
-		}
-	}
-	return psk, nil
-}
-
-// pinPSK is the PSK both sides feed into SPAKE2: the PIN's digits. Using
-// the digits rather than the raw bytes keeps leading zeros significant.
-func pinPSK(pin string) []byte {
-	return []byte(strings.NewReplacer("-", "", " ", "").Replace(strings.TrimSpace(pin)))
+	return []byte(psk), nil
 }

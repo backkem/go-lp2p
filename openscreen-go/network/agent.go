@@ -208,6 +208,14 @@ func NewAgent(c AgentConfig) (*Agent, error) {
 	if c.PSKConfig.Entropy != 0 {
 		agent.authenticationInfo.PSKConfig.Entropy = c.PSKConfig.Entropy
 	}
+	// network.bs "Authentication": "PSK ease of input is an integer in the
+	// range from 0 to 100 inclusive" and psk-min-bits-of-entropy is "in the
+	// range of 20 to 60 bits inclusive".
+	if psk := agent.authenticationInfo.PSKConfig; psk.EaseOfInput < 0 || psk.EaseOfInput > 100 {
+		return nil, fmt.Errorf("PSK ease of input %d out of range 0-100", psk.EaseOfInput)
+	} else if psk.Entropy < minPSKEntropy || psk.Entropy > maxPSKEntropy {
+		return nil, fmt.Errorf("PSK entropy %d bits out of range %d-%d", psk.Entropy, minPSKEntropy, maxPSKEntropy)
+	}
 
 	agent.keepAlive = c.KeepAlive
 	agent.log = c.Logger

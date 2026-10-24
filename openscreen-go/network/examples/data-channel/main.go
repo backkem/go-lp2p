@@ -44,6 +44,8 @@ func mainErr() error {
 func simPeerA() error {
 	c := ospc.AgentConfig{
 		DisplayName: "PeerA",
+		// P-256 SPAKE2 suite: the spec's edwards25519 is not implemented (non-spec opt-in).
+		InteropQuirks: ospc.InteropQuirks{Spake2SuiteP256: true},
 	}
 	a, err := ospc.NewAgent(c)
 	if err != nil {
@@ -109,6 +111,8 @@ func simPeerB(peerADone <-chan struct{}) error {
 	log.Printf("Peer B: Found agent: %s\n", discovered.Nickname())
 	c := ospc.AgentConfig{
 		DisplayName: "PeerB",
+		// P-256 SPAKE2 suite: the spec's edwards25519 is not implemented (non-spec opt-in).
+		InteropQuirks: ospc.InteropQuirks{Spake2SuiteP256: true},
 	}
 	a, err := ospc.NewAgent(c)
 	if err != nil {

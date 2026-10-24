@@ -270,8 +270,7 @@ func (q *quicNetworkConnection) acceptStreams(accept func() (quic.ReceiveStream,
 func isNetworkTypeKey(key TypeKey) bool {
 	switch key {
 	case typeKeyAgentInfoRequest, typeKeyAgentInfoResponse,
-		typeKeyAgentStatusRequest, typeKeyAgentStatusResponse,
-		typeKeyAuthSpake2NeedPskDeprecated:
+		typeKeyAgentStatusRequest, typeKeyAgentStatusResponse:
 		return true
 	}
 	return key >= 1000 && key < 1100 // auth-*

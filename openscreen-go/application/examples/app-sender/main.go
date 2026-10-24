@@ -11,7 +11,7 @@
 // Flags:
 //
 //	-name string     Display name for this sender (default "Go OpenScreen Sender")
-//	-psk string      Pre-shared key for authentication (default "test-psk")
+//	-psk string      Pre-shared key for authentication (default "4321")
 //	-receiver string Optional: name of receiver to connect to (discovers any if not set)
 package main
 
@@ -28,7 +28,7 @@ import (
 
 func main() {
 	name := flag.String("name", "Go OpenScreen Sender", "Display name for this sender")
-	psk := flag.String("psk", "test-psk", "Pre-shared key for authentication")
+	psk := flag.String("psk", "4321", "Pre-shared key for authentication")
 	receiver := flag.String("receiver", "", "Name of receiver to connect to (optional)")
 	timeout := flag.Duration("timeout", 10*time.Second, "Discovery timeout")
 	flag.Parse()
@@ -42,6 +42,8 @@ func run(name, psk, receiverName string, timeout time.Duration) error {
 	// Create local agent
 	config := ospc.AgentConfig{
 		DisplayName: name,
+		// P-256 SPAKE2 suite: the spec's edwards25519 is not implemented (non-spec opt-in).
+		InteropQuirks: ospc.InteropQuirks{Spake2SuiteP256: true},
 	}
 	agent, err := ospc.NewAgent(config)
 	if err != nil {

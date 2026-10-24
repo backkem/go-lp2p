@@ -11,7 +11,7 @@
 // Flags:
 //
 //	-name string    Display name for this receiver (default "Go OpenScreen Receiver")
-//	-psk string     Pre-shared key for authentication (default "test-psk")
+//	-psk string     Pre-shared key for authentication (default "4321")
 package main
 
 import (
@@ -29,7 +29,7 @@ import (
 
 func main() {
 	name := flag.String("name", "Go OpenScreen Receiver", "Display name for this receiver")
-	psk := flag.String("psk", "test-psk", "Pre-shared key for authentication")
+	psk := flag.String("psk", "4321", "Pre-shared key for authentication")
 	flag.Parse()
 
 	if err := run(*name, *psk); err != nil {
@@ -41,7 +41,9 @@ func run(name, psk string) error {
 	// Create local agent
 	config := ospc.AgentConfig{
 		DisplayName: name,
-		ModelName:   "Go OpenScreen Test Receiver",
+		// P-256 SPAKE2 suite: the spec's edwards25519 is not implemented (non-spec opt-in).
+		InteropQuirks: ospc.InteropQuirks{Spake2SuiteP256: true},
+		ModelName:     "Go OpenScreen Test Receiver",
 	}
 	agent, err := ospc.NewAgent(config)
 	if err != nil {

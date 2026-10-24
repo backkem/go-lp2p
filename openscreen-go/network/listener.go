@@ -470,25 +470,35 @@ func (c *UnauthenticatedConnection) GetAuthenticationRole() AuthenticationRole {
 	return c.base.GetAuthenticationRole()
 }
 
-// RequestAuthenticatePSK is used to request authentication as an initiating
-// collector agent.
-func (c *UnauthenticatedConnection) RequestAuthenticatePSK() error {
-	return c.base.RequestAuthenticatePSK()
-}
-
-// GeneratePSK creates a PSK based on the negotiated config.
+// GeneratePSK creates a random PSK for the PSK presenter, with the entropy
+// both agents require. It is canonical decimal text (see ParsePSK): show it
+// to the user with FormatPSK and pass it to AuthenticatePSK.
 func (c *UnauthenticatedConnection) GeneratePSK() ([]byte, error) {
 	return c.base.GeneratePSK()
 }
 
-// AcceptAuthenticate is used to handle an incoming authentication request.
-// It has to be called for every UnauthenticatedConnection.
+// AcceptAuthenticate waits until the authentication role is known, after the
+// auth-capabilities exchange. The presenter then shows a PSK to the user
+// (GeneratePSK, FormatPSK), the consumer asks the user for it; both pass it
+// to AuthenticatePSK.
 func (c *UnauthenticatedConnection) AcceptAuthenticate(ctx context.Context) (role AuthenticationRole, err error) {
 	return c.base.AcceptAuthenticate(ctx)
 }
 
-// Authenticate is used to authenticate. It will block until authentication is complete
-// or the context is closed.
+// AuthenticatePSK authenticates the peer with SPAKE2 (network.bs
+// "Authentication with SPAKE2") using psk, a base-10 numeric PSK in any form
+// ParsePSK accepts. It blocks until authentication completes or ctx is done.
+//
+// If the peer already initiated, the local agent answers it. Otherwise it
+// initiates: the PSK presenter with psk-status psk-shown, the PSK consumer
+// with psk-needs-presentation. A consumer that doesn't know the PSK yet asks
+// the user for it after AcceptAuthenticate; the presenter's handshake is
+// answered once AuthenticatePSK is called.
+//
+// The spec's edwards25519 suite is not implemented: without
+// InteropQuirks.Spake2SuiteP256 it fails with ErrSpake2SuiteUnsupported and
+// closes the connection. A malformed psk returns ErrInvalidPSK and leaves the
+// connection open.
 func (c *UnauthenticatedConnection) AuthenticatePSK(ctx context.Context, psk []byte) (*Connection, error) {
 	conn, err := c.base.AuthenticatePSK(ctx, psk)
 	if err != nil {

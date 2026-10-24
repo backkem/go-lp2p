@@ -6,19 +6,6 @@ import "fmt"
 // WIP messages not yet part of any CDDL
 ///
 
-// Backup of old auth flow
-// TODO: rework for w3c/openscreenprotocol/pull/294
-
-const (
-	// Transport Stream
-	typeKeyAuthSpake2NeedPskDeprecated TypeKey = 99001
-)
-
-// auth-spake2-need-psk
-type msgAuthSpake2NeedPskDeprecated struct {
-	AuthInitiationToken string `cbor:"0,keyasint"`
-}
-
 // DataChannel
 
 // DataEncoding represents pre-agreed EncodingIds used in exchange-data.
@@ -54,9 +41,6 @@ func newMessageByTypeWIP(key TypeKey) (interface{}, error) {
 	case typeKeyDataTransportStreamResponse:
 		return &msgDataTransportStreamResponse{}, nil
 
-	case typeKeyAuthSpake2NeedPskDeprecated:
-		return &msgAuthSpake2NeedPskDeprecated{}, nil
-
 	default:
 		return nil, fmt.Errorf("unknown type key: %d", key)
 	}
@@ -75,9 +59,6 @@ func typeKeyByMessageWIP(msg interface{}) (TypeKey, error) {
 
 	case *msgDataTransportStreamResponse:
 		return typeKeyDataTransportStreamResponse, nil
-
-	case *msgAuthSpake2NeedPskDeprecated:
-		return typeKeyAuthSpake2NeedPskDeprecated, nil
 
 	default:
 		return 0, fmt.Errorf("unknown message type: %T", msg)

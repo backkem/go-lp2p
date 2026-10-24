@@ -16,7 +16,9 @@ func newAgent(t *testing.T, name string) *ospc.Agent {
 	t.Helper()
 	a, err := ospc.NewAgent(ospc.AgentConfig{
 		DisplayName: name,
-		KeepAlive:   ospc.KeepAliveConfig{Disabled: true},
+		// P-256 SPAKE2 suite: the spec's edwards25519 is not implemented (non-spec opt-in).
+		InteropQuirks: ospc.InteropQuirks{Spake2SuiteP256: true},
+		KeepAlive:     ospc.KeepAliveConfig{Disabled: true},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -37,7 +37,7 @@ import (
 )
 
 const (
-	testPSK          = "test-psk"
+	testPSK          = "4321"
 	testReceiverName = "Test Receiver"
 	testSenderName   = "Test Sender"
 	discoveryTimeout = 10 * time.Second
@@ -261,7 +261,9 @@ func runGoReceiver(ctx context.Context, name, psk string, ready chan<- struct{},
 	// Create agent
 	config := ospc.AgentConfig{
 		DisplayName: name,
-		ModelName:   "Go Test Receiver",
+		// P-256 SPAKE2 suite: the spec's edwards25519 is not implemented (non-spec opt-in).
+		InteropQuirks: ospc.InteropQuirks{Spake2SuiteP256: true},
+		ModelName:     "Go Test Receiver",
 	}
 	agent, err := ospc.NewAgent(config)
 	if err != nil {
@@ -356,6 +358,8 @@ func runGoSender(ctx context.Context, name, psk, receiverName string) (*ospc.Msg
 	// Create agent
 	config := ospc.AgentConfig{
 		DisplayName: name,
+		// P-256 SPAKE2 suite: the spec's edwards25519 is not implemented (non-spec opt-in).
+		InteropQuirks: ospc.InteropQuirks{Spake2SuiteP256: true},
 	}
 	agent, err := ospc.NewAgent(config)
 	if err != nil {

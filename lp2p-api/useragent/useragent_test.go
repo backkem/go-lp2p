@@ -253,24 +253,26 @@ func TestAdvertiseDenied(t *testing.T) {
 
 func TestPINEncoding(t *testing.T) {
 	for _, tc := range []struct {
-		raw  []byte
+		psk  string
 		want string
 	}{
-		{[]byte{0, 0, 0}, "0000-0000"},
-		{[]byte{0, 0x30, 0x39}, "0001-2345"},
-		{[]byte{0xff, 0xff, 0xff}, "1677-7215"},
-		{[]byte{0xff, 0xff}, "6-5535"},
+		{"1", "001"},
+		{"12345", "012-345"},
+		{"123456", "123-456"},
+		{"12345678", "012-345-678"},
+		{"123456789", "0001-2345-6789"},
+		{"61488548833", "0614-8854-8833"}, // network.bs Appendix B example.
 	} {
-		got := EncodePIN(tc.raw)
+		got := EncodePIN([]byte(tc.psk))
 		if got != tc.want {
-			t.Errorf("EncodePIN(%x) = %q, want %q", tc.raw, got, tc.want)
+			t.Errorf("EncodePIN(%q) = %q, want %q", tc.psk, got, tc.want)
 		}
 		psk, err := ParsePIN(" " + strings.ReplaceAll(got, "-", " - ") + " ")
-		if err != nil || !bytes.Equal(psk, pinPSK(got)) {
-			t.Errorf("ParsePIN(%q) = %q, %v; want %q", got, psk, err, pinPSK(got))
+		if err != nil || string(psk) != tc.psk {
+			t.Errorf("ParsePIN(%q) = %q, %v; want %q", got, psk, err, tc.psk)
 		}
 	}
-	for _, bad := range []string{"", " - ", "12a4"} {
+	for _, bad := range []string{"", " - ", "12a4", "000"} {
 		if _, err := ParsePIN(bad); err == nil {
 			t.Errorf("ParsePIN(%q) succeeded", bad)
 		}

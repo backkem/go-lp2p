@@ -12,6 +12,20 @@ import "errors"
 // leniency (e.g. dialing an agent that doesn't advertise the non-standard
 // "sn" TXT key, or discovering an agent that omits "mv") is always on.
 type InteropQuirks struct {
+	// Spake2SuiteP256 authenticates with the RFC 9382
+	// SPAKE2-P256-SHA256-HKDF-HMAC ciphersuite: group P-256 instead of
+	// edwards25519. Everything else follows network.bs (SHA-256 transcript
+	// hash, HKDF, HMAC, SHA-512 password hash, client/server fingerprints as
+	// the identities A/B). Both agents must enable it.
+	//
+	// Violates network.bs "Authentication with SPAKE2": "Elliptic curve is
+	// edwards25519". The edwards25519 suite is not implemented (neither here
+	// nor in Chromium's openscreen, where BoringSSL offers no general
+	// edwards25519 group operations), so without this quirk AuthenticatePSK
+	// fails with ErrSpake2SuiteUnsupported. Chromium's osp_demo enables the
+	// same suite with --spake2_suite=p256.
+	Spake2SuiteP256 bool
+
 	// AcceptCertificateFingerprint accepts an "fp" TXT value computed as the
 	// base64 SHA-256 of the whole DER-encoded certificate, in addition to the
 	// spec's SPKI fingerprint, when dialing.
