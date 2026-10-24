@@ -44,7 +44,7 @@ func (c *baseConnection) exchangeInfo(ctx context.Context, done chan exchangeInf
 
 	// Remote AgentInfo
 	state := &exchangeInfoState{
-		requestId: c.agentState.nextRequestID(),
+		requestId: c.nextRequestID(),
 		done:      done,
 	}
 	infoMsg := &msgAgentInfoRequest{
