@@ -1,10 +1,18 @@
 # Examples
 
-Easily run the examples with Replit:
+Each example runs both peers in one process and simulates the user's part of
+pairing. Run them from the repository root:
 
-<a href="https://replit.com/@backkem/go-lp2p"><img loading="lazy" src="https://replit.com/badge/github/backkem/go-lp2p" alt="Run on Replit" style="height: 40px; width: 190px;"></a>
+- [lp2p-data-channel](./lp2p-data-channel/): exchange messages over an
+  `LP2PDataChannel`.
 
-Example overview:
+  ```sh
+  go run ./examples/lp2p-data-channel
+  ```
 
-- [data-channel](./data-channel/): LP2PDataChannel example.
-- [webtransport](./webtransport-pooled/): LP2PQuicTransport example.
+- [webtransport-pooled](./webtransport-pooled/): stream data over an
+  `LP2PQuicTransport` that shares the OSP connection.
+
+  ```sh
+  go run ./examples/webtransport-pooled
+  ```
