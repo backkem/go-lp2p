@@ -443,12 +443,8 @@ func (c *baseConnection) skipAuthentication() (*Connection, error) {
 	if !c.localAgent.quirks.AllowSkipAuthentication {
 		return nil, fmt.Errorf("%w: AllowSkipAuthentication", ErrQuirkDisabled)
 	}
-	c.mu.Lock()
-	authenticating := c.authenticationState != nil
-	c.mu.Unlock()
-	if authenticating {
-		return nil, errors.New("authentication already in progress")
-	}
+	// An authentication the peer started is abandoned: messages for it are
+	// dropped after the hand-off.
 	c.log.Warn("INSECURE interop quirk: skipping authentication, the peer is NOT authenticated")
 	return c.handOff(false)
 }

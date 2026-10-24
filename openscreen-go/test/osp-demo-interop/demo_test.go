@@ -191,6 +191,27 @@ func (d *ospDemo) Grep(pattern string) []string {
 	return out
 }
 
+// Mark returns a position in the log, for GrepSince.
+func (d *ospDemo) Mark() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.lines)
+}
+
+// GrepSince returns the log lines after mark that match pattern.
+func (d *ospDemo) GrepSince(mark int, pattern string) []string {
+	re := regexp.MustCompile(pattern)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []string
+	for _, l := range d.lines[mark:] {
+		if re.MatchString(l) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // Running reports whether the process is still alive.
 func (d *ospDemo) Running() bool {
 	select {

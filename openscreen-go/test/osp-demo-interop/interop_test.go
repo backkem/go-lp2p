@@ -10,12 +10,11 @@ package ospdemointerop
 // output doubles as a progress gauge. Later stages skip when an earlier one
 // they depend on didn't pass.
 //
-// Two client paths are exercised per direction:
-//   - "ospc": the public openscreen-go/network API, unmodified.
-//   - "raw": quic-go plus ospc's exported framing with generic CBOR bodies,
-//     configured the way osp_demo expects. This shows how far the wire
-//     protocol interoperates once ospc's (spec-mandated) checks are
-//     sidestepped.
+// This file holds the raw probe, kept as a fallback gauge: quic-go plus
+// ospc's exported framing with generic CBOR bodies, no ospc connection state
+// machine and no authentication. It shows how far the wire protocol
+// interoperates regardless of ospc. The real ospc Dial/Listen paths are in
+// ospc_test.go.
 
 import (
 	"context"
@@ -120,9 +119,9 @@ func txtValue(txt []string, key string) (string, bool) {
 	return "", false
 }
 
-// TestOSPDemoPublisherToGo: osp_demo advertises as a presentation receiver
+// TestRawProbePublisher: osp_demo advertises as a presentation receiver
 // ("publisher"), Go discovers and connects to it as a controller.
-func TestOSPDemoPublisherToGo(t *testing.T) {
+func TestRawProbePublisher(t *testing.T) {
 	top := t // Owns the connection across stages.
 	name := "GoIopRecv" + randSuffix()
 	pub := startPublisher(t, name)
@@ -138,6 +137,7 @@ func TestOSPDemoPublisherToGo(t *testing.T) {
 	}
 
 	var discovered *ospc.DiscoveredAgent
+	defer func() { _ = discovered }()
 	t.Run("01-mdns-ospc-discover", func(t *testing.T) {
 		d := ospc.NewDiscoverer()
 		d.WithNickname(name)
@@ -159,19 +159,6 @@ func TestOSPDemoPublisherToGo(t *testing.T) {
 		if _, ok := a.MetadataVersion(); !ok {
 			t.Logf("note: TXT \"mv\" missing (required by network.bs, osp_demo never sets it)")
 		}
-		if len(a.TXT.Get("sn")) == 0 {
-			t.Logf("note: TXT \"sn\" missing (not in network.bs, but ospc's Dial requires it)")
-		}
-	})
-
-	t.Run("02-ospc-dial", func(t *testing.T) {
-		requireStage(t, discovered != nil, "01-mdns-ospc-discover")
-		uc, err := discovered.Dial(withTimeout(t, 2*stepTimeout), ospc.AgentTransportQUIC, localAgent)
-		if err != nil {
-			t.Skipf("BLOCKER (ospc + osp_demo): ospc Dial failed: %v", err)
-		}
-		defer uc.Close()
-		t.Logf("ospc connected, remote agent info: %+v", uc.RemoteAgent().Info())
 	})
 
 	var entry *zeroconf.ServiceEntry
@@ -287,6 +274,9 @@ func TestOSPDemoPublisherToGo(t *testing.T) {
 		m, err := wc.Expect(tkPresentationURLAvailabilityResp, stepTimeout)
 		if err != nil {
 			skipIfDemoCrashed(t, pub)
+			if len(pub.Grep(`(?i)holding back message|network phase`)) > 0 {
+				t.Skipf("BLOCKER (by design): no presentation-url-availability-response (%v); osp_demo holds back application messages until authentication, which the raw probe doesn't do", err)
+			}
 			t.Fatal(err)
 		}
 		if id, _ := asUint(m.Body[0]); id != 10 {
@@ -369,76 +359,22 @@ func TestOSPDemoPublisherToGo(t *testing.T) {
 	})
 }
 
-// TestGoToOSPDemoController: Go advertises as a receiver, osp_demo's
-// controller discovers and connects to it.
-func TestGoToOSPDemoController(t *testing.T) {
-	t.Run("ospc-listener", testOspcListenerToController)
-	t.Run("raw-receiver", testRawReceiverToController)
-}
-
-// testOspcListenerToController advertises with the unmodified ospc Listener.
-func testOspcListenerToController(t *testing.T) {
-	name := "GoIopOspc" + randSuffix()
-	agent, err := ospc.NewAgent(ospc.AgentConfig{DisplayName: name})
-	if err != nil {
-		t.Fatal(err)
+// TestRawProbeController: the raw probe advertises as a receiver, osp_demo's
+// controller discovers and connects to it. It advertises the spec's SPKI
+// fingerprint first and falls back to the whole-certificate hash older
+// osp_demo builds pin.
+func TestRawProbeController(t *testing.T) {
+	connected := false
+	t.Run("raw-receiver-spki", func(t *testing.T) { connected = testRawReceiverToController(t, false) })
+	if !connected {
+		t.Run("raw-receiver-der", func(t *testing.T) { testRawReceiverToController(t, true) })
 	}
-	l, err := ospc.Listen(ospc.AgentTransportQUIC, agent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = l.Close() })
-
-	accepted := make(chan *ospc.UnauthenticatedConnection, 1)
-	go func() {
-		uc, err := l.Accept(context.Background())
-		if err == nil {
-			accepted <- uc
-		}
-	}()
-
-	ctrl := startController(t)
-	t.Cleanup(ctrl.DumpLog)
-
-	found := false
-	t.Run("01-mdns-cpp-discovers-go", func(t *testing.T) {
-		l, ok := ctrl.WaitFor(`found! `+name, discoveryTimeout)
-		if !ok {
-			t.Fatalf("osp_demo did not discover %q; mDNS lines: %q", name, ctrl.Grep(`(?i)found!|mdns|txt`))
-		}
-		t.Logf("osp_demo: %s", l)
-		found = true
-	})
-
-	t.Run("02-quic-tls", func(t *testing.T) {
-		requireStage(t, found, "01-mdns-cpp-discovers-go")
-		ctrl.Send("connect " + name)
-		l, ok := ctrl.WaitFor(`succeed to build|handshake complete|(?i)fail|error|fingerprint|certificate`, 2*stepTimeout)
-		decisive := ctrl.Grep(`(?i)connect|handshake|fingerprint|certificate|verif|fail|error`)
-		for _, d := range decisive {
-			t.Logf("osp_demo: %s", d)
-		}
-		if !ok || !strings.Contains(l, "succeed to build") {
-			fpSPKI, _ := agent.CertificateFingerPrint()
-			t.Skipf("BLOCKER (fingerprint definition): osp_demo pins TXT fp as SHA-256 of the whole DER cert, ospc advertises the spec's SPKI fingerprint (%s), so osp_demo's WebTransportFingerprintProofVerifier rejects ospc's certificate. Last line: %q", fpSPKI, l)
-		}
-	})
-
-	t.Run("03-ospc-accept", func(t *testing.T) {
-		select {
-		case uc := <-accepted:
-			defer uc.Close()
-			t.Logf("ospc accepted a connection from osp_demo: %+v", uc.RemoteAgent().Info())
-		case <-time.After(stepTimeout):
-			t.Skipf("BLOCKER: ospc Listener.Accept returned nothing; it only yields a connection once the peer sent both agent-info-response and auth-capabilities, which osp_demo never sends")
-		}
-	})
 }
 
 // testRawReceiverToController advertises with zeroconf and accepts with
 // quic-go, using an osp_demo-compatible fingerprint, to find out how far the
 // protocol goes past discovery and TLS.
-func testRawReceiverToController(t *testing.T) {
+func testRawReceiverToController(t *testing.T, derFingerprint bool) (connected bool) {
 	top := t // Owns the connection across stages.
 	name := "GoIopRaw" + randSuffix()
 	cert := newProbeCert(t, name+".local", 365*24*time.Hour)
@@ -474,14 +410,17 @@ func testRawReceiverToController(t *testing.T) {
 		}
 	}()
 
-	derFP := fingerprintDER(cert.Leaf)
-	txt := []string{"fp=" + derFP, "at=" + randToken(16)}
+	fp := fingerprintSPKI(cert.Leaf)
+	if derFingerprint {
+		fp = fingerprintDER(cert.Leaf)
+	}
+	txt := []string{"fp=" + fp, "at=" + randToken(16)}
 	srv, err := zeroconf.Register(name, ospc.MdnsServiceType, ospc.MdnsDomain, port, txt, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(srv.Shutdown)
-	t.Logf("advertising %q on port %d with TXT %q (fp is the DER-cert hash osp_demo expects; SPKI fp would be %s)", name, port, txt, fingerprintSPKI(cert.Leaf))
+	t.Logf("advertising %q on port %d with TXT %q (DER-cert fp: %v)", name, port, txt, derFingerprint)
 
 	ctrl := startController(t)
 	t.Cleanup(ctrl.DumpLog)
@@ -504,8 +443,9 @@ func testRawReceiverToController(t *testing.T) {
 		select {
 		case conn = <-conns:
 		case <-time.After(2 * stepTimeout):
-			t.Fatalf("no QUIC connection from osp_demo; lines: %q", ctrl.Grep(`(?i)connect|handshake|fail|error`))
+			t.Fatalf("no QUIC connection from osp_demo; lines: %q", ctrl.Grep(`(?i)connect|handshake|fail|error|fingerprint`))
 		}
+		connected = true
 		cs := conn.ConnectionState().TLS
 		t.Logf("accepted QUIC connection from %s: ALPN %q, SNI %q", conn.RemoteAddr(), cs.NegotiatedProtocol, cs.ServerName)
 		if cs.NegotiatedProtocol != ospc.ALPN_OSP {
@@ -605,4 +545,5 @@ func testRawReceiverToController(t *testing.T) {
 		t.Skipf("BLOCKER (Chromium side): osp_demo sent no agent-info-request and no auth-* message; " +
 			"it exchanged application messages without authenticating, so SPAKE2 interop can't be tested")
 	})
+	return connected
 }
