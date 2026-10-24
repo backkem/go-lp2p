@@ -1,216 +1,236 @@
 # Interop: openscreen-go (ospc) vs. Chromium Open Screen `osp_demo`
 
-Exploratory interop between `openscreen-go/network` (package `ospc`) and the
-Open Screen Library's C++ OSP stack, driven through its `osp_demo` binary.
+Interop between `openscreen-go/network` (package `ospc`) plus `openscreen-go/application`
+and the Open Screen Library's C++ OSP stack, driven through its `osp_demo` binary.
 
-- C++: `/work/openscreen` at 2a78d154, `out/debug` (debug build: DCHECKs abort).
-- Go: this repo, quic-go v0.39.0, fxamacker/cbor v2.9.0, grandcat/zeroconf v1.0.0.
+- C++: `/work/openscreen`, branch `osp-spake2-interop` at 2639d78d plus uncommitted
+  work in progress (`agent_authenticator.cc`, message gate), `out/debug` built
+  2026-10-24 12:32. Debug build: DCHECKs abort.
+- Go: branch `osp-interop-relax`. quic-go v0.39.0, fxamacker/cbor v2.9.0,
+  grandcat/zeroconf v1.0.0, backkem/spake2-go ef71e299b11a.
 - Spec: w3c/openscreenprotocol `network.bs`, `application.bs`, `*.cddl` (main @ 71b1412).
 
-**Bottom line:** mDNS discovery, QUIC/TLS 1.3 with ALPN `osp`, and Presentation API
-application messages (availability, start, connection messages in both directions)
-interoperate on the wire. Getting there needs a Go peer that follows osp_demo's
-conventions rather than the spec. Neither unmodified implementation completes a
-connection with the other. The blockers sit on both sides:
-
-1. **Fingerprint definition (Chromium).** osp_demo's `fp` is SHA-256 over the whole
-   DER certificate, not the SPKI hash `network.bs` specifies. Each side rejects the
-   other's fingerprint.
-2. **Zero-length connection IDs (Chromium, quiche integration).** osp_demo's QUIC
-   *server* is broken for any RFC 9000 client, including C++ to C++.
-3. **No authentication and no agent-info (Chromium).** osp_demo never sends or answers
-   `agent-info-request` or any `auth-*` message, and it accepts application messages
-   from unauthenticated peers. The SPAKE2 classes exist but nothing instantiates them.
-   ospc can't get past its metadata/auth phase with it.
-4. **ospc strictness beyond the spec (Go).** `Dial` requires a TXT `sn` key that is not
-   in the spec, and both `Dial` and `Listener` do x509 hostname verification that
-   osp_demo's certificate (no SAN) can't pass.
-
-So SPAKE2 interop can't be tested: the C++ side has no wired-up authentication.
+**Bottom line.** Both directions now get through mDNS, QUIC/TLS 1.3 with SPKI
+fingerprint pinning, and the metadata/auth-capabilities exchange using the real
+ospc `Dial`/`Listen` paths, **with no interop quirks**. The one remaining blocker
+is SPAKE2. ospc's SPAKE2 parameters don't match network.bs or osp_demo (see
+[SPAKE2](#spake2-the-remaining-blocker)). osp_demo now correctly holds back
+application messages from unauthenticated peers, so no application stage gets
+through. With the `AllowSkipAuthentication` quirk ospc hands the connection over
+unauthenticated, but osp_demo still holds the messages back. That is the
+spec-correct behavior.
 
 ## How to run
 
 ```sh
 ninja -C /work/openscreen/out/debug osp_demo
 OPENSCREEN_OUT_DIR=/work/openscreen/out/debug \
-OSP_DEMO_LOG_DIR=/tmp/osp-logs \   # optional: full osp_demo logs per test
+OSP_DEMO_LOG_DIR=/tmp/osp-logs \   # optional: osp_demo and ospc logs per test
   go test -tags interop -v -count=1 ./openscreen-go/test/osp-demo-interop/
 ```
 
 - The tests skip when `$OPENSCREEN_OUT_DIR/osp_demo` is missing.
 - Each numbered subtest is one stage. A stage PASSes when it interoperates and SKIPs
-  with a `BLOCKER (...)` reason at a known incompatibility. Later stages skip when a
-  stage they depend on didn't pass. The `-v` output is the progress gauge.
-- The harness takes care of osp_demo's quirks:
-  - It runs osp_demo in a temp cwd containing `osp/impl/quic/certificates/`. Without
-    that directory osp_demo crashes, because it writes its certificate cwd-relative.
-  - It reads osp_demo's log from the `_recv_fifo`/`_cntl_fifo` FIFO.
-  - It drives osp_demo through stdin.
-  - It kills osp_demo's process group on cleanup, with Pdeathsig as a backstop.
-- Instance names carry a random suffix, and tests only act on their own instances
-  because other OSP agents may be on the LAN.
-- The osp_demo publisher always binds port 6667 on the first address of each
-  non-loopback interface (`osp_demo.cc:592-607`). Only one publisher can run per host,
-  and there is no loopback-only mode.
+  with a `BLOCKER (...)` reason at a known incompatibility. A stage that depends on
+  an earlier one is skipped when that one didn't pass. The `-v` output is the
+  progress gauge.
+- `OSP_DEMO_TRY_SPAKE2=1` attempts real SPAKE2 with the PSK that osp_demo shows as
+  presenter, or with `$OSP_DEMO_PSK`. It is expected to fail until the SPAKE2
+  mismatches are fixed.
+- Harness mechanics: osp_demo runs in a temp cwd containing
+  `osp/impl/quic/certificates/`. Its log is read from the `_recv_fifo`/`_cntl_fifo`
+  FIFO, and it is driven through stdin. Cleanup kills its process group.
+  Instance names carry a random suffix. The osp_demo publisher always binds port
+  6667, so only one can run per host.
 
-Two client paths run per direction:
+### Test paths
 
-- **ospc**: the public `openscreen-go/network` API, unmodified.
-- **raw**: quic-go, zeroconf and ospc's exported framing (`WriteTypeKey`/`ReadTypeKey`/
-  `DecodeCBOR`) with generic CBOR maps. It is configured the way osp_demo expects: DER
-  fingerprint, no auth, deterministic CBOR key order. It shows how far the wire protocol
-  gets once the blockers above are sidestepped.
+- **ospc** (`ospc_test.go`): `TestOSPCDialPublisher` and `TestOSPCListenController`
+  use the public `ospc` API (`Discoverer`, `DiscoveredAgent.Dial`, `Listen`/`Accept`,
+  `AuthenticatePSK`) and `application.ApplicationConnection` for the Presentation
+  API messages.
+  - Each direction starts with **no quirks**. It enables a quirk only when an
+    attempt fails the way that quirk addresses:
+    - fingerprint mismatch: `AcceptCertificateFingerprint` when dialing,
+      `AdvertiseCertificateFingerprint` when listening;
+    - `ErrNoAgentInfo`: `TolerateMissingAgentInfo`.
+  - `AllowSkipAuthentication` is only used when real authentication isn't
+    possible.
+  - Each stage logs `QUIRKS NEEDED: ...`, and the test ends with a
+    `STAGE SUMMARY` table.
+- **raw** (`interop_test.go`): `TestRawProbePublisher` and `TestRawProbeController`
+  use quic-go, zeroconf and ospc's exported framing with generic CBOR maps. They
+  have no ospc state machine and no authentication. This is the fallback gauge for
+  the wire protocol.
+  - The raw receiver advertises the SPKI `fp` first. It falls back to the
+    whole-certificate hash only if osp_demo doesn't connect.
 
 ## Per-stage results
 
-Recorded result (2026-10-24, two consecutive runs, identical):
-`ok  github.com/backkem/go-lp2p/openscreen-go/test/osp-demo-interop  15.7s`.
-The package passes because blocked stages SKIP. In total 9 stages pass and 10 skip
-(7 at a blocker, 3 dependent).
+### Before / after (ospc paths)
 
-### osp_demo publisher (receiver) → Go controller: `TestOSPDemoPublisherToGo`
+"Before" is ospc on main (f7b7205) against the osp_demo of the first exploration
+(2a78d154: whole-certificate `fp`, zero-length CID bug, no network phase).
+"After" is this branch against the current osp_demo, recorded 2026-10-24 in two
+consecutive identical runs: `ok ... 33.4s`.
 
-| Stage | Result | Evidence |
+**osp_demo publisher → ospc `Dial`** (`TestOSPCDialPublisher`)
+
+| Stage | Before | After | Quirks needed (after) | Evidence (after) |
+|---|---|---|---|---|
+| 01 mDNS discover | PASS | PASS | none | TXT `fp` (SPKI), `mv`, `at`; no `sn`. |
+| 02 Dial (TLS + agent-info + auth-capabilities) | SKIP (Go: `failed to get sn record`) | PASS | none | fp pinning only; agent-info-request resent once (see below). |
+| 03 authenticate | n/a | SKIP (Go: SPAKE2 params) | `AllowSkipAuthentication` | osp_demo presents and sends `auth-spake2-handshake`; ospc can't complete it. |
+| 04 URL availability (14/15) | n/a | SKIP (auth) | none | osp_demo: `holding back message type 14 from instance 1`. |
+| 05-07 start / message / terminate | n/a | SKIP | — | depend on 04 |
+
+**osp_demo controller → ospc `Listen`** (`TestOSPCListenController`)
+
+| Stage | Before | After | Quirks needed (after) | Evidence (after) |
+|---|---|---|---|---|
+| 01 connect (mDNS, TLS, info exchange, `Accept`) | SKIP (fp definition; `Accept` would also wait for agent-info) | PASS | none | osp_demo: `agent-info from GoIopOspc… (unverified)`. |
+| 02 authenticate | n/a | SKIP (Go: SPAKE2 params) | `AllowSkipAuthentication` | |
+| 03 URL availability | n/a | SKIP (auth) | none | osp_demo controller sends no request on the unauthenticated connection. |
+| 04-05 start / message | n/a | SKIP | — | depend on 03 |
+
+Against the old osp_demo the quirks would have been needed as follows. These are
+covered by unit tests; that binary no longer exists.
+
+| Old osp_demo behavior | Quirk |
+|---|---|
+| Whole-certificate `fp` | `AcceptCertificateFingerprint` (Dial) and `AdvertiseCertificateFingerprint` (Listen) |
+| No agent-info / auth-capabilities | `TolerateMissingAgentInfo` |
+| No authentication | `AllowSkipAuthentication` |
+
+The zero-length-CID crash had no Go-side workaround. It is fixed in C++ (6a9786ae).
+
+### Raw probe (fallback gauge), after
+
+| Test / stage | Result | Notes |
 |---|---|---|
-| 01 mDNS, ospc `Discoverer` | PASS | Discovered by nickname. TXT has `fp` and `at`. **No `mv`** (spec-required) and no `sn`. |
-| 02 ospc `Dial` | SKIP (Go) | `ospc Dial failed: failed to get sn record: no value for key sn`. |
-| 03 mDNS, raw resolve | PASS | `port 6667`, `v4 [10.89.16.2]`. |
-| 04 QUIC + TLS, raw | PASS | `TLS 0x0304, ALPN "osp"`. Peer cert: `CN=Open Screen Certificate`, no SAN, serial 1. `TXT fp` == DER-cert hash != SPKI hash → spec drift. |
-| 05 agent-info | SKIP (C++) | No `agent-info-response`. osp_demo log: `no message handler matched` for type 10. |
-| 06 auth-capabilities | SKIP (C++) | osp_demo has already aborted (see 07). Source reading shows no `auth-*` messages either way. |
-| 07 URL availability | SKIP (C++) | osp_demo aborts: `Server: Ignoring packet from unexpected server connection ID …`, then `quic_connection.cc:1075 Check failed: Perspective::IS_SERVER != perspective_`. |
-| 08-10 start / message / terminate | SKIP | Depend on 07. |
+| Publisher 01 discover, 03 resolve, 04 QUIC+TLS | PASS | `fp` matches the SPKI definition. |
+| Publisher 05 agent-info | SKIP | The probe sends one request right after the handshake. osp_demo drops a request that arrives before its network phase starts. |
+| Publisher 06 auth-capabilities | SKIP | Not in reply to the probe's. |
+| Publisher 07-10 presentation | SKIP | osp_demo holds back application messages until authentication. |
+| Controller (SPKI fp) 01 discover, 02 QUIC+TLS | PASS | osp_demo connects to an SPKI-advertising receiver. |
+| Controller 03-05 presentation | SKIP | osp_demo doesn't send application messages unauthenticated. |
+| Controller 06 network messages | PASS | osp_demo sent `auth-capabilities` (1001) and `agent-info-request` (10). |
 
-Results were stable over 8+ runs. Each run had exactly one client of osp_demo (our
-quic-go port), so this is not cross-talk.
+Before (old osp_demo), the raw probe got through availability, start and
+connection messages in the controller direction (9 PASS / 10 SKIP overall). That
+was only possible because osp_demo didn't authenticate.
 
-### Go receiver → osp_demo controller: `TestGoToOSPDemoController`
+## Interop quirks (`ospc.AgentConfig.InteropQuirks`)
 
-**`ospc-listener`** (unmodified `ospc.Listen`):
+All quirks are off by default. Enabling any of them logs a warning when the agent
+is created.
 
-| Stage | Result | Evidence |
+| Quirk | Effect | Spec rule violated |
 |---|---|---|
-| 01 C++ discovers Go via mDNS | PASS | osp_demo: `found! GoIopOspc…`. |
-| 02 QUIC + TLS | SKIP (fp) | osp_demo: `Cert chain verification failed: Certificate does not match any fingerprint`, then `TLS handshake failure … certificate unknown`. ospc advertises the spec SPKI fingerprint. |
-| 03 ospc `Accept` | SKIP | Never returns. It would also need `agent-info-response` and `auth-capabilities` from the peer. |
+| `AcceptCertificateFingerprint` | Dial also accepts `fp` = base64 SHA-256 of the whole DER certificate | network.bs "Computing the Agent Fingerprint" (SPKI per RFC 7469) and "TLS 1.3" (computed fingerprint must match `fp`) |
+| `AdvertiseCertificateFingerprint` | Listener advertises the whole-certificate hash as `fp`. PeerID and SPAKE2 identities stay SPKI | network.bs "Computing the Agent Fingerprint" |
+| `TolerateMissingAgentInfo` | Dial/Accept proceed after a 2s grace period without agent-info-response / auth-capabilities. Remote `Info()` is then nil and equal auth capabilities are assumed | network.bs metadata discovery / authentication (peer must answer agent-info-request; auth starts from exchanged auth-capabilities) |
+| `AllowSkipAuthentication` | Enables `UnauthenticatedConnection.SkipAuthentication()`, which hands the connection to the application protocol without SPAKE2 and logs a warning. `Connection.Authenticated()` reports false | network.bs "Authentication": SPAKE2 is mandatory before application messages. **Insecure, debugging only** |
 
-**`raw-receiver`** (quic-go server, zeroconf TXT `fp=<DER hash>`, `at`):
+## Spec-compatible changes (on by default)
 
-| Stage | Result | Evidence |
-|---|---|---|
-| 01 C++ discovers Go | PASS | `found! GoIopRaw…`. |
-| 02 QUIC + TLS | PASS | ALPN `"osp"`, SNI `"GoIopRaw….local"`. osp_demo presents a client cert (`CN=Open Screen Certificate`). osp_demo: `Controller succeed to build the underlying connection to: GoIopRaw…`. |
-| 03 URL availability (14/15) | PASS | `<-- type=14 body=map[0:0 1:[https://example.com/] 2:20000000 3:1]`, `--> type=15 map[0:0 1:[0]]`. osp_demo: `available! GoIopRaw…`. |
-| 04 presentation start (104/105) | PASS | `<-- type=104 map[0:2 1:GoIopRaw…:https://example.com/ 2:https://example.com/ 3:[]]`, `--> type=105 map[0:2 1:1 2:7]`. osp_demo: `presentation connection connected`. |
-| 05 connection messages (16) | PASS | `<-- type=16 map[0:7 1:hello from cpp]`. osp_demo: `got message: hello from go`. |
-| 06 network messages / auth | SKIP (C++) | Types received over the whole connection: only 14, 104, 16. No `agent-info-request` and no `auth-*`. |
+- **`Dial` doesn't need `sn`.** `sn` isn't in network.bs (#293). If it is
+  present, the TLS server_name is the agent hostname. Without it, the hostname
+  can't be computed, so the server_name is `<encoded instance>.<encoded domain>`.
+- **Server verified by `fp` only.** network.bs "TLS 1.3" requires only that "the
+  agent fingerprint calculated for the received agent certificate must match the
+  `fp` mDNS TXT record". The serial-number and x509 `DNSName` checks are gone; no
+  spec rule required them.
+- **Listener doesn't verify a hostname in client certificates.** The spec defines
+  no check of the listening agent's certificate beyond its presence ("Both
+  advertising agents and listening agents must use the agent certificate"). The
+  peer is verified by SPAKE2, whose identities are bound to the fingerprints.
+- **`ErrNoAgentInfo`.** When the peer doesn't finish metadata discovery within
+  10s, or within the `Dial` context, the error names the missing messages.
+- **agent-info-request resent** every 1.5s until answered, with responses to any
+  of the requests accepted. osp_demo drops a request that arrives before its
+  network phase starts.
+- **Unidirectional application streams** (application.bs / network.bs "for each
+  message, the OSP agent must write into a unidirectional QUIC stream"):
+  - ospc routes incoming streams by the first type key. agent-status messages go
+    to the keep-alive; agent-info/auth go to the network phase while it runs;
+    everything else goes to `Connection.AcceptStream`.
+  - Application streams that arrive before the hand-off are held, up to 64, and
+    delivered after it. A peer that completes authentication first may already
+    send them.
+  - `Connection.OpenUniStream` is new.
+  - `application.ApplicationConnection` sends every message on its own
+    unidirectional stream, reads all incoming streams itself, and correlates
+    responses by request-id (`Request`). Other messages come from
+    `ReceiveMessage`.
+- **Deterministic CBOR:** map keys in RFC 8949 §4.2.1 order (ascending integer
+  keys). The spec doesn't require an order, so this is spec-neutral; osp_demo's
+  decoders reject other orders.
+- **Nil slices encoded as empty arrays**, not `null`: CDDL `[* text]` doesn't
+  allow null. osp_demo rejected ospc's agent-info-response (`parse error: -1`)
+  because of a null `locales`.
+- **Dial prefers IPv4.** mDNS gives link-local IPv6 addresses without a zone,
+  which can't be dialed. Before this change, ospc dialed osp_demo's `fe80::`
+  address and timed out.
+- **Missing `mv` stays tolerated.** network.bs obliges the *advertising* agent to
+  include it but sets no rule for a listener that finds it missing.
 
-Our quic-go server uses non-empty CIDs, so the CID bug below doesn't trigger in this
-direction. With the ospc listener, which uses zero-length server CIDs, osp_demo logs
-`Accepting packet with new connection ID 0` and continues. It then fails on the
-fingerprint check.
+## SPAKE2: the remaining blocker
 
-## Comparison
+Comparison of `agent_authenticator.cc` / `util/crypto/spake2.cc` with spake2-go
+and `connection_network.go`:
 
-| Aspect | Spec (network.bs) | ospc (Go) | osp_demo (C++) |
+| Item | network.bs | osp_demo | ospc | Who deviates |
+|---|---|---|---|---|
+| Curve | edwards25519 | P-256 | P-256 | both |
+| Password hash | SHA-512 | SHA-512 | **SHA-256** (spake2-go has no option) | Go |
+| `pw` bytes | "the PSK presented to the user" (underspecified) | canonical decimal digit string | raw bytes given to `AuthenticatePSK` | unclear, spec gap |
+| Identities A/B | fingerprints of client / server | client / server | **presenter / consumer** | Go |
+| Consumer starts | `auth-spake2-handshake` with `psk-needs-presentation` | same | **`auth-spake2-need-psk` (99001)**, a deprecated WIP type | Go |
+| Hash / KDF / MAC, M/N, transcript | SHA-256, HKDF, HMAC | match ospc | match osp_demo | — |
+
+Fixing the Go side means a SHA-512 password hash in spake2-go, client/server
+identities, and the `psk-needs-presentation` start. These change Go-to-Go and
+Go-to-Rust behavior, so they are not part of this branch. Both implementations
+also need to move to edwards25519, or the spec to P-256.
+
+## Comparison (current)
+
+| Aspect | Spec | ospc | osp_demo (current) |
 |---|---|---|---|
-| DNS-SD service | `_openscreen._udp` | same | same (`osp_constants.h:17`) |
-| TXT `fp` | base64 SHA-256 of **SPKI** (RFC 7469) | SPKI | base64 SHA-256 of **whole DER cert** (`quic_agent_certificate.cc:80`) |
-| TXT `mv` | required, varint | set. Parsed if present, tolerated if absent | **not set** (constant defined, unused) |
-| TXT `at` | required | 9 random chars. Sent in the first auth message and checked on receipt (wired in after this table was first written) | 16 chars (`quic_server.cc:32`). Watcher requires it, nothing checks it |
-| TXT `sn` | — (not specified, see #293/#365) | set, and **required by `Dial`** | absent |
-| Other TXT | — | `fn=TODO:Remove?` | — |
-| ALPN | `osp` | `osp` | `osp` |
-| TLS | 1.3 | 1.3 only | 1.3 (quiche/BoringSSL) |
-| SNI | agent hostname `<b64 sn>.<instance>.<domain>` | agent hostname (URL-safe b64, #365) | `<instance>.local` |
-| Cert subject / issuer | CN=agent hostname / CN=model-name | CN=hostname + SAN=hostname / CN=display name | CN=`Open Screen Certificate` both, no SAN, `CA:TRUE`, serial 1, valid 1 year |
-| Client verifies server | `fp` must match | `fp` (SPKI) + serial==`sn` + x509 `Verify(DNSName=hostname)` | quiche `WebTransportFingerprintProofVerifier`: DER hash, validity ≤3650 days, key type; hostname ignored |
-| Server verifies client | both present certs | `RequireAnyClientCert` + x509 `Verify(DNSName=peer CN)`. Would reject osp_demo's SAN-less cert (code reading; not reached) | accepts any (`open_screen_server_session.cc:22-31`) |
-| QUIC connection IDs | "should be zero length" (network.bs:263) | listener: zero-length server CIDs. Dialer: quic-go defaults | zero-length via `DeterministicConnectionIdGenerator(0)`. **Broken**, see below |
-| Framing | varint type key + CBOR, unidirectional stream per message (group) | network phase: one uni stream per message. **`application` package: bidirectional streams** | uni stream per protocol connection, many messages |
-| CBOR map key order | unspecified | struct field order (ascending in practice) | tinycbor decoders **require ascending keys**: `parse error: -519` otherwise |
-| Unknown type key | close connection with error 404 | stops reading that stream, no close | buffers unhandled, no close (`message_demuxer.cc:281-296`) |
-| Type keys | appendix | same 47 | same 47 (identical numbers) |
-| CDDL shapes | current | follows spec | older copy: `presentation-connection-close-event` keys 2/3 swapped (`connection-count`/`error-message`); `remote-playback-state.supports` keys 1-5 vs 0-4; spec adds `null` to `epoch`/`duration`/`resolution` |
-| Metadata discovery | `agent-info-request`/`-response` | sends `auth-capabilities` + `agent-info-request` on connect, **waits for both** from the peer (listener gives up after 10s; `Dial` bounded by ctx) | never sends 10, no handler for 10 |
-| Authentication | SPAKE2 mandatory before other messages | SPAKE2 implemented | `authentication_{alice,bob}` exist but unused. **No auth**; app messages accepted unauthenticated |
+| TXT `fp` | SPKI SHA-256 | SPKI | SPKI (ea1b2da1) |
+| TXT `mv` | required | set; tolerated if absent | set (2639d78d) |
+| TXT `sn` | — (#293) | set; optional for `Dial` | absent |
+| SNI | agent hostname | agent hostname, or instance+domain without `sn` | `<instance>.local` |
+| Server verification | `fp` match | `fp` match only | `fp` match |
+| Client cert verification | — | presence only | — |
+| QUIC CIDs | "should be zero length" | listener zero-length | non-zero (6a9786ae) |
+| Framing | uni stream per message (group) | uni streams in both phases | uni stream per protocol connection |
+| Metadata discovery | agent-info-request/response | sends, answers, resends request | sends, answers; drops a request that arrives before its network phase |
+| Authentication | SPAKE2 mandatory | SPAKE2 (parameters differ, see above) | SPAKE2 (P-256) |
+| App messages before auth | not allowed | held until hand-off | held back until authenticated |
+| Unknown type key | close with 404 | not implemented (deliberately) | buffered |
+| Extension capability IDs (≥1000) | allowed | sends 1100, 1200 | decoded without range check |
 
-## The connection-ID bug (Chromium side)
+## Remaining work
 
-Evidence: `-v` logs from both directions, quiche and quic-go sources.
+**Go**
+- SPAKE2 parameters (table above): password hash, identities, consumer start.
+- Pre-existing, found here: `Listener.Close` closes connections already returned
+  by `Accept`, contrary to its doc comment. quic-go v0.39 `Listener.Close`:
+  "All active connections will be closed."
+- Unknown type key → close with 404: not implemented, by owner decision.
 
-- osp's QUIC factories use `DeterministicConnectionIdGenerator` with
-  `expected_connection_id_length = 0` (`osp/impl/quic/quic_connection_factory_base.h:61-62`,
-  `quic_connection_factory_server.cc:80`).
-- The dispatcher drops the empty replacement (`quic_dispatcher.cc:1334-1337`), so the
-  server session keeps the client's original DCID (14-20 bytes) as its own CID. The
-  framer then parses short headers with that length (`quic_connection.cc:203-204`).
-- The server still issues `NEW_CONNECTION_ID{seq 1, cid: empty}`. RFC 9000 requires
-  CIDs in this frame to be 1-20 bytes.
-- **quiche client** (C++ ↔ C++): rejects that frame and closes the connection with
-  `QUIC_INVALID_NEW_CONNECTION_ID_DATA: Connection IDs in NEW_CONNECTION_ID cannot be empty`
-  about 50 ms after the handshake. osp_demo's own controller → publisher path therefore
-  doesn't work: `QUIC stream is closed`, and the availability request is silently dropped.
-- **quic-go client**: accepts the frame and switches to the new CID right after the
-  handshake (`conn_id_manager.go:196-198`). It then sends short-header packets with an
-  empty DCID. The server reads 14-20 bytes of payload as the DCID, rejects it as
-  unexpected, and reaches a client-only branch guarded by
-  `QUICHE_DCHECK_NE(IS_SERVER, perspective_)` (`quic_connection.cc:1067-1076`). A debug
-  build aborts there; a release build would silently drop every later packet.
-- quic-go v0.39 has no setting that disables the switch.
-- Fix (C++): use a non-zero CID length, e.g. `kQuicDefaultConnectionIdLength` as
-  `platform/impl/quiche_web_transport_server.cc:102` already does. Alternatively,
-  implement truly zero-length server CIDs: set the framer length to 0 and issue no
-  NEW_CONNECTION_ID.
-- Spec: network.bs:263 could note that agents using zero-length CIDs must not issue
-  NEW_CONNECTION_ID (RFC 9000 §5.1.1).
-
-## What would need to change
-
-**Go (ospc).** Documented, not changed here. Since this was written, the connection
-lifecycle rework on main has addressed some of these; they are marked below.
-
-- `Dial` (`dialer.go`):
-  - Don't require TXT `sn`; it isn't in the spec.
-  - Verify the server by `fp` pinning only, as network.bs §TLS requires. The serial
-    number and x509 `DNSName` checks go beyond the spec and fail against certs that
-    lack SAN or the spec CN.
-- `Listener` (`listener.go`): `peerCert.Verify(DNSName: peer CN)` fails for any client
-  certificate without a SAN. The spec doesn't ask the server to verify a hostname.
-  The listener could pin nothing, or verify after authentication.
-- `exchangeInfo`/`checkAgentInfoComplete` (`connection_network.go`): the handshake
-  phase waits for the peer's `auth-capabilities` and `agent-info-response`. The
-  listener now gives up after 10s and `Dial` is bounded by its context, but there is
-  still no clear error for peers that don't speak the metadata/auth phase.
-- Unknown type key: network.bs says to close the connection with application error
-  404; ospc deliberately doesn't while the protocol is in flux and only stops reading
-  that stream.
-- `application` package: sends on bidirectional streams. application.bs:337 requires
-  unidirectional streams, which is what osp_demo sends and expects.
-- Auth initiation token: now wired in on main (the advertised `at` is sent in the
-  first auth message and checked on receipt).
-
-**Chromium (Open Screen Library)**
-
-- Fingerprint: SPKI hash per network.bs, in both `QuicAgentCertificate` and the pinned
-  verifier.
-- The zero-length connection ID bug above. It also breaks C++ ↔ C++.
-- Implement metadata discovery (`agent-info-request` handler) and SPAKE2
-  authentication. The `AuthenticationAlice`/`AuthenticationBob` classes exist; they
-  need wiring, plus gating of application messages until authentication succeeds.
-- TXT `mv`. Certificate fields per network.bs: CN=agent hostname, issuer=model-name,
-  serial per spec. SNI = agent hostname.
-- Sync `osp/msgs/osp_messages.cddl` with the spec (presentation-connection-close-event,
-  remote-playback-state).
-- Optional: accept CBOR maps in any key order, or the spec should mandate
-  deterministic encoding.
-- Demo ergonomics: the cwd-relative certificate path crashes when missing; logs go only
-  to a FIFO; the publisher port is fixed at 6667.
+**Chromium**
+- Drop of an agent-info-request that arrives before the network phase starts
+  (`handling message type 10` is logged before `Network phase with …`).
+- A PSK input path for the consumer role: osp_demo has no `--psk`, so as a
+  controller against an ospc presenter it can't authenticate.
+- Curve: P-256 vs. the spec's edwards25519.
+- Older items: certificate fields per network.bs (CN=agent hostname), SNI = agent
+  hostname, sync `osp_messages.cddl`, cwd-relative certificate path, fixed port.
 
 **Spec**
-
-- `sn` TXT key and the base64 alphabet in hostnames (#293, #365). ospc's `sn` is a
-  local workaround.
-- Zero-length CID guidance (above).
-- CBOR map key order: say whether deterministic encoding (RFC 8949 §4.2) is required.
-  At least one implementation depends on it.
+- `sn` / hostname computation (#293, #365); SPAKE2 `pw` encoding; CBOR map key
+  order (osp_demo depends on deterministic order); zero-length CID guidance
+  (agents using zero-length CIDs must not issue NEW_CONNECTION_ID).

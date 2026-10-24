@@ -173,13 +173,13 @@ func authenticateOrSkip(t *testing.T, uc *ospc.UnauthenticatedConnection, d *osp
 	reason := ""
 	switch {
 	case !remote.HasAuthenticationInfo() || remote.Info() == nil:
-		reason = "osp_demo did not send auth-capabilities / agent-info-response, so SPAKE2 can't start"
+		reason = "(Chromium side) osp_demo did not send auth-capabilities / agent-info-response, so SPAKE2 can't start"
 	case os.Getenv("OSP_DEMO_TRY_SPAKE2") == "":
-		reason = "osp_demo took part in the auth-capabilities exchange, but " + spake2Blocker
+		reason = "(Go side) osp_demo took part in the auth-capabilities exchange, but " + spake2Blocker
 	default:
 		psk := pskFromDemo(d, stepTimeout)
 		if psk == nil {
-			reason = "osp_demo sent auth-capabilities but no PSK is known (set OSP_DEMO_PSK or have osp_demo log it)"
+			reason = "(harness) osp_demo sent auth-capabilities but no PSK is known (set OSP_DEMO_PSK or have osp_demo log it)"
 			break
 		}
 		t.Logf("authenticating as %v with PSK %q", uc.GetAuthenticationRole(), psk)
@@ -203,7 +203,7 @@ func authenticateOrSkip(t *testing.T, uc *ospc.UnauthenticatedConnection, d *osp
 	}
 	*quirks = append(*quirks, "AllowSkipAuthentication")
 	t.Logf("QUIRKS NEEDED: AllowSkipAuthentication")
-	return conn, fmt.Sprintf("BLOCKER (Chromium side): %s; continuing UNAUTHENTICATED via the AllowSkipAuthentication quirk", reason)
+	return conn, fmt.Sprintf("BLOCKER %s; continuing UNAUTHENTICATED via the AllowSkipAuthentication quirk", reason)
 }
 
 // skipIfGated skips t if osp_demo held back our application messages because

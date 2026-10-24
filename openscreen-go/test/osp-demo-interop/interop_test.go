@@ -235,7 +235,7 @@ func TestRawProbePublisher(t *testing.T) {
 			if len(unhandled) == 0 {
 				skipIfDemoCrashed(t, pub)
 			}
-			t.Skipf("BLOCKER (Chromium side): no agent-info-response (%v); osp_demo registers no agent-info-request handler, the demuxer leaves the message buffered unhandled: %q", err, unhandled)
+			t.Skipf("BLOCKER (Chromium side): no agent-info-response (%v). The raw probe sends its request once, right after the handshake; older osp_demo builds have no handler for it, newer ones drop a request that arrives before their network phase starts. Unhandled: %q", err, unhandled)
 		}
 		t.Logf("agent-info-response: %v", m.Body)
 	})
@@ -252,7 +252,7 @@ func TestRawProbePublisher(t *testing.T) {
 			t.Fatalf("osp_demo closed the connection after auth-capabilities: %v", context.Cause(wc.conn.Context()))
 		}
 		if err != nil {
-			t.Skipf("BLOCKER (Chromium side): no auth-capabilities from osp_demo (%v); it implements no authentication handshake, so SPAKE2 can't start. Continuing unauthenticated, which osp_demo accepts", err)
+			t.Skipf("BLOCKER: no auth-capabilities from osp_demo in reply (%v); the raw probe doesn't authenticate and continues unauthenticated", err)
 		}
 	})
 
