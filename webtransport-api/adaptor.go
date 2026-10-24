@@ -22,7 +22,12 @@ func NewListenerAdaptor[S Session](l ConcreteListener[S]) *ListenerAdaptor[S] {
 }
 
 func (a *ListenerAdaptor[S]) Accept(ctx context.Context) (Session, error) {
-	return a.inner.Accept(ctx)
+	// Avoid returning a non-nil interface holding a nil pointer.
+	s, err := a.inner.Accept(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (a *ListenerAdaptor[S]) Close() error {
@@ -48,11 +53,21 @@ func NewSessionAdaptor[S Stream](s ConcreteSession[S]) *SessionAdaptor[S] {
 }
 
 func (a *SessionAdaptor[S]) AcceptStream(ctx context.Context) (Stream, error) {
-	return a.inner.AcceptStream(ctx)
+	// Avoid returning a non-nil interface holding a nil pointer.
+	s, err := a.inner.AcceptStream(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (a *SessionAdaptor[S]) OpenStreamSync(ctx context.Context) (Stream, error) {
-	return a.inner.OpenStreamSync(ctx)
+	// Avoid returning a non-nil interface holding a nil pointer.
+	s, err := a.inner.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (a *SessionAdaptor[S]) CloseWithError(i uint64, msg string) error {
