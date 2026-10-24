@@ -324,6 +324,7 @@ func (c *baseConnection) finishAuthentication() (*Connection, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.remoteAgent.setAuthenticated()
 	// TODO: avoid needless goroutine by solving double locking differently.
 	go c.runApplication()
 
@@ -652,8 +653,8 @@ func (c *baseConnection) handleAgentInfoRequest(msg *msgAgentInfoRequest) error 
 				AgentCapabilityDataChannels,
 				AgentCapabilityQuickTransport,
 			},
-			// StateToken: , // TODO: State token
-			Locales: localInfo.Locales,
+			StateToken: c.localAgent.StateToken(),
+			Locales:    localInfo.Locales,
 		},
 	}
 	err := writeMessage(infoMsg, c.netConn)
@@ -681,6 +682,8 @@ func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse) erro
 	c.remoteAgent.setInfo(AgentInfo{
 		DisplayName: msg.AgentInfo.DisplayName,
 		ModelName:   msg.AgentInfo.ModelName,
+		StateToken:  msg.AgentInfo.StateToken,
+		Locales:     msg.AgentInfo.Locales,
 	})
 
 	c.checkAgentInfoComplete()

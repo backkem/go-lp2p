@@ -4,17 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	mdns "github.com/grandcat/zeroconf"
 )
-
-// unescapeDNSSD removes DNS-SD escaping from instance names.
-// The zeroconf library returns names with escaped special chars (e.g., "Test\ Receiver").
-func unescapeDNSSD(s string) string {
-	return strings.ReplaceAll(s, `\ `, " ")
-}
 
 var ErrDiscovererClosed = errors.New("discoverer closed")
 
@@ -56,7 +49,10 @@ func NewDiscoverer() *Discoverer {
 	return d
 }
 
-// WithNickname defines a nickname of agents to discover.
+// WithNickname defines a nickname of agents to discover. Agents match if
+// their DNS-SD Instance Name equals the nickname or, if the Instance Name is
+// truncated, is a prefix of it. The match is unverified, see
+// Agent.DisplayName for the verified display name after authentication.
 func (d *Discoverer) WithNickname(nickname string) {
 	d.remoteNickname = &nickname
 }
@@ -105,12 +101,12 @@ func (d *Discoverer) run() error {
 				if !ok {
 					continue
 				}
-				// Filter by nickname if specified (unescape DNS-SD encoding)
-				if remoteNickname != nil && unescapeDNSSD(e.ServiceRecord.Instance) != *remoteNickname {
-					continue
-				}
 				agent, err := newDiscoveredAgent(e)
 				if err != nil {
+					continue
+				}
+				// Filter by nickname if specified
+				if remoteNickname != nil && !agent.instanceName.MatchesNickname(*remoteNickname) {
 					continue
 				}
 				select {
@@ -178,30 +174,126 @@ func (d *Discoverer) err() error {
 // DiscoveredAgent represents a discovered remote agent that has not been contacted yet.
 type DiscoveredAgent struct {
 	PeerID PeerID
-	TXT    TXTRecordSet
-	info   *mdns.ServiceEntry
+	// TXT holds the unescaped TXT records.
+	TXT  TXTRecordSet
+	info *mdns.ServiceEntry
+
+	instanceName       InstanceName
+	metadataVersion    uint64
+	hasMetadataVersion bool
 }
 
 func newDiscoveredAgent(info *mdns.ServiceEntry) (*DiscoveredAgent, error) {
-	txt := TXTRecordSet{}
-	err := txt.FromSlice(info.Text)
+	txt, err := parseDiscoveryTXT(info.Text)
 	if err != nil {
 		return nil, err
 	}
 
-	fp, err := txt.GetOne("fp")
+	a, err := newDiscoveredAgentFromTXT(info.ServiceRecord.Instance, txt)
+	if err != nil {
+		return nil, err
+	}
+	a.info = info
+	return a, nil
+}
+
+// parseDiscoveryTXT parses TXT strings as returned by the mDNS resolver, in
+// DNS presentation format (e.g. a varuint mv of 0 is "mv=\000").
+func parseDiscoveryTXT(text []string) (TXTRecordSet, error) {
+	unescaped := make([]string, 0, len(text))
+	for _, t := range text {
+		unescaped = append(unescaped, unescapeDNSSD(t))
+	}
+	txt := TXTRecordSet{}
+	err := txt.FromSlice(unescaped)
+	if err != nil {
+		return nil, err
+	}
+	return txt, nil
+}
+
+// newDiscoveredAgentFromTXT builds a DiscoveredAgent from an escaped Instance
+// Name and unescaped TXT records.
+func newDiscoveredAgentFromTXT(escapedInstance string, txt TXTRecordSet) (*DiscoveredAgent, error) {
+	fp, err := txt.GetOne(txtKeyFingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get fp record: %v", err)
 	}
 
-	return &DiscoveredAgent{
-		PeerID: PeerID(fp),
-		TXT:    txt,
-		info:   info,
-	}, nil
+	a := &DiscoveredAgent{
+		PeerID:       PeerID(fp),
+		TXT:          txt,
+		instanceName: parseInstanceName(escapedInstance),
+	}
+
+	// mv is required by the spec, but tolerate its absence: callers then
+	// can't tell whether metadata changed and should assume it did.
+	if values := txt.Get(txtKeyMetadataVersion); len(values) > 0 {
+		mv, err := txt.GetOne(txtKeyMetadataVersion)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get mv record: %v", err)
+		}
+		a.metadataVersion, err = decodeMetadataVersion(mv)
+		if err != nil {
+			return nil, err
+		}
+		a.hasMetadataVersion = true
+	}
+
+	return a, nil
 }
 
-// Nickname of the remote agent
+// Nickname of the remote agent: its unescaped DNS-SD Instance Name, without
+// truncation marker. It is unverified and may be truncated; prefer
+// DisplayName for presenting the agent to users.
 func (a *DiscoveredAgent) Nickname() string {
-	return unescapeDNSSD(a.info.ServiceRecord.Instance)
+	return a.instanceName.Name
+}
+
+// InstanceName returns the parsed DNS-SD Instance Name of the agent.
+func (a *DiscoveredAgent) InstanceName() InstanceName {
+	return a.instanceName
+}
+
+// DisplayName returns the name to present for the agent before connecting,
+// and its status. The status is DisplayNameTruncated (don't show) or
+// DisplayNameUnverified. After authenticating, use Agent.DisplayName on the
+// connection's remote agent to get a verified display name.
+func (a *DiscoveredAgent) DisplayName() (string, DisplayNameStatus) {
+	return a.instanceName.Name, a.instanceName.Status()
+}
+
+// MetadataVersion returns the advertised mv value, if present.
+func (a *DiscoveredAgent) MetadataVersion() (uint64, bool) {
+	return a.metadataVersion, a.hasMetadataVersion
+}
+
+// AuthToken returns the advertised at value: the auth-initiation-token to use
+// in the first authentication message to this agent.
+func (a *DiscoveredAgent) AuthToken() (string, error) {
+	at, err := a.TXT.GetOne(txtKeyAuthToken)
+	if err != nil {
+		return "", fmt.Errorf("failed to get at record: %v", err)
+	}
+	if err := validateAuthToken(at); err != nil {
+		return "", err
+	}
+	return at, nil
+}
+
+// MetadataChangedSince reports whether the agent's metadata may have changed
+// since prev was retrieved, i.e. whether connecting to the agent to discover
+// updated metadata is warranted. It is conservative: it returns true unless
+// both prev and the advertisement carry the same mv for the same PeerID.
+//
+// The spec requires mv to only increase; any different value is treated as
+// changed since a lower value likely indicates the agent lost its state.
+func (a *DiscoveredAgent) MetadataChangedSince(prev AgentMetadata) bool {
+	if prev.PeerID != a.PeerID {
+		return true
+	}
+	if !a.hasMetadataVersion || !prev.HasMetadataVersion {
+		return true
+	}
+	return a.metadataVersion != prev.MetadataVersion
 }

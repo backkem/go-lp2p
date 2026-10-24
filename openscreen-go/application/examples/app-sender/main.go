@@ -72,7 +72,12 @@ func run(name, psk, receiverName string, timeout time.Duration) error {
 		return fmt.Errorf("discovery failed: %w", err)
 	}
 
-	log.Printf("Found receiver: %s", discovered.Nickname())
+	// Instance Names are unverified, truncated ones should not be shown.
+	if name, status := discovered.DisplayName(); status.Displayable() {
+		log.Printf("Found receiver: %s (%s)", name, status)
+	} else {
+		log.Printf("Found receiver: %s... (%s)", name, status)
+	}
 
 	// Dial the receiver
 	log.Printf("Connecting...")
@@ -100,6 +105,11 @@ func run(name, psk, receiverName string, timeout time.Duration) error {
 	defer conn.Close()
 
 	log.Printf("Authentication successful!")
+	if name, status := conn.RemoteAgent().DisplayName(); status.Verified() {
+		log.Printf("Verified receiver name: %s", name)
+	} else {
+		log.Printf("Receiver name not verified: %s (%s)", name, status)
+	}
 
 	// Wrap in application connection
 	appConn := application.NewApplicationConnection(conn)
