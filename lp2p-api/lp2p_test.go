@@ -34,11 +34,16 @@ type browser struct {
 
 func newBrowser(t *testing.T, name string, ui *ua.Scripted) *browser {
 	t.Helper()
+	return newBrowserTimeout(t, name, ui, 10*time.Second)
+}
+
+func newBrowserTimeout(t *testing.T, name string, ui *ua.Scripted, handshake time.Duration) *browser {
+	t.Helper()
 	ui.Name = name
 	if testing.Verbose() {
 		ui.Out = os.Stderr
 	}
-	u, err := ua.New(ua.Config{Name: name, UI: ui, HandshakeTimeout: 10 * time.Second})
+	u, err := ua.New(ua.Config{Name: name, UI: ui, HandshakeTimeout: handshake})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,18 +298,23 @@ func TestIncomingConnectionDenied(t *testing.T) {
 		Permission: ua.Deny(ua.PermissionAcceptConnection),
 		Present:    relay.Present, Enter: relay.Enter,
 	})
-	tx := newBrowser(t, "tx", &ua.Scripted{
+	tx := newBrowserTimeout(t, "tx", &ua.Scripted{
 		Present: relay.Present, Enter: relay.EnterWithin(time.Second), Pick: ua.PickByName(name),
-	})
+	}, 3*time.Second)
 	_, conns := startReceiver(t, rx, name)
 
 	req, err := tx.window.NewLP2PRequest(LP2PRequestOptions{Nickname: "Requester"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The requester isn't told; its user gives up waiting for a PIN.
+	// The requester isn't told. Usually its user gives up waiting for a
+	// PIN (AbortError); if the refusal lands while ospc is still dialing,
+	// the dial only ends with the handshake timeout (TimeoutError).
 	_, err = req.Start()
-	wantDOMException(t, err, AbortError)
+	var de *DOMException
+	if !errors.As(err, &de) || (de.Name != AbortError && de.Name != TimeoutError) {
+		t.Fatalf("got %v, want an AbortError or TimeoutError", err)
+	}
 	select {
 	case <-conns:
 		t.Error("receiver got a denied connection")

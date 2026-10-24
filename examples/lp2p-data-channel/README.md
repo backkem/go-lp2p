@@ -14,14 +14,17 @@ go run ./examples/lp2p-data-channel -interactive >/dev/null  # pick and type the
 
 ## Output
 
+Device names carry a random suffix per run, so the example picks its own
+device even if other Open Screen agents on the network use the same name.
+
 ```
-[Receiver device] https://receiver-device.example wants to be discoverable as "Chat receiver": allowed
+[Receiver device] https://receiver-device.example wants to be discoverable as "Chat receiver #71c2": allowed
 [Requester device] https://requester-device.example ("Chat requester") shows the device picker
-[Requester device] user picked Chat receiver (unverified)
-[Requester device] asks for the PIN shown on Chat receiver (unverified)
-[Receiver device] https://receiver-device.example ("Chat receiver") wants to accept a connection from Chat requester (unverified): allowed
-[Receiver device] shows PIN 1406-6647 to pair with Chat requester (unverified)
-[Requester device] user enters PIN 1406-6647
+[Requester device] user picked Chat receiver #71c2 (unverified)
+[Requester device] asks for the PIN shown on Chat receiver #71c2 (unverified)
+[Receiver device] https://receiver-device.example ("Chat receiver #71c2") wants to accept a connection from Chat requester (unverified): allowed
+[Receiver device] shows PIN 1076-4280 to pair with Chat requester (unverified)
+[Requester device] user enters PIN 1076-4280
 Receiver: got a connection
 Requester: got a connection
 Requester: channel open

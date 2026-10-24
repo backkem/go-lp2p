@@ -19,16 +19,19 @@ the final chunk at end of stream.
 
 ## Output
 
+Device names carry a random suffix per run, so the example picks its own
+device even if other Open Screen agents on the network use the same name.
+
 ```
-[Receiver device] https://receiver-device.example wants to be discoverable as "Upload target": allowed
+[Receiver device] https://receiver-device.example wants to be discoverable as "Upload target #87d1": allowed
 [Requester device] https://requester-device.example ("Uploader") shows the device picker
-[Requester device] user picked Upload target (unverified)
-[Requester device] asks for the PIN shown on Upload target (unverified)
-[Receiver device] https://receiver-device.example ("Upload target") wants to accept a connection from Uploader (unverified): allowed
-[Receiver device] shows PIN 0987-7251 to pair with Uploader (unverified)
-[Requester device] user enters PIN 0987-7251
+[Requester device] user picked Upload target #87d1 (unverified)
+[Requester device] asks for the PIN shown on Upload target #87d1 (unverified)
+[Receiver device] https://receiver-device.example ("Upload target #87d1") wants to accept a connection from Uploader (unverified): allowed
+[Receiver device] shows PIN 1442-0279 to pair with Uploader (unverified)
+[Requester device] user enters PIN 1442-0279
 Receiver: got a transport
-Requester: sending 4194304 bytes, sha256 0f41cac19e9ad771…
-Receiver: got 4194304 bytes in 57ms, sha256 0f41cac19e9ad771…: ok
+Requester: sending 4194304 bytes, sha256 88c88dc07a2f2a23…
+Receiver: got 4194304 bytes in 61ms, sha256 88c88dc07a2f2a23…: ok
 Requester: receiver confirmed the payload is intact
 ```

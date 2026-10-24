@@ -16,9 +16,11 @@ import (
 	ua "github.com/backkem/go-lp2p/lp2p-api/useragent"
 )
 
-var devices = []string{"Kitchen speaker", "Living room TV", "Office display"}
+// Device names are unique per run, so the picker can tell this run's
+// devices from other agents on the network.
+var devices = []string{demo.Unique("Kitchen speaker"), demo.Unique("Living room TV"), demo.Unique("Office display")}
 
-const choice = "Living room TV"
+var choice = devices[1]
 
 // displayPage runs on each device: it greets whoever connects.
 func displayPage(w *Window, nickname string) (*LP2PReceiver, error) {

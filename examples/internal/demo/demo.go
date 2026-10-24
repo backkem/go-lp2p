@@ -6,10 +6,13 @@
 package demo
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	lp2p "github.com/backkem/go-lp2p/lp2p-api"
@@ -20,6 +23,15 @@ var interactive = flag.Bool("interactive", false, "ask the user on the terminal 
 
 // Interactive reports whether -interactive was given. Call after flag.Parse.
 func Interactive() bool { return *interactive }
+
+// Unique appends a random suffix to a device name, e.g. "TV #3fa9", so the
+// example picks its own device even when other Open Screen agents on the
+// network (or another run of the example) use the same name.
+func Unique(name string) string {
+	b := make([]byte, 2)
+	_, _ = rand.Read(b)
+	return name + " #" + hex.EncodeToString(b)
+}
 
 // Browser is one simulated device running a browser with one page open.
 type Browser struct {
@@ -46,11 +58,15 @@ func NewUserBrowser(name string, script *ua.Scripted) *Browser {
 }
 
 func newBrowser(name string, ui ua.UI) *Browser {
+	origin := name
+	if i := strings.Index(origin, " #"); i >= 0 {
+		origin = origin[:i] // drop the Unique suffix
+	}
 	u, err := ua.New(ua.Config{Name: name, UI: ui, PairingTimeout: 2 * time.Second})
 	if err != nil {
 		log.Fatal(err)
 	}
-	return &Browser{Name: name, UA: u, Window: lp2p.NewWindow(u, "https://"+slug(name)+".example")}
+	return &Browser{Name: name, UA: u, Window: lp2p.NewWindow(u, "https://"+slug(origin)+".example")}
 }
 
 // Close the browser.

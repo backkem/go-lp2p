@@ -102,8 +102,8 @@ func (c *CLI) PickPeer(ctx context.Context, p *Picker) (Peer, error) {
 
 	fmt.Fprintf(c.out, "%s (%q) wants to connect to a device.\n", p.Origin, p.Nickname)
 	var shown []Peer
+	asking := false
 	updates := p.Watch(ctx)
-	ask()
 	for {
 		select {
 		case peers, ok := <-updates:
@@ -111,6 +111,10 @@ func (c *CLI) PickPeer(ctx context.Context, p *Picker) (Peer, error) {
 				return Peer{}, ctx.Err()
 			}
 			shown = peers
+			if !asking { // read answers once there is a list to answer to
+				asking = true
+				ask()
+			}
 			if len(peers) == 0 {
 				fmt.Fprintln(c.out, "  Searching for devices... (q to cancel)")
 				continue

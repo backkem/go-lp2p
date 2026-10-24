@@ -81,10 +81,11 @@ func main() {
 	// 3. The user types the wrong PIN. ospc doesn't report a PIN mismatch,
 	// so the user agent gives up after its pairing timeout (2s here).
 	{
-		tv := demo.NewBrowser("TV", &ua.Scripted{Enter: ua.FixedPIN("0000-0000")})
-		r := startReceiver(tv, "TV")
+		name := demo.Unique("TV")
+		tv := demo.NewBrowser(name, &ua.Scripted{Enter: ua.FixedPIN("0000-0000")})
+		r := startReceiver(tv, name)
 		phone := demo.NewBrowser("Clumsy phone", &ua.Scripted{
-			Pick:  ua.PickByName("TV"),
+			Pick:  ua.PickByName(name),
 			Enter: ua.FixedPIN("0000-0000"),
 		})
 		report("3. request.start(), wrong PIN", connect(phone))
@@ -98,13 +99,14 @@ func main() {
 	// up waiting for a PIN.
 	{
 		relay := ua.NewPINRelay()
-		projector := demo.NewBrowser("Projector", &ua.Scripted{
+		name := demo.Unique("Projector")
+		projector := demo.NewBrowser(name, &ua.Scripted{
 			Permission: ua.Deny(ua.PermissionAcceptConnection),
 			Present:    relay.Present,
 		})
-		r := startReceiver(projector, "Projector")
+		r := startReceiver(projector, name)
 		phone := demo.NewBrowser("Unwelcome phone", &ua.Scripted{
-			Pick:  ua.PickByName("Projector"),
+			Pick:  ua.PickByName(name),
 			Enter: relay.EnterWithin(2 * time.Second),
 		})
 		report("4. request.start(), connection refused by the receiver", connect(phone))

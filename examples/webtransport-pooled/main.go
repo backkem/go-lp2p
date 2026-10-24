@@ -34,9 +34,13 @@ const payloadSize = 4 << 20
 // zero-pads every chunk it reads and may drop the last chunk at end of
 // stream; both are harmless once it is fixed.
 
+// receiverName is unique per run, so the requester picks this run's
+// receiver even if other agents on the network advertise a similar name.
+var receiverName = demo.Unique("Upload target")
+
 // receiverPage accepts transports and verifies what is streamed to it.
 func receiverPage(w *Window) error {
-	receiver, err := w.NewLP2PReceiver(LP2PReceiverOptions{Nickname: "Upload target"})
+	receiver, err := w.NewLP2PReceiver(LP2PReceiverOptions{Nickname: receiverName})
 	if err != nil {
 		return err
 	}
@@ -164,7 +168,7 @@ func main() {
 	demo.Watchdog(20 * time.Second)
 
 	presenter, consumer := demo.Pair()
-	consumer.Pick = ua.PickByName("Upload target")
+	consumer.Pick = ua.PickByName(receiverName)
 	receiverDevice := demo.NewBrowser("Receiver device", presenter)
 	requesterDevice := demo.NewUserBrowser("Requester device", consumer)
 	defer receiverDevice.Close()

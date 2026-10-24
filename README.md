@@ -72,9 +72,9 @@ reading the pairing PIN off one screen to type it on the other. ospc prints
 protocol debug output on stdout, so add `>/dev/null` to see just the example:
 
 ```
-[Receiver device] https://receiver-device.example wants to be discoverable as "Chat receiver": allowed
+[Receiver device] https://receiver-device.example wants to be discoverable as "Chat receiver #3fa9": allowed
 [Requester device] https://requester-device.example ("Chat requester") shows the device picker
-[Requester device] user picked Chat receiver (unverified)
+[Requester device] user picked Chat receiver #3fa9 (unverified)
 [Receiver device] shows PIN 1406-6647 to pair with Chat requester (unverified)
 [Requester device] user enters PIN 1406-6647
 Receiver: got a connection

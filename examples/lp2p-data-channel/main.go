@@ -18,10 +18,14 @@ var replies = []string{
 	"Bye!",
 }
 
+// receiverName is unique per run, so the requester picks this run's
+// receiver even if other agents on the network advertise a similar name.
+var receiverName = demo.Unique("Chat receiver")
+
 // receiverPage runs on the receiving device: it answers each message with
 // the next reply.
 func receiverPage(w *Window, done chan<- struct{}) error {
-	receiver, err := w.NewLP2PReceiver(LP2PReceiverOptions{Nickname: "Chat receiver"})
+	receiver, err := w.NewLP2PReceiver(LP2PReceiverOptions{Nickname: receiverName})
 	if err != nil {
 		return err
 	}
@@ -102,7 +106,7 @@ func main() {
 	// Two devices, each running a browser; the PIN shown on one is typed
 	// on the other.
 	presenter, consumer := demo.Pair()
-	consumer.Pick = ua.PickByName("Chat receiver") // the user picks it in the device picker
+	consumer.Pick = ua.PickByName(receiverName) // the user picks it in the device picker
 	receiverDevice := demo.NewBrowser("Receiver device", presenter)
 	requesterDevice := demo.NewUserBrowser("Requester device", consumer)
 	defer receiverDevice.Close()
