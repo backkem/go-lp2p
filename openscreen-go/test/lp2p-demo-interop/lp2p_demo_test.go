@@ -301,7 +301,7 @@ func TestGoRequestCppReceiver(t *testing.T) {
 	demo.MustSee(`lp2p_demo: listening as `+name, stepTimeout)
 
 	conn := dialDemo(t, name)
-	id := uint64(3)
+	id := uint64(4)
 	dc, err := conn.OpenDataChannel(withTimeout(t, stepTimeout), ospc.DataChannelInit{Label: "chat", Protocol: "test", ID: &id})
 	if err != nil {
 		t.Fatalf("OpenDataChannel: %v", err)
@@ -311,8 +311,8 @@ func TestGoRequestCppReceiver(t *testing.T) {
 	if err := dc.SendMessageWithEncoding([]byte("hello"), ospc.DataEncodingString); err != nil {
 		t.Fatal(err)
 	}
-	demo.MustSee(`lp2p_demo: data channel 3 "chat" open`, stepTimeout)
-	demo.MustSee(`lp2p_demo: received on 3 \(string\): hello$`, stepTimeout)
+	demo.MustSee(`lp2p_demo: data channel 4 "chat" open`, stepTimeout)
+	demo.MustSee(`lp2p_demo: received on 4 \(string\): hello$`, stepTimeout)
 	expectMessage(t, dc, []byte("echo: hello"), ospc.DataEncodingString)
 
 	binary := []byte{0, 1, 2, 0xff}
@@ -320,7 +320,7 @@ func TestGoRequestCppReceiver(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectMessage(t, dc, binary, ospc.DataEncodingArrayBuffer)
-	demo.MustSee(`lp2p_demo: received on 3 \(arraybuffer\)`, stepTimeout)
+	demo.MustSee(`lp2p_demo: received on 4 \(arraybuffer\)`, stepTimeout)
 }
 
 // listenGo advertises an ospc agent and returns the connection lp2p_demo
@@ -429,23 +429,28 @@ func TestSpecOpenResponse(t *testing.T) {
 }
 
 // TestChannelIDs checks channel-id allocation on a connection with channels
-// opened from both sides. Both implementations take the lowest ID no open
-// channel of the connection uses: lp2p_demo opens 0, so ospc's next channel
-// on that connection gets 1.
+// opened from both sides: the requester side (QUIC client) takes the lowest
+// free even ID, the receiver side (QUIC server) the lowest free odd one.
+// lp2p_demo requests and opens 0 and 2; ospc's channel back gets 1.
 func TestChannelIDs(t *testing.T) {
 	name := uniqueName("GoLp2pRecv")
 	conns := listenGo(t, name)
-	demo := startDemo(t, "--connect="+name, "--label=chat")
+	demo := startDemo(t, "--connect="+name, "--label=chat", "--channels=2")
 	conn := awaitConnection(t, conns)
-	rx, err := conn.AcceptDataChannel(withTimeout(t, stepTimeout))
-	if err != nil {
-		t.Fatalf("AcceptDataChannel: %v", err)
+	ids := map[uint64]bool{}
+	for range 2 {
+		rx, err := conn.AcceptDataChannel(withTimeout(t, stepTimeout))
+		if err != nil {
+			t.Fatalf("AcceptDataChannel: %v", err)
+		}
+		defer rx.Close()
+		ids[rx.ID] = true
 	}
-	defer rx.Close()
-	if rx.ID != 0 {
-		t.Errorf("lp2p_demo's channel has ID %d, want 0", rx.ID)
+	if !ids[0] || !ids[2] {
+		t.Errorf("lp2p_demo's channels have IDs %v, want 0 and 2", ids)
 	}
 	demo.MustSee(`lp2p_demo: data channel 0 "chat" open`, stepTimeout)
+	demo.MustSee(`lp2p_demo: data channel 2 "chat" open`, stepTimeout)
 
 	tx, err := conn.OpenDataChannel(withTimeout(t, stepTimeout), ospc.DataChannelInit{Label: "back"})
 	if err != nil {

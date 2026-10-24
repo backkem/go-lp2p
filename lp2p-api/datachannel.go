@@ -45,8 +45,10 @@ type LP2PDataChannel struct {
 // LP2PDataChannelInit configures a data channel.
 type LP2PDataChannelInit struct {
 	Protocol string
-	// ID is the channel-id (0 to 65,534). If nil, the lowest ID not used
-	// by an open channel of the connection is taken.
+	// ID is the channel-id (0 to 65,534). If nil, the lowest free ID of the
+	// local parity is taken: even on the requester (QUIC client) side, odd
+	// on the receiver side. An explicit ID must be free and of that parity,
+	// or CreateDataChannel fails with an OperationError.
 	ID *uint64
 }
 

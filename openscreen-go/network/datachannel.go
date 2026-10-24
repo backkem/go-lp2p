@@ -23,6 +23,9 @@ var (
 	// ErrDataChannelIDInUse is returned when an explicit channel ID is used
 	// by another open data channel of the connection.
 	ErrDataChannelIDInUse = errors.New("data channel ID in use")
+	// ErrDataChannelIDParity is returned when an explicit channel ID has
+	// the parity the peer allocates from.
+	ErrDataChannelIDParity = errors.New("data channel ID has the peer's parity")
 	// ErrDataChannelRejected is returned when the peer answers the
 	// data-channel-open-request with a result other than success.
 	ErrDataChannelRejected = errors.New("data channel rejected by the peer")
@@ -39,14 +42,13 @@ type DataChannelParameters struct {
 type DataChannelInit struct {
 	Label    string
 	Protocol string
-	// ID is the channel-id to use. If nil, one is allocated: the lowest ID
-	// not used by an open data channel of the connection, in either
-	// direction. This matches the openscreen (C++) implementation; the spec
-	// leaves ID allocation open. As the sides allocate independently, two
-	// channels opened concurrently from both sides can get the same ID.
-	// IDs only label channels; channels are told apart by their QUIC stream,
-	// so such a collision is harmless and duplicate IDs from the peer are
-	// accepted.
+	// ID is the channel-id to use. If nil, one is allocated: the QUIC
+	// client allocates even IDs and the QUIC server odd IDs, taking the
+	// lowest one of its parity not used by an open data channel of the
+	// connection. An explicit ID must be free and of the local parity, so
+	// the two sides never pick the same ID. IDs only label channels;
+	// channels are told apart by their QUIC stream, so IDs from the peer
+	// are accepted whatever their parity, duplicates included.
 	ID *uint64
 }
 
@@ -67,8 +69,9 @@ type dataChannelIDs struct {
 	used map[uint64]int // ID -> number of open channels using it
 }
 
-// reserve takes id, or the lowest free ID if id is nil.
-func (d *dataChannelIDs) reserve(id *uint64) (uint64, error) {
+// reserve takes id, or the lowest free ID of the local parity if id is nil.
+// parity is 0 (even) on the QUIC client and 1 (odd) on the QUIC server.
+func (d *dataChannelIDs) reserve(id *uint64, parity uint64) (uint64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.used == nil {
@@ -78,13 +81,16 @@ func (d *dataChannelIDs) reserve(id *uint64) (uint64, error) {
 		if *id > MaxDataChannelID {
 			return 0, fmt.Errorf("%w: %d", ErrDataChannelIDOutOfRange, *id)
 		}
+		if *id%2 != parity {
+			return 0, fmt.Errorf("%w: %d", ErrDataChannelIDParity, *id)
+		}
 		if d.used[*id] > 0 {
 			return 0, fmt.Errorf("%w: %d", ErrDataChannelIDInUse, *id)
 		}
 		d.used[*id]++
 		return *id, nil
 	}
-	for i := uint64(0); i <= MaxDataChannelID; i++ {
+	for i := parity; i <= MaxDataChannelID; i += 2 {
 		if d.used[i] == 0 {
 			d.used[i]++
 			return i, nil
@@ -115,7 +121,11 @@ func (d *dataChannelIDs) release(id uint64) {
 
 func (c *baseConnection) OpenDataChannel(ctx context.Context, init DataChannelInit) (*DataChannel, error) {
 	ids := &c.app.Load().dataChannelIDs
-	id, err := ids.reserve(init.ID)
+	parity := uint64(0)
+	if c.agentRole == AgentRoleServer {
+		parity = 1
+	}
+	id, err := ids.reserve(init.ID, parity)
 	if err != nil {
 		return nil, err
 	}

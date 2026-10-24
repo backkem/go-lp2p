@@ -134,7 +134,7 @@ func TestDataChannel(t *testing.T) {
 		rxChannels <- ch
 	})
 
-	dc, err := reqConn.CreateDataChannel("chat", &LP2PDataChannelInit{Protocol: "text", ID: ptr[uint64](7)})
+	dc, err := reqConn.CreateDataChannel("chat", &LP2PDataChannelInit{Protocol: "text", ID: ptr[uint64](4)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,21 +165,25 @@ func TestDataChannel(t *testing.T) {
 	}
 
 	rxDc := recv(t, rxChannels, "ondatachannel")
-	if rxDc.Label() != "chat" || rxDc.Protocol() != "text" || rxDc.ID() != 7 {
+	if rxDc.Label() != "chat" || rxDc.Protocol() != "text" || rxDc.ID() != 4 {
 		t.Errorf("remote channel: label %q protocol %q id %d", rxDc.Label(), rxDc.Protocol(), rxDc.ID())
 	}
 
-	// Channel IDs: the lowest free one is taken by default, from either
-	// side; an explicit one must be free and in range.
+	// Channel IDs: by default the requester side takes the lowest free even
+	// ID and the receiver side the lowest free odd one; an explicit one must
+	// be free, of the local parity and in range.
 	var de *DOMException
-	if _, err := reqConn.CreateDataChannel("dup", &LP2PDataChannelInit{ID: ptr[uint64](7)}); !errors.As(err, &de) || de.Name != OperationError {
+	if _, err := reqConn.CreateDataChannel("dup", &LP2PDataChannelInit{ID: ptr[uint64](4)}); !errors.As(err, &de) || de.Name != OperationError {
 		t.Errorf("CreateDataChannel with an ID in use: %v, want OperationError", err)
+	}
+	if _, err := reqConn.CreateDataChannel("odd", &LP2PDataChannelInit{ID: ptr[uint64](5)}); !errors.As(err, &de) || de.Name != OperationError {
+		t.Errorf("CreateDataChannel with the peer's parity: %v, want OperationError", err)
 	}
 	if _, err := reqConn.CreateDataChannel("big", &LP2PDataChannelInit{ID: ptr[uint64](65535)}); !errors.As(err, &de) || de.Name != TypeError {
 		t.Errorf("CreateDataChannel with ID 65535: %v, want TypeError", err)
 	}
 	var autos []*LP2PDataChannel
-	for _, want := range []uint64{0, 1} {
+	for _, want := range []uint64{0, 2} {
 		auto, err := reqConn.CreateDataChannel("auto", nil)
 		if err != nil {
 			t.Fatal(err)
@@ -193,12 +197,12 @@ func TestDataChannel(t *testing.T) {
 		}
 		autos = append(autos, auto)
 	}
-	// The peer has 0, 1 and 7 in use.
+	// The receiver side allocates odd IDs.
 	back, err := rxConn.CreateDataChannel("back", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back.ID() != 2 {
+	if back.ID() != 1 {
 		t.Errorf("peer allocated ID %d, want 2", back.ID())
 	}
 	_ = back.Close()

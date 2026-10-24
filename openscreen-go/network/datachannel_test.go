@@ -114,16 +114,40 @@ func TestDataChannelIDAllocation(t *testing.T) {
 		return dc
 	}
 
+	// The client allocates even IDs, the server odd ones.
 	c0 := openID(client, nil, 0)
-	openID(server, nil, 1) // 0 is in use by the client's channel
+	openID(server, nil, 1)
 	openID(client, nil, 2)
-	explicit := uint64(9)
-	openID(server, &explicit, 9)
-	openID(client, nil, 3)
+	explicit := uint64(5)
+	openID(server, &explicit, 5)
+	openID(server, nil, 3)
+	openID(server, nil, 7)
+	openID(client, nil, 4)
 
 	used := uint64(2)
 	if _, err := client.OpenDataChannel(ctx, DataChannelInit{ID: &used}); !errors.Is(err, ErrDataChannelIDInUse) {
 		t.Errorf("explicit ID in use: %v", err)
+	}
+	odd := uint64(9)
+	if _, err := client.OpenDataChannel(ctx, DataChannelInit{ID: &odd}); !errors.Is(err, ErrDataChannelIDParity) {
+		t.Errorf("explicit ID of the peer's parity: %v", err)
+	}
+
+	// The peer's parity is only enforced locally: a peer that opens a channel
+	// with an ID of ours (here, one in use) is accepted.
+	stray, err := client.base.openDataChannel(ctx, 1, DataChannelInit{Label: "x"})
+	if err != nil {
+		t.Fatalf("channel with the receiver's parity: %v", err)
+	}
+	t.Cleanup(func() { stray.Close() })
+	select {
+	case rx := <-accepted:
+		if rx.ID != 1 {
+			t.Errorf("accepted ID %d, want 1", rx.ID)
+		}
+		t.Cleanup(func() { rx.Close() })
+	case <-ctx.Done():
+		t.Fatal("not accepted")
 	}
 	big := uint64(MaxDataChannelID + 1)
 	if _, err := client.OpenDataChannel(ctx, DataChannelInit{ID: &big}); !errors.Is(err, ErrDataChannelIDOutOfRange) {

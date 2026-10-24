@@ -43,11 +43,12 @@ openscreen does:
   any other result fails it with `ErrDataChannelRejected`, and no response
   within `DataChannelOpenTimeout` (or the context) fails it too.
 - A `channel-id` above 65,534 is answered with `permanent-error`.
-- Without an explicit ID, a channel gets the lowest ID not used by an open
-  channel of the connection, in either direction. Two channels opened at
-  once from both sides can share an ID; that is harmless, as channels are
-  told apart by their stream. An explicit ID that is in use fails with
-  `ErrDataChannelIDInUse`.
+- Without an explicit ID, the QUIC client (requester side) allocates even
+  IDs and the QUIC server (receiver side) odd IDs: the lowest ID of its
+  parity not used by an open channel of the connection. An explicit ID that
+  is in use fails with `ErrDataChannelIDInUse`, one of the peer's parity with
+  `ErrDataChannelIDParity`. IDs from the peer are accepted whatever their
+  parity; channels are told apart by their stream.
 - Closing a channel closes the sending side of its stream (there is no close
   message).
 

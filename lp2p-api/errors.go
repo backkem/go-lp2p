@@ -63,7 +63,7 @@ func toDOMException(err error) error {
 		return newDOMException(TimeoutError, "the request timed out", err)
 	case errors.Is(err, ospc.ErrDataChannelIDOutOfRange):
 		return newDOMException(TypeError, err.Error(), err)
-	case errors.Is(err, ospc.ErrDataChannelIDInUse):
+	case errors.Is(err, ospc.ErrDataChannelIDInUse), errors.Is(err, ospc.ErrDataChannelIDParity):
 		return newDOMException(OperationError, err.Error(), err)
 	case errors.Is(err, ospc.ErrDataChannelRejected):
 		return newDOMException(OperationError, err.Error(), err)
