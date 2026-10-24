@@ -2,16 +2,21 @@ package streams
 
 import (
 	"errors"
+	"io"
 )
 
 var (
+	// ErrValueReaderDone is returned by a ValueReader at the end of its
+	// values. io.EOF is accepted as well.
 	ErrValueReaderDone error = errors.New("iter done reading")
 )
 
+// ValueReader is the underlying source of a ValueReadableStream.
 type ValueReader[T any] interface {
 	Read() (T, error)
 }
 
+// ValueWriteCloser is the underlying sink of a ValueWritableStream.
 type ValueWriteCloser[T any] interface {
 	Write(T) error
 	Close() error
@@ -27,78 +32,75 @@ type ValueBidirectionalStream[T any] struct {
 
 var _ ReadableStream[struct{}] = (*ValueReadableStream[struct{}])(nil)
 
+// ValueReadableStream is a readable stream of values pulled from a
+// ValueReader.
 type ValueReadableStream[T any] struct {
-	inner ValueReader[T]
+	core readableCore[T]
 }
 
 func NewValueReadableStream[T any](iter ValueReader[T]) *ValueReadableStream[T] {
-	return &ValueReadableStream[T]{
-		inner: iter,
+	s := &ValueReadableStream[T]{}
+	s.core.pull = func() (T, error) {
+		val, err := iter.Read()
+		if err == ErrValueReaderDone || err == io.EOF {
+			return val, errDone
+		}
+		return val, err
 	}
+	return s
 }
 
-func (s *ValueReadableStream[T]) GetReader(opts *ReadableStreamGetReaderOptions) interface{} {
-	// if opts != nil && opts.Mode == ReadableStreamReaderModeBYOD {
-	// 	return &IterReadableStreamBYOBReader[T]{
-	// 		inner: s.inner,
-	// 	}
-	// }
-	return &ValueReadableStreamDefaultReader[T]{
-		inner: s.inner,
+func (s *ValueReadableStream[T]) GetReader(opts *ReadableStreamGetReaderOptions) ReadableStreamDefaultReader[T] {
+	if !supportedMode(opts) {
+		return unsupportedReader[T]{}
 	}
+	return &ValueReadableStreamDefaultReader[T]{stream: s}
 }
+
+var _ ReadableStreamDefaultReader[struct{}] = (*ValueReadableStreamDefaultReader[struct{}])(nil)
 
 type ValueReadableStreamDefaultReader[T any] struct {
-	inner ValueReader[T]
+	stream *ValueReadableStream[T]
 }
 
+// Read returns the next value, see ReadableStreamDefaultReader.
 func (dr *ValueReadableStreamDefaultReader[T]) Read() (ReadableStreamReadResult[T], error) {
-	val, err := dr.inner.Read()
-	if err != nil {
-		if err == ErrValueReaderDone {
-			return ReadableStreamReadResult[T]{
-				Done: true,
-			}, nil
-		}
-		return ReadableStreamReadResult[T]{}, err
-	}
-	return ReadableStreamReadResult[T]{
-		Val:  val,
-		Done: false,
-	}, nil
+	return dr.stream.core.read()
 }
 
 var _ WritableStream[struct{}] = (*ValueWritableStream[struct{}])(nil)
 
-// ValueWritableStream[T] represents a basic byte stream
+// ValueWritableStream is a writable stream of values backed by a
+// ValueWriteCloser.
 type ValueWritableStream[T any] struct {
-	inner ValueWriteCloser[T]
+	core writableCore[T]
 }
 
 func NewValueWritableStream[T any](writer ValueWriteCloser[T]) *ValueWritableStream[T] {
-	return &ValueWritableStream[T]{
-		inner: writer,
-	}
+	s := &ValueWritableStream[T]{}
+	s.core.write = writer.Write
+	s.core.close = writer.Close
+	return s
 }
 
 func (s *ValueWritableStream[T]) GetWriter() WritableStreamDefaultWriter[T] {
-	return &ValueWritableStreamDefaultWriter[T]{
-		inner: s.inner,
-	}
+	return &ValueWritableStreamDefaultWriter[T]{stream: s}
 }
 
-func (dr *ValueWritableStream[T]) Close() error {
-	return dr.inner.Close()
+func (s *ValueWritableStream[T]) Close() error {
+	return s.core.closeStream()
 }
+
+var _ WritableStreamDefaultWriter[struct{}] = (*ValueWritableStreamDefaultWriter[struct{}])(nil)
 
 type ValueWritableStreamDefaultWriter[T any] struct {
-	inner ValueWriteCloser[T]
+	stream *ValueWritableStream[T]
 }
 
-func (dr *ValueWritableStreamDefaultWriter[T]) Write(val T) error {
-	return dr.inner.Write(val)
+func (dw *ValueWritableStreamDefaultWriter[T]) Write(val T) error {
+	return dw.stream.core.writeChunk(val)
 }
 
-func (dr *ValueWritableStreamDefaultWriter[T]) Close() error {
-	return dr.inner.Close()
+func (dw *ValueWritableStreamDefaultWriter[T]) Close() error {
+	return dw.stream.core.closeStream()
 }
