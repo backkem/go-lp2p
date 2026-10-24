@@ -93,10 +93,10 @@ func main() {
 	flag.Parse()
 	demo.Watchdog(20 * time.Second)
 
-	// One PIN relay per device: the user reads the PIN off the device
+	// The user reads the PIN off the device
 	// they picked and types it on the phone.
 	relay := ua.NewPINRelay()
-	phone := demo.NewBrowser("Phone", &ua.Scripted{Pick: pickWhenAllListed, Enter: relay.Enter, Present: relay.Present})
+	phone := demo.NewUserBrowser("Phone", &ua.Scripted{Pick: pickWhenAllListed, Enter: relay.Enter, Present: relay.Present})
 	defer phone.Close()
 
 	// Discovery runs from the moment the phone's page creates a request,

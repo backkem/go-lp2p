@@ -166,7 +166,7 @@ func main() {
 	presenter, consumer := demo.Pair()
 	consumer.Pick = ua.PickByName("Upload target")
 	receiverDevice := demo.NewBrowser("Receiver device", presenter)
-	requesterDevice := demo.NewBrowser("Requester device", consumer)
+	requesterDevice := demo.NewUserBrowser("Requester device", consumer)
 	defer receiverDevice.Close()
 	defer requesterDevice.Close()
 

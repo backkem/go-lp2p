@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sync"
 	"time"
 
 	lp2p "github.com/backkem/go-lp2p/lp2p-api"
@@ -22,11 +21,6 @@ var interactive = flag.Bool("interactive", false, "ask the user on the terminal 
 // Interactive reports whether -interactive was given. Call after flag.Parse.
 func Interactive() bool { return *interactive }
 
-var (
-	cliOnce sync.Once
-	cli     *ua.CLI
-)
-
 // Browser is one simulated device running a browser with one page open.
 type Browser struct {
 	Name   string
@@ -34,17 +28,24 @@ type Browser struct {
 	Window *lp2p.Window
 }
 
-// NewBrowser starts a browser. The simulated user follows script; with
-// -interactive, all browsers share the terminal instead.
+// NewBrowser starts a browser whose user follows script.
 func NewBrowser(name string, script *ua.Scripted) *Browser {
-	var ui ua.UI = script
-	if Interactive() {
-		cliOnce.Do(func() { cli = ua.NewCLI(os.Stdin, os.Stderr) })
-		ui = cli
-	} else {
-		script.Name = name
-		script.Out = os.Stderr
+	script.Name = name
+	script.Out = os.Stderr
+	return newBrowser(name, script)
+}
+
+// NewUserBrowser starts the browser of the person running the example: with
+// -interactive they are asked on the terminal (device picker, PIN entry),
+// otherwise they follow script. Only one browser can own the terminal.
+func NewUserBrowser(name string, script *ua.Scripted) *Browser {
+	if !Interactive() {
+		return NewBrowser(name, script)
 	}
+	return newBrowser(name, ua.NewCLI(os.Stdin, os.Stderr))
+}
+
+func newBrowser(name string, ui ua.UI) *Browser {
 	u, err := ua.New(ua.Config{Name: name, UI: ui, PairingTimeout: 2 * time.Second})
 	if err != nil {
 		log.Fatal(err)

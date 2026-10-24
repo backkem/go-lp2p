@@ -104,7 +104,7 @@ func main() {
 	presenter, consumer := demo.Pair()
 	consumer.Pick = ua.PickByName("Chat receiver") // the user picks it in the device picker
 	receiverDevice := demo.NewBrowser("Receiver device", presenter)
-	requesterDevice := demo.NewBrowser("Requester device", consumer)
+	requesterDevice := demo.NewUserBrowser("Requester device", consumer)
 	defer receiverDevice.Close()
 	defer requesterDevice.Close()
 
