@@ -8,7 +8,6 @@ package ospdemointerop
 // without going through ospc's connection state machine.
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -28,6 +27,7 @@ import (
 	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/quicvarint"
 )
 
 // Type keys used by the probes (network.bs / application.bs appendix; the
@@ -119,16 +119,11 @@ var detEnc = func() cbor.EncMode {
 
 // encodeWire frames a message: varint type key + CBOR body.
 func encodeWire(typeKey uint64, body map[uint64]any) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := ospc.WriteTypeKey(ospc.TypeKey(typeKey), &buf); err != nil {
-		return nil, err
-	}
 	b, err := detEnc.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	buf.Write(b)
-	return buf.Bytes(), nil
+	return append(quicvarint.Append(nil, typeKey), b...), nil
 }
 
 // wireConn sends each message on its own unidirectional stream and reads

@@ -117,7 +117,7 @@ fingerprint check.
 | DNS-SD service | `_openscreen._udp` | same | same (`osp_constants.h:17`) |
 | TXT `fp` | base64 SHA-256 of **SPKI** (RFC 7469) | SPKI | base64 SHA-256 of **whole DER cert** (`quic_agent_certificate.cc:80`) |
 | TXT `mv` | required, varint | set. Parsed if present, tolerated if absent | **not set** (constant defined, unused) |
-| TXT `at` | required | 9 random chars. Not wired into auth (`getAuthInitiationToken` returns `"todo"`) | 16 chars (`quic_server.cc:32`). Watcher requires it, nothing checks it |
+| TXT `at` | required | 9 random chars. Sent in the first auth message and checked on receipt (wired in after this table was first written) | 16 chars (`quic_server.cc:32`). Watcher requires it, nothing checks it |
 | TXT `sn` | — (not specified, see #293/#365) | set, and **required by `Dial`** | absent |
 | Other TXT | — | `fn=TODO:Remove?` | — |
 | ALPN | `osp` | `osp` | `osp` |
@@ -132,7 +132,7 @@ fingerprint check.
 | Unknown type key | close connection with error 404 | stops reading that stream, no close | buffers unhandled, no close (`message_demuxer.cc:281-296`) |
 | Type keys | appendix | same 47 | same 47 (identical numbers) |
 | CDDL shapes | current | follows spec | older copy: `presentation-connection-close-event` keys 2/3 swapped (`connection-count`/`error-message`); `remote-playback-state.supports` keys 1-5 vs 0-4; spec adds `null` to `epoch`/`duration`/`resolution` |
-| Metadata discovery | `agent-info-request`/`-response` | sends `auth-capabilities` + `agent-info-request` on connect, **waits for both** from the peer, no timeout | never sends 10, no handler for 10 |
+| Metadata discovery | `agent-info-request`/`-response` | sends `auth-capabilities` + `agent-info-request` on connect, **waits for both** from the peer (listener gives up after 10s; `Dial` bounded by ctx) | never sends 10, no handler for 10 |
 | Authentication | SPAKE2 mandatory before other messages | SPAKE2 implemented | `authentication_{alice,bob}` exist but unused. **No auth**; app messages accepted unauthenticated |
 
 ## The connection-ID bug (Chromium side)
@@ -167,8 +167,8 @@ Evidence: `-v` logs from both directions, quiche and quic-go sources.
 
 ## What would need to change
 
-**Go (ospc).** Documented, not changed here: another pair is refactoring
-`connection*.go`, `listener.go` and `dialer.go`.
+**Go (ospc).** Documented, not changed here. Since this was written, the connection
+lifecycle rework on main has addressed some of these; they are marked below.
 
 - `Dial` (`dialer.go`):
   - Don't require TXT `sn`; it isn't in the spec.
@@ -179,14 +179,16 @@ Evidence: `-v` logs from both directions, quiche and quic-go sources.
   certificate without a SAN. The spec doesn't ask the server to verify a hostname.
   The listener could pin nothing, or verify after authentication.
 - `exchangeInfo`/`checkAgentInfoComplete` (`connection_network.go`): the handshake
-  phase waits forever for the peer's `auth-capabilities` and `agent-info-response`.
-  It needs a timeout and a clear error for peers that don't speak the metadata/auth
-  phase.
-- Unknown type key: close the connection with application error 404 (network.bs
-  §Messages); today ospc only stops reading that stream.
+  phase waits for the peer's `auth-capabilities` and `agent-info-response`. The
+  listener now gives up after 10s and `Dial` is bounded by its context, but there is
+  still no clear error for peers that don't speak the metadata/auth phase.
+- Unknown type key: network.bs says to close the connection with application error
+  404; ospc deliberately doesn't while the protocol is in flux and only stops reading
+  that stream.
 - `application` package: sends on bidirectional streams. application.bs:337 requires
   unidirectional streams, which is what osp_demo sends and expects.
-- Auth initiation token: `at` isn't wired into auth (`"todo"` placeholder).
+- Auth initiation token: now wired in on main (the advertised `at` is sent in the
+  first auth message and checked on receipt).
 
 **Chromium (Open Screen Library)**
 
