@@ -216,10 +216,11 @@ func (in *inbox) wait(timeout time.Duration, types ...string) (map[string]any, e
 // Go sender -> C++ cast_receiver
 
 type cppReceiver struct {
+	name  string // unique friendly name (-f), to spot it among other receivers
 	proc  *proc
 	addr  string
 	port  int
-	roots *x509.CertPool
+	roots []*x509.Certificate
 }
 
 // startCppReceiver generates developer credentials with `cast_receiver -g`
@@ -243,13 +244,21 @@ func startCppReceiver(t *testing.T, discovery bool) *cppReceiver {
 	if err != nil {
 		t.Fatalf("read generated root: %v", err)
 	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(pemBytes) {
-		t.Fatalf("generated root certificate does not parse")
+	blk, _ := pem.Decode(pemBytes)
+	if blk == nil {
+		t.Fatalf("generated root certificate is not PEM")
 	}
+	root, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatalf("generated root certificate: %v", err)
+	}
+	roots := []*x509.Certificate{root}
 
 	port := freePort(t)
-	args := []string{"-v", "-p", keyPath, "-d", crtPath, "-r", strconv.Itoa(port)}
+	suffix := make([]byte, 4)
+	_, _ = rand.Read(suffix)
+	name := fmt.Sprintf("go-interop-%x", suffix)
+	args := []string{"-v", "-p", keyPath, "-d", crtPath, "-r", strconv.Itoa(port), "-f", name}
 	if !discovery {
 		args = append(args, "-x")
 	}
@@ -261,7 +270,7 @@ func startCppReceiver(t *testing.T, discovery bool) *cppReceiver {
 	if !p.waitLog("CastService is running", 15*time.Second) {
 		t.Fatalf("cast_receiver did not start")
 	}
-	return &cppReceiver{proc: p, addr: addr, port: port, roots: roots}
+	return &cppReceiver{name: name, proc: p, addr: addr, port: port, roots: roots}
 }
 
 // rawHeartbeat exchanges PING/PONG directly on the socket, before a Channel
@@ -453,12 +462,14 @@ func TestInteropDiscoveryCppReceiver(t *testing.T) {
 	}
 	for r := range found {
 		t.Logf("discovered %q id=%s port=%d v4=%v txt=%v", r.FriendlyName, r.UniqueID, r.Port, r.IPv4, r.TXTExtras)
-		if r.Port == rcv.port {
+		// Other Cast receivers may be on the network (or this host): match
+		// the unique friendly name.
+		if r.FriendlyName == rcv.name {
 			t.Logf("found cast_receiver: id=%s fn=%q md=%q ve=%d ca=%#x st=%d", r.UniqueID, r.FriendlyName, r.ModelName, r.ProtocolVersion, r.Capabilities, r.Status)
 			return
 		}
 	}
-	t.Fatalf("cast_receiver on port %d not discovered within 10s", rcv.port)
+	t.Fatalf("cast_receiver %q not discovered within 10s", rcv.name)
 }
 
 // ---------------------------------------------------------------------------

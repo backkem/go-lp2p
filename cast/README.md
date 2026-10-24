@@ -42,6 +42,13 @@ mDNS _googlecast._tcp  ->  TLS over TCP :8009  ->  [u32 BE length][CastMessage p
   - Pluggable `Verifier`; `CertVerifier` ports openscreen's checks: TLS
     certificate lifetime, nonce echo, device chain, SHA1/SHA256 policy,
     RSASSA-PKCS1v15 / PSS signature over `nonce || TLS cert DER`
+  - Device chain validation ported from openscreen's `FindCertificatePath`
+    (path building by subject name, RSA >= 2048, SHA-1/SHA-2 RSA
+    signatures as genuine devices use, key usage, basic constraints,
+    path length, name constraints); checked against openscreen's
+    Chromecast/Nexus Player/Vizio test chains
+  - `GoogleCastRoots()`: the Cast Root CA and Eureka Root CA built into
+    openscreen
   - `InsecureVerifier` for tests and trusted networks
 - Discovery: `_googlecast._tcp` browse / advertise with `id`, `ve`, `ca`,
   `st`, `fn`, `md` TXT records
@@ -55,7 +62,7 @@ ch := cast.NewChannel(sock, &cast.Config{Heartbeat: cast.DefaultHeartbeat})
 ch.Handle(cast.ReceiverNamespace, func(ch *cast.Channel, m *cast.CastMessage) { /* ... */ })
 ch.Start()
 
-err := cast.Authenticate(ctx, ch, &cast.CertVerifier{Roots: castRoots})
+err := cast.Authenticate(ctx, ch, &cast.CertVerifier{Roots: cast.GoogleCastRoots()})
 vc := cast.VirtualConnection{LocalID: cast.PlatformSenderID, PeerID: cast.PlatformReceiverID}
 err = ch.Connect(ctx, vc)
 err = ch.SendString(vc, cast.ReceiverNamespace, `{"type":"GET_STATUS","requestId":1}`)
@@ -65,16 +72,48 @@ See `example_test.go` for a loopback sender and receiver.
 
 ### Limitations
 
-- Genuine Cast devices chain to Google's Cast root CAs, which are not shipped
-  here; pass them to `CertVerifier.Roots`. CRLs are not checked.
+- CRLs are not checked (openscreen senders treat them as optional too), and
+  the audio-only device policy is not reported.
 - Application protocols on top of the channel (receiver/app control, media,
   mirroring) are out of scope.
 - No adapter to `openscreen-go`'s `NetworkTransport`: Cast is a
   message-oriented channel multiplexed by namespace and endpoint ids, while
   the OSP interfaces are QUIC stream oriented.
 
+### Interop tests
+
+`interop_test.go` (build tag `interop`) runs against the standalone Cast
+binaries of Chromium's [openscreen](https://chromium.googlesource.com/openscreen/):
+
+```sh
+# in an openscreen checkout with a configured build dir
+ninja -C out/debug cast_receiver cast_sender
+OPENSCREEN_OUT_DIR=/path/to/openscreen/out/debug go test -tags interop -run Interop -v ./cast/
+```
+
+`OPENSCREEN_OUT_DIR` defaults to `/work/openscreen/out/debug`; tests skip
+when a binary is missing. They use free ports, temp dirs for credentials,
+and kill the C++ process group on exit. Scenarios:
+
+- Go sender -> `cast_receiver` (credentials from `cast_receiver -g`,
+  discovery off, dialled on 127.0.0.1): TLS, PING/PONG, device auth
+  verified against the generated root, CONNECT, `GET_STATUS`,
+  `GET_APP_AVAILABILITY`, `LAUNCH` of the mirroring app (`0F5096E8`),
+  CONNECT to its `transportId`, `OFFER` -> `ANSWER` on
+  `urn:x-cast:com.google.cast.webrtc`, `STOP`, keep-alive.
+- `_googlecast._tcp` browse finds `cast_receiver` (by a unique `-f` name).
+- `cast_sender` -> Go receiver, dialled directly and via mDNS discovery of
+  an `Advertise`d receiver: TLS, device auth with a Go developer PKI
+  (`cast_sender -d root.pem`), `LAUNCH`, app CONNECT and the streaming
+  `OFFER`, which the test declines (Cast Streaming/RTP is out of scope).
+
+Notes: openscreen's sender never answers `PING`, so a Go receiver must not
+enable a liveness timeout against it. `Advertise` publishes all interface
+addresses, so listen on all of them.
+
 ### Roadmap
 
+- [x] Interop testing against openscreen's standalone sender/receiver
 - [ ] Interop testing against a real Cast device
 - [ ] CRL verification
 - [ ] Receiver / media namespace helpers
