@@ -31,7 +31,7 @@ func mainErr() error {
 		close(done)
 	}()
 
-	err := simPeerB()
+	err := simPeerB(done)
 	if err != nil {
 		log.Fatalf("Peer B error: %v\n", err)
 	}
@@ -93,7 +93,9 @@ func simPeerA() error {
 	return nil
 }
 
-func simPeerB() error {
+// simPeerB waits for peerADone before closing its connection: closing
+// right after sending can discard the message before Peer A reads it.
+func simPeerB(peerADone <-chan struct{}) error {
 	d, err := ospc.Discover()
 	if err != nil {
 		return err
@@ -149,5 +151,6 @@ func simPeerB() error {
 
 	log.Printf("Peer B: sent message: %s\n", msg)
 
+	<-peerADone
 	return nil
 }

@@ -1,8 +1,10 @@
 package ospc
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -177,95 +179,188 @@ func (l *quicNetworkListener) Addr() net.Addr {
 
 var _ NetworkConnection = &quicNetworkConnection{}
 
-// QuicNetworkConnection reads every incoming stream concurrently, so a stalled
+// maxEarlyStreams bounds the application streams held during the network
+// phase, see quicNetworkConnection.
+const maxEarlyStreams = 64
+
+// quicNetworkConnection reads every incoming stream concurrently, so a stalled
 // stream doesn't block messages on other streams. Messages within a stream
-// are delivered in order. Each outgoing message is sent on its own
+// are delivered in order. Each outgoing network message is sent on its own
 // unidirectional stream.
 //
-// Unidirectional streams keep being read after the hand-off to the
-// application protocol, which only uses bidirectional streams. This keeps
-// agent-status messages, and with that the keep-alive, working.
+// Incoming streams are routed by the type key of their first message:
+//   - agent-status messages are always handled by the keep-alive;
+//   - during the network phase, network protocol messages (agent-info and
+//     auth-*) are delivered to ReadMessage;
+//   - any other stream is an application stream. During the network phase
+//     it is held, unread past its type key, and handed to the application
+//     connection once the connection is handed off: a peer that completed
+//     authentication first may already send application messages. After the
+//     hand-off, streams are handed over right away.
+//
+// Application streams can be unidirectional, as application.bs requires, or
+// bidirectional, as used by the data channel and pooled WebTransport
+// protocols.
 type quicNetworkConnection struct {
 	conn      quic.Connection
 	keepAlive *keepAlive
 	log       *slog.Logger
 
-	msgCh chan interface{}
+	msgCh      chan interface{}
+	appStreams chan ApplicationStream
 
 	// Lifecycle
-	ctx        context.Context // Lifetime of the connection
-	cancel     context.CancelFunc
-	bidiCancel context.CancelFunc // Stops accepting bidirectional streams
-	netDone    chan struct{}      // Closed on hand-off or close
-	wg         sync.WaitGroup
+	ctx     context.Context // Lifetime of the connection
+	cancel  context.CancelFunc
+	netDone chan struct{} // Closed on hand-off or close
+	wg      sync.WaitGroup
 
-	mu        sync.Mutex // Protects state below
-	closeErr  error
-	closeOnce sync.Once
+	mu           sync.Mutex // Protects state below
+	closeErr     error
+	earlyStreams []*quicApplicationStream // Held during the network phase.
+	closeOnce    sync.Once
 }
 
 func newQuicNetworkConnection(conn quic.Connection, conf KeepAliveConfig, log *slog.Logger) *quicNetworkConnection {
 	ctx, cancel := context.WithCancel(context.Background())
-	bidiCtx, bidiCancel := context.WithCancel(ctx)
 	q := &quicNetworkConnection{
 		conn:       conn,
 		msgCh:      make(chan interface{}),
+		appStreams: make(chan ApplicationStream),
 		ctx:        ctx,
 		cancel:     cancel,
-		bidiCancel: bidiCancel,
 		netDone:    make(chan struct{}),
 		log:        log,
 	}
 	q.keepAlive = newKeepAlive(conf, q.sendMessage, log)
 
-	// Accept unidirectional streams (spec-compliant peers)
+	// Unidirectional streams, used for all OSP messages.
 	q.wg.Add(1)
-	go q.acceptStreams(func() (quic.ReceiveStream, error) {
-		return conn.AcceptUniStream(ctx)
+	go q.acceptStreams(func() (quic.ReceiveStream, quic.SendStream, error) {
+		s, err := conn.AcceptUniStream(ctx)
+		return s, nil, err
 	})
 
-	// Accept bidirectional streams (backward compat), network phase only.
+	// Bidirectional streams: network messages from older ospc versions and
+	// application protocols that need them.
 	q.wg.Add(1)
-	go q.acceptStreams(func() (quic.ReceiveStream, error) {
-		return conn.AcceptStream(bidiCtx)
+	go q.acceptStreams(func() (quic.ReceiveStream, quic.SendStream, error) {
+		s, err := conn.AcceptStream(ctx)
+		return s, s, err
 	})
 
 	q.keepAlive.start()
 	return q
 }
 
-func (q *quicNetworkConnection) acceptStreams(accept func() (quic.ReceiveStream, error)) {
+func (q *quicNetworkConnection) acceptStreams(accept func() (quic.ReceiveStream, quic.SendStream, error)) {
 	defer q.wg.Done()
 	for {
-		s, err := accept()
+		r, w, err := accept()
 		if err != nil {
 			return
 		}
 		q.wg.Add(1)
-		go q.readStream(s)
+		go q.readStream(r, w)
 	}
 }
 
-// readStream reads the messages of a single stream in order.
-func (q *quicNetworkConnection) readStream(s quic.ReceiveStream) {
+// isNetworkTypeKey reports whether key is a network protocol message
+// handled during the network phase: metadata discovery and authentication.
+func isNetworkTypeKey(key TypeKey) bool {
+	switch key {
+	case typeKeyAgentInfoRequest, typeKeyAgentInfoResponse,
+		typeKeyAgentStatusRequest, typeKeyAgentStatusResponse,
+		typeKeyAuthSpake2NeedPskDeprecated:
+		return true
+	}
+	return key >= 1000 && key < 1100 // auth-*
+}
+
+// isKeepAliveTypeKey reports whether key is an agent-status message, handled
+// by the transport for the lifetime of the connection.
+func isKeepAliveTypeKey(key TypeKey) bool {
+	return key == typeKeyAgentStatusRequest || key == typeKeyAgentStatusResponse
+}
+
+// readStream routes an incoming stream by the type key of its first message.
+// w is nil for unidirectional streams.
+func (q *quicNetworkConnection) readStream(r quic.ReceiveStream, w quic.SendStream) {
 	defer q.wg.Done()
+
+	rec := &recordingReader{r: r}
+	typeKey, err := readTypeKey(rec)
+	if err != nil {
+		if err != io.EOF {
+			q.logReadError(r, err)
+		}
+		r.CancelRead(0)
+		return
+	}
+
+	q.mu.Lock()
+	handedOff := errors.Is(q.closeErr, ErrTransportHandedOff)
+	q.mu.Unlock()
+	if !isKeepAliveTypeKey(typeKey) && (handedOff || !isNetworkTypeKey(typeKey)) {
+		q.routeApplicationStream(&quicApplicationStream{
+			recv:      r,
+			send:      w,
+			r:         io.MultiReader(bytes.NewReader(rec.buf), r),
+			keepAlive: q.keepAlive,
+		})
+		return
+	}
+
+	msg, err := readMessageBody(r, typeKey)
 	for {
-		msg, err := readMessage(s)
 		if err == io.EOF {
 			return
 		} else if err != nil {
-			select {
-			case <-q.ctx.Done():
-			default:
-				q.log.Debug("quic: failed to read message", "stream", s.StreamID(), "err", err)
-			}
-			s.CancelRead(0)
+			q.logReadError(r, err)
+			r.CancelRead(0)
 			return
 		}
-
 		if !q.dispatch(msg) {
 			return
 		}
+		msg, err = readMessage(r)
+	}
+}
+
+func (q *quicNetworkConnection) logReadError(s quic.ReceiveStream, err error) {
+	select {
+	case <-q.ctx.Done():
+	default:
+		q.log.Debug("quic: failed to read message", "stream", s.StreamID(), "err", err)
+	}
+}
+
+// routeApplicationStream holds s during the network phase and hands it to
+// the application connection after the hand-off.
+func (q *quicNetworkConnection) routeApplicationStream(s *quicApplicationStream) {
+	q.mu.Lock()
+	switch {
+	case q.closeErr == nil:
+		if len(q.earlyStreams) >= maxEarlyStreams {
+			q.mu.Unlock()
+			q.log.Debug("quic: too many application streams before hand-off, dropping stream")
+			s.cancel()
+			return
+		}
+		q.earlyStreams = append(q.earlyStreams, s)
+		q.mu.Unlock()
+		return
+	case !errors.Is(q.closeErr, ErrTransportHandedOff):
+		q.mu.Unlock()
+		s.cancel()
+		return
+	}
+	q.mu.Unlock()
+
+	select {
+	case q.appStreams <- s:
+	case <-q.ctx.Done():
+		s.cancel()
 	}
 }
 
@@ -280,8 +375,7 @@ func (q *quicNetworkConnection) dispatch(msg interface{}) bool {
 	case q.msgCh <- msg:
 		return true
 	case <-q.netDone:
-		// Handed off: the remaining unidirectional stream traffic is only
-		// for the keep-alive.
+		// Handed off: only the keep-alive is handled by the transport.
 		select {
 		case <-q.ctx.Done():
 			return false
@@ -374,9 +468,28 @@ func (q *quicNetworkConnection) endNetworkPhase(err error) error {
 		return q.closeErr
 	}
 	q.closeErr = err
-	q.bidiCancel()
 	close(q.netDone)
+	if !errors.Is(err, ErrTransportHandedOff) {
+		for _, s := range q.earlyStreams {
+			s.cancel()
+		}
+		q.earlyStreams = nil
+	}
 	return nil
+}
+
+// popEarlyStream returns the next application stream received before the
+// hand-off, or nil.
+func (q *quicNetworkConnection) popEarlyStream() *quicApplicationStream {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if len(q.earlyStreams) == 0 {
+		return nil
+	}
+	s := q.earlyStreams[0]
+	q.earlyStreams = q.earlyStreams[1:]
+	return s
 }
 
 func (q *quicNetworkConnection) IntoApplicationConnection() (ApplicationConnection, error) {
@@ -399,22 +512,40 @@ func (q *quicNetworkConnection) closeConn(code quic.ApplicationErrorCode, reason
 		q.cancel()
 		err = q.conn.CloseWithError(code, reason)
 		q.wg.Wait()
+
+		q.mu.Lock()
+		for _, s := range q.earlyStreams {
+			s.cancel()
+		}
+		q.earlyStreams = nil
+		q.mu.Unlock()
 	})
 	return err
 }
 
 var _ ApplicationConnection = &quicApplicationConnection{}
+var _ UniStreamOpener = &quicApplicationConnection{}
 
 type quicApplicationConnection struct {
 	owner *quicNetworkConnection
 }
 
+// AcceptStream returns the next incoming application stream, unidirectional
+// or bidirectional. Unidirectional streams fail on Write.
 func (q *quicApplicationConnection) AcceptStream(ctx context.Context) (ApplicationStream, error) {
-	s, err := q.owner.conn.AcceptStream(ctx)
-	if err != nil {
-		return nil, err
+	if s := q.owner.popEarlyStream(); s != nil {
+		return s, nil
 	}
-	return &quicApplicationStream{stream: s, keepAlive: q.owner.keepAlive}, nil
+	select {
+	case s := <-q.owner.appStreams:
+		return s, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-q.owner.conn.Context().Done():
+		return nil, context.Cause(q.owner.conn.Context())
+	case <-q.owner.ctx.Done():
+		return nil, ErrTransportClosed
+	}
 }
 
 func (q *quicApplicationConnection) OpenStreamSync(ctx context.Context) (ApplicationStream, error) {
@@ -422,7 +553,17 @@ func (q *quicApplicationConnection) OpenStreamSync(ctx context.Context) (Applica
 	if err != nil {
 		return nil, err
 	}
-	return &quicApplicationStream{stream: s, keepAlive: q.owner.keepAlive}, nil
+	return &quicApplicationStream{recv: s, send: s, r: s, keepAlive: q.owner.keepAlive}, nil
+}
+
+// OpenUniStreamSync opens a unidirectional application stream. Read fails on
+// the returned stream.
+func (q *quicApplicationConnection) OpenUniStreamSync(ctx context.Context) (ApplicationStream, error) {
+	s, err := q.owner.conn.OpenUniStreamSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &quicApplicationStream{send: s, keepAlive: q.owner.keepAlive}, nil
 }
 
 func (q *quicApplicationConnection) Close() error {
@@ -431,25 +572,63 @@ func (q *quicApplicationConnection) Close() error {
 
 var _ ApplicationStream = &quicApplicationStream{}
 
+// ErrStreamDirection is returned when reading from a stream that can only be
+// written or writing to a stream that can only be read: one half of a
+// unidirectional stream.
+var ErrStreamDirection = errors.New("unidirectional stream: operation not supported in this direction")
+
+// quicApplicationStream is a bidirectional stream or one half of a
+// unidirectional stream: recv or send is nil.
 type quicApplicationStream struct {
-	stream    quic.Stream
+	recv      quic.ReceiveStream
+	send      quic.SendStream
+	r         io.Reader // Reads recv, possibly replaying already read bytes.
 	keepAlive *keepAlive
 }
 
 func (s *quicApplicationStream) Read(p []byte) (int, error) {
-	return s.stream.Read(p)
+	if s.r == nil {
+		return 0, ErrStreamDirection
+	}
+	return s.r.Read(p)
 }
 
 // Write resets the keep-alive timer, as data sent on any stream counts as
 // connection activity.
 func (s *quicApplicationStream) Write(p []byte) (int, error) {
-	n, err := s.stream.Write(p)
+	if s.send == nil {
+		return 0, ErrStreamDirection
+	}
+	n, err := s.send.Write(p)
 	if n > 0 {
 		s.keepAlive.reset()
 	}
 	return n, err
 }
 
+// Close closes the sending side. For a receive-only stream it stops reading,
+// discarding anything not read yet.
 func (s *quicApplicationStream) Close() error {
-	return s.stream.Close()
+	if s.send != nil {
+		return s.send.Close()
+	}
+	s.recv.CancelRead(0)
+	return nil
+}
+
+func (s *quicApplicationStream) streamID() quic.StreamID {
+	if s.recv != nil {
+		return s.recv.StreamID()
+	}
+	return s.send.StreamID()
+}
+
+// cancel aborts both directions of the stream.
+func (s *quicApplicationStream) cancel() {
+	if s.recv != nil {
+		s.recv.CancelRead(0)
+	}
+	if s.send != nil {
+		s.send.CancelWrite(0)
+	}
 }

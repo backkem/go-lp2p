@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	spake2 "github.com/backkem/spake2-go"
 )
@@ -63,22 +65,79 @@ func (c *baseConnection) exchangeInfo() (<-chan struct{}, error) {
 	return state.done, nil
 }
 
-// awaitInfo runs the info exchange and waits for it to complete. It does not
-// close the connection on failure.
+// ErrNoAgentInfo is returned by Dial and the listener when the peer doesn't
+// complete metadata discovery in time: it didn't answer agent-info-request
+// or didn't send auth-capabilities. Peers that don't implement network.bs
+// "Metadata Discovery" and "Authentication" fail this way, see
+// InteropQuirks.TolerateMissingAgentInfo.
+var ErrNoAgentInfo = errors.New("peer did not complete metadata discovery")
+
+// infoExchangeTimeout bounds the info exchange of new connections.
+const infoExchangeTimeout = 10 * time.Second
+
+// tolerateInfoGrace is how long the info exchange waits with the
+// TolerateMissingAgentInfo quirk before proceeding without it.
+const tolerateInfoGrace = 2 * time.Second
+
+// awaitInfo runs the info exchange and waits for it to complete, at most
+// infoExchangeTimeout. It does not close the connection on failure.
 func (c *baseConnection) awaitInfo(ctx context.Context) error {
 	done, err := c.exchangeInfo()
 	if err != nil {
 		return fmt.Errorf("failed to exchange info: %w", err)
 	}
 
+	timeout := infoExchangeTimeout
+	tolerate := c.localAgent.quirks.TolerateMissingAgentInfo
+	if tolerate {
+		timeout = tolerateInfoGrace
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("%w (missing %s): %w", ErrNoAgentInfo, c.missingInfo(), ctx.Err())
 	case <-c.ctx.Done():
 		return c.err()
 	case <-done:
 		return nil
+	case <-timer.C:
+		if tolerate {
+			c.proceedWithoutInfo()
+			return nil
+		}
+		return fmt.Errorf("%w within %v (missing %s)", ErrNoAgentInfo, timeout, c.missingInfo())
 	}
+}
+
+// missingInfo describes which part of the info exchange is missing.
+func (c *baseConnection) missingInfo() string {
+	var missing []string
+	if !c.remoteAgent.HasInfo() {
+		missing = append(missing, "agent-info-response")
+	}
+	if !c.remoteAgent.HasAuthenticationInfo() {
+		missing = append(missing, "auth-capabilities")
+	}
+	if len(missing) == 0 {
+		return "nothing"
+	}
+	return strings.Join(missing, " and ")
+}
+
+// proceedWithoutInfo continues after an incomplete info exchange, see
+// InteropQuirks.TolerateMissingAgentInfo.
+func (c *baseConnection) proceedWithoutInfo() {
+	c.log.Warn("interop quirk: peer did not complete metadata discovery, proceeding without it", "missing", c.missingInfo())
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.remoteAgent.HasAuthenticationInfo() {
+		// Assume equal capabilities: the advertising agent presents the PSK.
+		c.remoteAgent.setAuthenticationInfo(*c.localAgent.AuthenticationInfo())
+	}
+	c.determineAuthenticationRole()
 }
 
 // caller should hold connection lock.
@@ -132,6 +191,9 @@ func (c *baseConnection) determineAuthenticationRole() {
 func (c *baseConnection) getAuthenticationRole() AuthenticationRole {
 	localAuthInfo := c.localAgent.AuthenticationInfo()
 	remoteAuthInfo := c.remoteAgent.AuthenticationInfo()
+	if remoteAuthInfo == nil {
+		remoteAuthInfo = localAuthInfo
+	}
 
 	if localAuthInfo.PSKConfig.EaseOfInput == remoteAuthInfo.PSKConfig.EaseOfInput {
 		if c.agentRole == AgentRoleServer {
@@ -152,6 +214,9 @@ func (c *baseConnection) GeneratePSK() ([]byte, error) {
 
 	localAuthInfo := c.localAgent.AuthenticationInfo()
 	remoteAuthInfo := c.remoteAgent.AuthenticationInfo()
+	if remoteAuthInfo == nil {
+		remoteAuthInfo = localAuthInfo
+	}
 	minBits := maxInt(
 		localAuthInfo.PSKConfig.Entropy,
 		remoteAuthInfo.PSKConfig.Entropy,
@@ -335,11 +400,34 @@ func (c *baseConnection) finishAuthentication() (*Connection, error) {
 		return nil, fmt.Errorf("%w: remote result %v", ErrAuthenticationFailed, remoteResult)
 	}
 
+	return c.handOff(true)
+}
+
+// skipAuthentication hands the connection to the application protocol
+// without authenticating the peer, see InteropQuirks.AllowSkipAuthentication.
+func (c *baseConnection) skipAuthentication() (*Connection, error) {
+	if !c.localAgent.quirks.AllowSkipAuthentication {
+		return nil, fmt.Errorf("%w: AllowSkipAuthentication", ErrQuirkDisabled)
+	}
+	c.mu.Lock()
+	authenticating := c.authenticationState != nil
+	c.mu.Unlock()
+	if authenticating {
+		return nil, errors.New("authentication already in progress")
+	}
+	c.log.Warn("INSECURE interop quirk: skipping authentication, the peer is NOT authenticated")
+	return c.handOff(false)
+}
+
+// handOff hands the connection to the application protocol.
+func (c *baseConnection) handOff(authenticated bool) (*Connection, error) {
 	appConn, err := c.netConn.IntoApplicationConnection()
 	if err != nil {
 		return nil, err
 	}
-	c.remoteAgent.setAuthenticated()
+	if authenticated {
+		c.remoteAgent.setAuthenticated()
+	}
 
 	c.app.Store(&connectedState{
 		appConn:               appConn,

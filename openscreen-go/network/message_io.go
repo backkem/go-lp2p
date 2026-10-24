@@ -24,13 +24,21 @@ func readMessage(r io.Reader) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	return readMessageBody(r, typeKey)
+}
 
+// readMessageBody reads the CBOR body of a message of which the type key was
+// already read.
+func readMessageBody(r io.Reader, typeKey TypeKey) (interface{}, error) {
 	msg, err := newMessageByType(typeKey)
 	if err != nil {
 		return nil, err
 	}
 
 	err = decodeCBOR(r, msg)
+	if err == io.EOF {
+		err = io.ErrUnexpectedEOF
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cbor decode error: %w", err)
 	}
@@ -61,14 +69,32 @@ func ReadTypeKey(r io.Reader) (TypeKey, error) {
 	return readTypeKey(r)
 }
 
-// WriteTypedMessage writes v, CBOR-encoded, prefixed with the type key. The
-// message is emitted with a single Write call.
+// cborEncMode encodes maps and structs with their keys in the core
+// deterministic order of RFC 8949 section 4.2.1, i.e. ascending integer keys.
+// The spec doesn't require any order, but some decoders, notably Chromium's
+// Open Screen Library, reject maps with keys out of order.
+var cborEncMode = func() cbor.EncMode {
+	em, err := cbor.EncOptions{Sort: cbor.SortCoreDeterministic}.EncMode()
+	if err != nil {
+		panic(err)
+	}
+	return em
+}()
+
+// EncodeCBOR encodes v as CBOR with deterministically ordered map keys.
+func EncodeCBOR(v interface{}) ([]byte, error) {
+	return cborEncMode.Marshal(v)
+}
+
+// WriteTypedMessage writes v, CBOR-encoded with map keys in ascending order,
+// prefixed with the type key. The message is emitted with a single Write
+// call.
 func WriteTypedMessage(w io.Writer, typeKey TypeKey, v interface{}) error {
 	var buf bytes.Buffer
 	if err := writeTypeKey(typeKey, &buf); err != nil {
 		return err
 	}
-	data, err := cbor.Marshal(v)
+	data, err := cborEncMode.Marshal(v)
 	if err != nil {
 		return err
 	}

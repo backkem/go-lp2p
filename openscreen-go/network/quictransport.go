@@ -74,7 +74,7 @@ type QuicStream struct {
 func (s *QuicStream) StreamID() int64 {
 	switch stream := s.stream.(type) {
 	case *quicApplicationStream:
-		return int64(stream.stream.StreamID())
+		return int64(stream.streamID())
 
 	default:
 		// TODO: move to transport interface?

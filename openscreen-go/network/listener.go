@@ -3,7 +3,6 @@ package ospc
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -12,15 +11,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	mdns "github.com/grandcat/zeroconf"
 )
 
 var ErrListenerClosed = errors.New("listener closed")
-
-// infoExchangeTimeout bounds the info exchange of incoming connections.
-const infoExchangeTimeout = 10 * time.Second
 
 // Listen starts an advertising agent and listens for incoming connections.
 func Listen(transportType AgentTransport, a *Agent) (*Listener, error) {
@@ -111,6 +106,38 @@ func (l *Listener) getALPNListener(alpn string) *ALPNListener {
 // Start listening and advertising.
 func (l *Listener) Start() error {
 	return l.start(":", true)
+}
+
+// StartWithoutAdvertising listens on addr (e.g. "127.0.0.1:0") without
+// advertising the agent with mDNS. Peers connect with a DiscoveredAgent from
+// DirectAgent, using Addr and TXT.
+func (l *Listener) StartWithoutAdvertising(addr string) error {
+	return l.start(addr, false)
+}
+
+// Addr returns the local address the listener listens on, or nil if it is
+// not started.
+func (l *Listener) Addr() net.Addr {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.netListener == nil {
+		return nil
+	}
+	return l.netListener.Addr()
+}
+
+// TXT returns a copy of the TXT records the listener advertises, or would
+// advertise when started without advertising.
+func (l *Listener) TXT() TXTRecordSet {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	txt := TXTRecordSet{}
+	for k, v := range l.txt {
+		txt[k] = append([]string(nil), v...)
+	}
+	return txt
 }
 
 // AnnounceMetadataChange signals listening agents that the metadata of the
@@ -222,10 +249,6 @@ func (l *Listener) start(addr string, advertise bool) error {
 			if len(cs.PeerCertificates) == 0 {
 				return errors.New("no peer certificate")
 			}
-			if len(cs.PeerCertificates) != 1 {
-				return errors.New("didn't expect cert chain")
-			}
-
 			alpn := cs.NegotiatedProtocol
 			if alpn != ALPN_OSP {
 				child := l.getALPNListener(alpn)
@@ -235,24 +258,18 @@ func (l *Listener) start(addr string, advertise bool) error {
 				return child.doVerifyConnection(cs)
 			}
 
-			peerCert := cs.PeerCertificates[0]
-			roots := x509.NewCertPool()
-			roots.AddCert(peerCert)
-
-			// Extract expected hostname from peer certificate for validation
-			expectedCN := peerCert.Subject.CommonName
-
-			opts := x509.VerifyOptions{
-				DNSName: expectedCN,
-				Roots:   roots,
-			}
-			_, err := peerCert.Verify(opts)
-
-			return err
+			// The listening agent's certificate can't be pinned, its fp is
+			// unknown to the advertising agent. network.bs requires both
+			// agents to present an agent certificate but defines no check of
+			// the listening agent's certificate beyond that: the peer is
+			// verified by authentication, with SPAKE2 identities bound to the
+			// certificate's agent fingerprint. In particular no hostname is
+			// verified.
+			return nil
 		},
 	}
 
-	fp, err := l.agent.CertificateFingerPrint()
+	fp, err := l.agent.advertisedFingerPrint()
 	if err != nil {
 		return err
 	}
@@ -380,11 +397,9 @@ func (l *Listener) handleNetworkConnection(nc NetworkConnection) {
 	go func() {
 		defer l.wg.Done()
 
-		ctx, cancel := context.WithTimeout(l.ctx, infoExchangeTimeout)
-		err := bConn.awaitInfo(ctx)
-		cancel()
+		err := bConn.awaitInfo(l.ctx)
 		if err != nil {
-			l.log.Debug("listener: info exchange failed", "err", err)
+			l.log.Info("listener: info exchange failed", "err", err)
 			_ = bConn.Close()
 			return
 		}
@@ -483,6 +498,21 @@ func (c *UnauthenticatedConnection) AuthenticatePSK(ctx context.Context, psk []b
 	// Detach the UnauthenticatedConnection, Close no longer applies.
 	c.authenticated.Store(true)
 
+	return conn, nil
+}
+
+// SkipAuthentication hands the connection to the application protocol
+// without authenticating the peer. INSECURE, for interop debugging only: it
+// returns ErrQuirkDisabled unless InteropQuirks.AllowSkipAuthentication is
+// set on the local agent, and violates network.bs, which requires
+// authentication before exchanging application messages. The returned
+// Connection reports Authenticated() == false.
+func (c *UnauthenticatedConnection) SkipAuthentication() (*Connection, error) {
+	conn, err := c.base.skipAuthentication()
+	if err != nil {
+		return nil, err
+	}
+	c.authenticated.Store(true)
 	return conn, nil
 }
 

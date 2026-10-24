@@ -5,12 +5,14 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"sync"
@@ -53,6 +55,10 @@ type AgentConfig struct {
 	// Logger receives the logs of the agent and its connections. Per-message
 	// logs are at debug level. Nil discards all logs.
 	Logger *slog.Logger
+
+	// InteropQuirks enables deviations from the spec for interop with
+	// non-conforming peers. All are off by default, see InteropQuirks.
+	InteropQuirks InteropQuirks
 }
 
 func NewAgentConfig(nickname string) AgentConfig {
@@ -118,7 +124,8 @@ type Agent struct {
 	authenticationInfo *AgentAuthenticationInfo
 
 	keepAlive KeepAliveConfig
-	log       *slog.Logger // Only set for local agents.
+	log       *slog.Logger  // Only set for local agents.
+	quirks    InteropQuirks // Only set for local agents.
 
 	// Local agent state, see request_id.go. Initialized lazily.
 	stateToken string
@@ -204,6 +211,10 @@ func NewAgent(c AgentConfig) (*Agent, error) {
 
 	agent.keepAlive = c.KeepAlive
 	agent.log = c.Logger
+	agent.quirks = c.InteropQuirks
+	if agent.quirks.Any() {
+		agent.logger().Warn("interop quirks enabled, the agent deviates from the Open Screen Protocol", "quirks", fmt.Sprintf("%+v", agent.quirks))
+	}
 
 	return agent, nil
 }
@@ -379,21 +390,45 @@ func certificateFingerPrint(cert *x509.Certificate) (string, error) {
 
 	return base64.StdEncoding.EncodeToString(spkiHash), nil
 }
-func validateFingerprint(fp string, remoteCerts []tls.Certificate) error {
-	// Per OpenScreen spec, fingerprint is a 44-character base64-encoded
-	// SHA-256 hash of the SPKI (SubjectPublicKeyInfo)
-	for _, cert := range remoteCerts {
-		remoteValue, err := certificateFingerPrint(cert.Leaf)
-		if err != nil {
-			return err
-		}
 
-		if remoteValue == fp {
-			return nil
-		}
+// wholeCertificateFingerPrint is the base64 SHA-256 of the whole DER
+// certificate, as advertised by older osp_demo builds. Not the spec's agent
+// fingerprint, see InteropQuirks.AcceptCertificateFingerprint.
+func wholeCertificateFingerPrint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.Raw)
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// advertisedFingerPrint is the fp TXT value the agent advertises.
+func (a *Agent) advertisedFingerPrint() (string, error) {
+	if a.quirks.AdvertiseCertificateFingerprint {
+		return wholeCertificateFingerPrint(a.Certificate.Leaf), nil
 	}
+	return a.CertificateFingerPrint()
+}
 
-	return errors.New("no certificate matching fingerprint")
+// ErrFingerprintMismatch is returned when the certificate presented by an
+// advertising agent doesn't match its advertised fp.
+var ErrFingerprintMismatch = errors.New("agent certificate doesn't match advertised fingerprint")
+
+// verifyFingerprint checks the agent certificate against the fp advertised by
+// the advertising agent. Per network.bs "TLS 1.3": "The agent fingerprint
+// calculated for the received agent certificate must match the fp mDNS TXT
+// record as advertised by the advertising agent." With the
+// AcceptCertificateFingerprint quirk the whole-certificate hash is accepted
+// too.
+func verifyFingerprint(fp string, cert *x509.Certificate, quirks InteropQuirks) error {
+	spki, err := certificateFingerPrint(cert)
+	if err != nil {
+		return err
+	}
+	if spki == fp {
+		return nil
+	}
+	if quirks.AcceptCertificateFingerprint && wholeCertificateFingerPrint(cert) == fp {
+		return nil
+	}
+	return fmt.Errorf("%w: fp %q, SPKI fingerprint %q", ErrFingerprintMismatch, fp, spki)
 }
 
 type PSKConfig struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 
 	mdns "github.com/grandcat/zeroconf"
@@ -194,6 +195,27 @@ func newDiscoveredAgent(info *mdns.ServiceEntry) (*DiscoveredAgent, error) {
 		return nil, err
 	}
 	a.info = info
+	return a, nil
+}
+
+// DirectAgent returns a DiscoveredAgent for an agent known without mDNS
+// discovery: listening on addr, with the given DNS-SD Instance Name
+// (unescaped) and unescaped TXT records. It can be dialed like a discovered
+// agent.
+func DirectAgent(instanceName string, addr *net.UDPAddr, txt TXTRecordSet) (*DiscoveredAgent, error) {
+	entry := mdns.NewServiceEntry(escapeDNSSD(instanceName), MdnsServiceType, MdnsDomain)
+	if ip4 := addr.IP.To4(); ip4 != nil {
+		entry.AddrIPv4 = []net.IP{ip4}
+	} else {
+		entry.AddrIPv6 = []net.IP{addr.IP}
+	}
+	entry.Port = addr.Port
+
+	a, err := newDiscoveredAgentFromTXT(entry.Instance, txt)
+	if err != nil {
+		return nil, err
+	}
+	a.info = entry
 	return a, nil
 }
 

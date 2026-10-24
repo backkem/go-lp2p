@@ -3,92 +3,69 @@ package ospc
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"math/big"
 
 	mdns "github.com/grandcat/zeroconf"
 )
 
 // Dial opens a connection to the remote agent.
+//
+// The advertising agent is verified as network.bs "TLS 1.3" requires: the
+// agent fingerprint of the certificate it presents must match its advertised
+// fp TXT record. Nothing else about the certificate is checked, its identity
+// is established by authentication.
+//
+// The non-standard sn TXT key, if present, is used to compute the agent
+// hostname sent as TLS server_name. Without it, which is all the spec defines
+// (see w3c/openscreenprotocol#293), the hostname can't be computed and the
+// server_name is the encoded Instance Name and domain only.
+//
+// Dial returns once the peer completed metadata discovery (agent-info and
+// auth-capabilities), see ErrNoAgentInfo.
 func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport, la *Agent) (*UnauthenticatedConnection, error) {
-	snBase64, err := ra.TXT.GetOne("sn")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get sn record: %v", err)
-	}
-	fp, err := ra.TXT.GetOne("fp")
+	fp, err := ra.TXT.GetOne(txtKeyFingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get fp record: %v", err)
 	}
 
-	// Decode URL-safe base64 serial number to get expected certificate serial number.
-	// See: https://github.com/w3c/openscreenprotocol/issues/365
-	expectedSNBytes, err := base64.RawURLEncoding.DecodeString(snBase64)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode sn: %v", err)
-	}
-	expectedSN := new(big.Int).SetBytes(expectedSNBytes)
+	tlsConfig := dialTLSConfig(fp, ra.serverName(), la)
+	addr := fmt.Sprintf("%s:%d", getMdnsHost(ra.info), ra.info.Port)
 
-	// Build OpenScreen-compliant hostname from discovered agent info
-	// Unescaped, without the truncation marker (e.g., "Test\ Receiver" -> "Test Receiver")
+	return ra.dial(ctx, transportType, la, addr, tlsConfig)
+}
+
+// serverName returns the TLS server_name for dialing the agent: its agent
+// hostname if the advertised sn allows computing it, otherwise the agent
+// hostname without the serial number label.
+func (ra DiscoveredAgent) serverName() string {
 	instanceName := ra.instanceName.Name
-	domain := MdnsDomain
-	cn := buildAgentHostname(snBase64, instanceName, domain)
+	if sn, err := ra.TXT.GetOne("sn"); err == nil && sn != "" {
+		// URL-safe base64, see w3c/openscreenprotocol#365.
+		return buildAgentHostname(sn, instanceName, MdnsDomain)
+	}
+	return encodeHostnamePart(hostnameInstanceName(instanceName)) + "." + encodeHostnamePart(MdnsDomain)
+}
 
-	tlsConfig := &tls.Config{
-		MinVersion:         tls.VersionTLS13, // OpenScreen spec requires TLS 1.3
-		MaxVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true, // Manual verification in VerifyConnection
+// dialTLSConfig returns the TLS configuration for dialing an advertising
+// agent that advertises fp.
+func dialTLSConfig(fp, serverName string, la *Agent) *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13, // OpenScreen spec requires TLS 1.3
+		MaxVersion: tls.VersionTLS13,
+		// The certificate is self-signed and pinned by fp instead, see
+		// VerifyConnection.
+		InsecureSkipVerify: true,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
 				return errors.New("no peer certificate")
 			}
-			if len(cs.PeerCertificates) != 1 {
-				return errors.New("didn't expect cert chain")
-			}
-			peerCert := cs.PeerCertificates[0]
-
-			// Verify certificate serial number matches advertised value
-			if peerCert.SerialNumber.Cmp(expectedSN) != 0 {
-				return fmt.Errorf("certificate serial number mismatch: expected %s, got %s", expectedSN.String(), peerCert.SerialNumber.String())
-			}
-
-			roots := x509.NewCertPool()
-			roots.AddCert(peerCert)
-
-			opts := x509.VerifyOptions{
-				DNSName: cn,
-				Roots:   roots,
-			}
-			_, err := peerCert.Verify(opts)
-			return err
+			return verifyFingerprint(fp, cs.PeerCertificates[0], la.quirks)
 		},
 		NextProtos:   []string{ALPN_OSP}, // Application-Layer Protocol Negotiation
-		ServerName:   cn,
+		ServerName:   serverName,
 		Certificates: []tls.Certificate{*la.Certificate},
-		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			certs := []tls.Certificate{}
-			for _, rawCert := range rawCerts {
-				leaf, err := x509.ParseCertificate(rawCert)
-				if err != nil {
-					return err
-				}
-
-				cert := tls.Certificate{
-					Certificate: [][]byte{rawCert},
-					Leaf:        leaf,
-				}
-				certs = append(certs, cert)
-			}
-
-			return validateFingerprint(fp, certs)
-		},
 	}
-	addr := fmt.Sprintf("%s:%d", getMdnsHost(ra.info), ra.info.Port)
-
-	return ra.dial(ctx, transportType, la, addr, tlsConfig)
 }
 
 // dial connects to addr and runs the info exchange. On failure, including
@@ -120,7 +97,6 @@ func (ra DiscoveredAgent) dial(ctx context.Context, transportType AgentTransport
 	bConn := newBaseConnection(nc, la, remoteAgent, AgentRoleClient, at)
 	bConn.runNetwork()
 
-	// TODO: handle meta-discovery failure.
 	if err := bConn.awaitInfo(ctx); err != nil {
 		_ = bConn.Close()
 		return nil, err

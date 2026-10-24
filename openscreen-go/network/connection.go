@@ -33,8 +33,30 @@ func (c *Connection) OpenStream(ctx context.Context) (ApplicationStream, error) 
 	return c.base.app.Load().appConn.OpenStreamSync(ctx)
 }
 
+// OpenUniStream opens a new unidirectional application stream, which can only
+// be written to. Per application.bs, OSP messages are sent on unidirectional
+// streams: write the type key and CBOR body of each message (see
+// WriteTypedMessage), messages that must be processed in order on the same
+// stream, and close it when done. Transports without unidirectional streams
+// fall back to a bidirectional stream.
+func (c *Connection) OpenUniStream(ctx context.Context) (ApplicationStream, error) {
+	appConn := c.base.app.Load().appConn
+	if u, ok := appConn.(UniStreamOpener); ok {
+		return u.OpenUniStreamSync(ctx)
+	}
+	return appConn.OpenStreamSync(ctx)
+}
+
+// Authenticated reports whether the remote agent was authenticated. It is
+// only false for connections handed over by
+// UnauthenticatedConnection.SkipAuthentication.
+func (c *Connection) Authenticated() bool {
+	return c.base.remoteAgent.Authenticated()
+}
+
 // AcceptStream accepts an incoming application stream for use by custom
-// protocols.
+// protocols. Streams opened by the peer as unidirectional streams can only
+// be read: Write fails.
 //
 // The connection owns accepting streams: it reads the type key of the first
 // message on every incoming stream. Streams for protocols handled by the

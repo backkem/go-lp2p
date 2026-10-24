@@ -68,6 +68,13 @@ type ApplicationConnection interface {
 	Close() error
 }
 
+// UniStreamOpener is implemented by application connections that support
+// unidirectional streams, as used for OSP messages (application.bs). The
+// returned stream can only be written to.
+type UniStreamOpener interface {
+	OpenUniStreamSync(context.Context) (ApplicationStream, error)
+}
+
 // Abstract stream for the application protocol.
 type ApplicationStream interface {
 	io.ReadWriteCloser
