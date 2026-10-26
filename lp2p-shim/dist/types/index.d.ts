@@ -2,6 +2,7 @@ export { LP2PReceiver, type LP2PReceiverOptions } from "./api/receiver.js";
 export { LP2PRequest, type LP2PRequestOptions } from "./api/request.js";
 export { LP2PConnection } from "./api/connection.js";
 export { LP2PDataChannel, type LP2PDataChannelInit, type LP2PDataChannelState } from "./api/datachannel.js";
+export { LP2PQuicTransport, LP2PQuicTransportListener, LP2PBidirectionalStream, LP2PReceiveStream, LP2PSendStream, LP2PSendGroup, LP2PDatagramDuplexStream, LP2PDatagramsWritable, WebTransportError, type LP2PQuicTransportInit, type LP2PQuicTransportListenerInit, type WebTransportCloseInfo, type WebTransportConnectionStats, type WebTransportErrorInit, type WebTransportSendOptions, type WebTransportSendStreamOptions, type WebTransportSendStreamStats, type WebTransportReceiveStreamStats, } from "./api/quictransport.js";
 export { LP2PConnectionEvent, LP2PDataChannelEvent, type LP2PConnectionEventInit, type LP2PDataChannelEventInit, } from "./api/events.js";
 export { configure, getUserAgent, type ShimConfig } from "./config.js";
 export { install, interfaces, type InstallOptions } from "./install.js";
@@ -15,6 +16,7 @@ export { WebRTCTransport, type WebRTCTransportOptions } from "./transport/webrtc
 export { BroadcastChannelSignaler, ManualSignaler, PortSignaler, type PortLike, type SignalMessage, type Signaler, } from "./transport/signaling.js";
 export { Rendezvous, type RendezvousOptions } from "./transport/rendezvous.js";
 export { Session, DataChannelEndpoint, ControlChannel, ProtocolError, type Role } from "./protocol/session.js";
+export { WTSession, WTStream, StreamFrame, type StreamSink, type CloseInfo } from "./protocol/webtransport.js";
 export * as messages from "./protocol/messages.js";
 export { encodeCBOR, decodeCBOR, type CBORValue } from "./codec/cbor.js";
 export { encodeVarint, decodeVarint } from "./codec/varint.js";

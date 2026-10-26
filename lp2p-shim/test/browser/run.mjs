@@ -6,6 +6,10 @@
 //   2. Two tabs, WebRTC transport, BroadcastChannel signaling.
 //   3. Two isolated browser contexts, WebRTC with ManualSignaler: the test
 //      plays the human copying codes between devices.
+//   4. transport-iframes.html: LP2PQuicTransport and its listener over
+//      postMessage, with the DOM UI: stream echo, datagrams, 1 MiB upload.
+//   5. transport.html in two tabs over WebRTC: the same, with datagrams on
+//      an unreliable RTCDataChannel.
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { serve } from "../../scripts/serve.mjs";
@@ -177,6 +181,64 @@ await run("WebRTC between isolated contexts, manual copy/paste signaling, PIN pa
   await chat(q, r, "no server involved");
   await ctxA.close();
   await ctxB.close();
+});
+
+/** Runs the WebTransport demo's three checks from the requester page. */
+async function exerciseTransport(q) {
+  const result = (key) =>
+    q.waitForFunction((key) => document.body.dataset[key], { timeout: TIMEOUT, polling: 100 }, key).then((h) => h.jsonValue());
+  await q.click("#echo");
+  if ((await result("echo")) !== "ok") throw new Error("echo mismatch");
+  await q.click("#ping");
+  const pings = Number(await result("ping"));
+  if (pings < 15) throw new Error(`only ${pings}/20 datagrams came back`);
+  await q.click("#bulk");
+  if ((await result("bulk")) !== "ok") throw new Error("bulk hash mismatch");
+}
+
+await run("WebTransport between two iframes, postMessage, DOM UI and PIN pairing", async () => {
+  const page = await browser.newPage();
+  logErrors(page, "wt-iframes");
+  await page.goto(base + "transport-iframes.html");
+  const frameOf = async (id) => (await page.$(`#${id}`)).contentFrame();
+  const a = await frameOf("a");
+  const b = await frameOf("b");
+  await a.waitForFunction(() => globalThis.LP2PQuicTransportListener, { timeout: TIMEOUT, polling: 100 });
+  await clickDialog(a, "Allow"); // advertise
+  await a.waitForFunction(() => document.body.dataset.status?.startsWith("Discoverable"), { timeout: TIMEOUT, polling: 100 });
+  await b.click("#connect");
+  await clickDialog(b, "Echo server"); // picker
+  await clickDialog(a, "Allow"); // accept connection
+  const pin = await dialogText(a, ".pin");
+  await b.waitForFunction(() => document.querySelector("lp2p-shim-dialog")?.shadowRoot.querySelector("input"), { timeout: TIMEOUT, polling: 100 });
+  await b.evaluate((pin) => {
+    document.querySelector("lp2p-shim-dialog").shadowRoot.querySelector("input").value = pin;
+  }, pin);
+  await clickDialog(b, "Pair");
+  await Promise.all([connected(a), connected(b)]);
+  const reliability = await b.evaluate(() => document.body.dataset.status);
+  if (!reliability.includes("reliable-only")) throw new Error(`unexpected status ${reliability}`);
+  await exerciseTransport(b);
+  await b.click("#close");
+  await a.waitForFunction(() => document.body.dataset.status === "Disconnected.", { timeout: TIMEOUT, polling: 100 });
+  await page.close();
+});
+
+await run("WebTransport between two tabs, WebRTC with unreliable datagrams", async () => {
+  const r = await browser.newPage();
+  const q = await browser.newPage();
+  logErrors(r, "wt-receiver");
+  logErrors(q, "wt-requester");
+  await r.goto(base + "transport.html?transport=webrtc&auto=1&role=receiver&name=Server");
+  await r.waitForFunction(() => document.body.dataset.status?.startsWith("Discoverable"), { timeout: TIMEOUT, polling: 100 });
+  await q.goto(base + "transport.html?transport=webrtc&auto=1&role=requester&name=Client");
+  await Promise.all([connected(r), connected(q)]);
+  const status = await q.evaluate(() => document.body.dataset.status);
+  if (!status.includes("supports-unreliable")) throw new Error(`unexpected status ${status}`);
+  await exerciseTransport(q);
+  await q.close();
+  await r.waitForFunction(() => document.body.dataset.status === "Disconnected.", { timeout: TIMEOUT, polling: 100 });
+  await r.close();
 });
 
 await browser.close();

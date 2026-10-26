@@ -1,6 +1,8 @@
 import type { Session } from "../protocol/session.js";
 import { type LP2PDataChannel, type LP2PDataChannelInit } from "./datachannel.js";
 import { LP2PDataChannelEvent } from "./events.js";
+/** The session behind a connection. Internal. */
+export declare function sessionOf(connection: LP2PConnection): Session;
 /** Creates the API object for an authenticated session. Internal. */
 export declare function adoptConnection(session: Session): LP2PConnection;
 export declare class LP2PConnection extends EventTarget {

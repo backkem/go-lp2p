@@ -2,11 +2,31 @@
 
 import { getUserAgent } from "../config.ts";
 import type { Closer } from "../transport/types.ts";
+import type { Session } from "../protocol/session.ts";
 import { adoptConnection } from "./connection.ts";
 import { LP2PConnectionEvent, getHandler, setHandler } from "./events.ts";
 
 export interface LP2PReceiverOptions {
   nickname?: string;
+}
+
+interface ReceiverInternals {
+  /** Open sessions of the connections this receiver handed out. */
+  sessions: Set<Session>;
+  watchers: Set<(s: Session) => void>;
+}
+const internals = new WeakMap<LP2PReceiver, ReceiverInternals>();
+
+/**
+ * Calls fn for each connection the receiver gets from now on and, with
+ * existing, for those it has. Returns a function that stops watching. Internal.
+ */
+export function watchSessions(receiver: LP2PReceiver, fn: (s: Session) => void, existing: boolean): () => void {
+  const i = internals.get(receiver);
+  if (!i) throw new TypeError("not an LP2PReceiver");
+  if (existing) for (const s of i.sessions) fn(s);
+  i.watchers.add(fn);
+  return () => i.watchers.delete(fn);
 }
 
 export class LP2PReceiver extends EventTarget {
@@ -18,6 +38,7 @@ export class LP2PReceiver extends EventTarget {
   constructor(options: LP2PReceiverOptions = {}) {
     super();
     this.#nickname = options.nickname === undefined ? "" : String(options.nickname);
+    internals.set(this, { sessions: new Set(), watchers: new Set() });
   }
 
   /**
@@ -33,7 +54,12 @@ export class LP2PReceiver extends EventTarget {
           session.close("receiver stopped");
           return;
         }
-        this.dispatchEvent(new LP2PConnectionEvent("connection", { connection: adoptConnection(session) }));
+        const connection = adoptConnection(session);
+        const i = internals.get(this) as ReceiverInternals;
+        i.sessions.add(session);
+        session.whenClosed(() => i.sessions.delete(session));
+        this.dispatchEvent(new LP2PConnectionEvent("connection", { connection }));
+        for (const fn of [...i.watchers]) fn(session);
       })
       .then((ad) => {
         this.#advertisement = ad;

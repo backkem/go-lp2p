@@ -29,15 +29,27 @@ export declare abstract class BaseConnection implements TransportConnection {
     private closeReason;
     private closeFired;
     protected readonly streams: Map<number, TransportStream>;
+    private datagramHandler;
+    private readonly heldDatagrams;
     readonly remoteId: string;
+    /** Overridden by transports that carry datagrams. */
+    get maxDatagramSize(): number;
+    get datagramsReliable(): boolean;
     constructor(remoteId: string);
     get closed(): boolean;
     get onstream(): ((stream: TransportStream) => void) | null;
     set onstream(fn: ((stream: TransportStream) => void) | null);
     get onclose(): ((reason: string) => void) | null;
     set onclose(fn: ((reason: string) => void) | null);
+    get ondatagram(): ((datagram: Uint8Array) => void) | null;
+    set ondatagram(fn: ((datagram: Uint8Array) => void) | null);
     abstract openStream(): TransportStream;
     protected abstract doClose(reason: string): void;
+    sendDatagram(datagram: Uint8Array): void;
+    /** For transports with datagrams: send one. */
+    protected doSendDatagram(_datagram: Uint8Array): void;
+    /** For implementations: deliver a received datagram. */
+    protected deliverDatagram(datagram: Uint8Array): void;
     close(reason?: string): void;
     /** For implementations: a stream the peer opened. */
     protected accept(stream: TransportStream): void;

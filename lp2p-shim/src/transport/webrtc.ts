@@ -36,6 +36,16 @@ export interface WebRTCTransportOptions extends RendezvousOptions {
 }
 
 const CONTROL_LABEL = "lp2p-shim/control";
+const DATAGRAM_LABEL = "lp2p-shim/datagrams";
+// Small enough to fit one SCTP packet on a typical path, so a datagram is
+// never fragmented (a lost fragment would lose it anyway).
+const MAX_DATAGRAM_SIZE = 1200;
+
+function createDatagramChannel(pc: RTCPeerConnection): RTCDataChannel {
+  const dc = pc.createDataChannel(DATAGRAM_LABEL, { negotiated: true, id: 1, ordered: false, maxRetransmits: 0 });
+  dc.binaryType = "arraybuffer";
+  return dc;
+}
 const DISCONNECT_GRACE_MS = 5000;
 
 class ChannelStream extends BaseStream {
@@ -85,16 +95,20 @@ class RTCConnection extends BaseConnection {
 
   private readonly pc: RTCPeerConnection;
   private readonly control: RTCDataChannel;
+  private readonly datagrams: RTCDataChannel;
 
   constructor(
     remoteId: string,
     pc: RTCPeerConnection,
     control: RTCDataChannel,
+    datagrams: RTCDataChannel,
     early: EarlyChannel[],
   ) {
     super(remoteId);
     this.pc = pc;
     this.control = control;
+    this.datagrams = datagrams;
+    datagrams.onmessage = (e: MessageEvent) => this.deliverDatagram(new Uint8Array(e.data as ArrayBuffer));
     pc.ondatachannel = (e) => this.accept(this.wrap(e.channel));
     for (const { dc, received } of early) this.accept(this.wrap(dc, received));
     control.onmessage = (e) => {
@@ -119,6 +133,17 @@ class RTCConnection extends BaseConnection {
     const s = this.wrap(this.pc.createDataChannel(`lp2p-shim/stream`, { ordered: true }));
     this.streams.set(s.id, s);
     return s;
+  }
+
+  override get maxDatagramSize(): number {
+    return MAX_DATAGRAM_SIZE;
+  }
+
+  protected override doSendDatagram(d: Uint8Array): void {
+    // Unreliable: a datagram sent before the channel opens, or while SCTP
+    // is backed up, is dropped rather than queued.
+    if (this.datagrams.readyState !== "open" || this.datagrams.bufferedAmount > 256 * 1024) return;
+    this.datagrams.send(d as Uint8Array<ArrayBuffer>);
   }
 
   forget(id: number): void {
@@ -191,6 +216,7 @@ export class WebRTCTransport implements Transport {
         const candidates = new CandidateQueue(pc);
         sessions.set(connId, { pc, candidates });
         const control = pc.createDataChannel(CONTROL_LABEL, { negotiated: true, id: 0 });
+        const datagrams = createDatagramChannel(pc);
         const early = collectEarlyChannels(pc);
         const reply = (d: unknown): void => this.rendezvous.send({ t: "signal", from: ad.id, to: m.from, conn: connId, data: d });
         if (this.trickle) {
@@ -198,7 +224,7 @@ export class WebRTCTransport implements Transport {
         }
         control.onopen = () => {
           sessions.delete(connId);
-          onconnection(new RTCConnection(m.from, pc, control, early));
+          onconnection(new RTCConnection(m.from, pc, control, datagrams, early));
         };
         const fail = (): void => {
           sessions.delete(connId);
@@ -228,6 +254,7 @@ export class WebRTCTransport implements Transport {
     const pc = new RTCPeerConnection(this.rtcConfiguration);
     const candidates = new CandidateQueue(pc);
     const control = pc.createDataChannel(CONTROL_LABEL, { negotiated: true, id: 0 });
+    const datagrams = createDatagramChannel(pc);
     const early = collectEarlyChannels(pc);
     const send = (d: unknown): void =>
       this.rendezvous.send({ t: "signal", from: local.id, to: peerId, conn: connId, nickname: local.nickname, data: d });
@@ -252,7 +279,7 @@ export class WebRTCTransport implements Transport {
         if (this.trickle) {
           pc.onicecandidate = (e) => e.candidate && send({ candidate: e.candidate.toJSON() });
         }
-        control.onopen = () => resolve(new RTCConnection(peerId, pc, control, early));
+        control.onopen = () => resolve(new RTCConnection(peerId, pc, control, datagrams, early));
         void (async () => {
           await pc.setLocalDescription(await pc.createOffer());
           if (!this.trickle) await gathered(pc);

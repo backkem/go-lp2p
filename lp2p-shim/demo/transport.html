@@ -1,0 +1,233 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LP2P WebTransport</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1f1f1f; --muted: #666; --line: #ddd; --accent: #1a73e8; --ok: #188038; --bad: #c5221f; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1f1f1f; --fg: #eee; --muted: #aaa; --line: #444; --ok: #81c995; --bad: #f28b82; } }
+  body { margin: 0; padding: 12px 16px; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); display: flex; flex-direction: column; gap: 10px; min-height: 100vh; box-sizing: border-box; }
+  header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  h1 { font-size: 16px; margin: 0; flex: 1 1 auto; }
+  .tag { font-size: 12px; color: var(--muted); }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { color: var(--muted); font-size: 13px; }
+  #tools { display: flex; flex-wrap: wrap; gap: 8px; }
+  #log { flex: 1 1 auto; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 120px; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+</style>
+
+<header>
+  <h1>LP2P WebTransport <span class="tag" id="mode"></span></h1>
+  <button id="listen" class="primary">Be discoverable</button>
+  <button id="connect">Connect to a device</button>
+</header>
+<div id="status">Not connected.</div>
+<div id="tools" hidden>
+  <button id="echo">Echo over a stream</button>
+  <button id="ping">20 datagram pings</button>
+  <button id="bulk">Send 1 MiB, check SHA-256</button>
+  <button id="close">Close transport</button>
+</div>
+<div id="log" aria-live="polite"></div>
+
+<script src="../dist/lp2p-shim.js"></script>
+<script>
+"use strict";
+// URL parameters, as chat.html:
+//   transport=postmessage (default) | webrtc     name=<nickname>
+//   auto=1 (no dialogs: allow all, pick the first peer, no PIN)
+//   role=receiver | requester (start right away)
+// The receiver takes sessions with LP2PQuicTransportListener and serves
+// them: it echoes bidirectional streams and datagrams, and answers each
+// unidirectional stream with a unidirectional stream holding its SHA-256.
+// The requester opens an LP2PQuicTransport on its LP2PRequest.
+const params = new URLSearchParams(location.search);
+const transportName = params.get("transport") ?? "postmessage";
+const name = params.get("name") ?? `Device ${Math.floor(Math.random() * 900 + 100)}`;
+const $ = (id) => document.getElementById(id);
+if (!globalThis.LP2PShim) {
+  document.body.textContent = "lp2p-shim did not load. The LP2P API needs a secure context: use https:// or http://localhost.";
+  throw new Error("no shim");
+}
+const config = {};
+if (transportName === "webrtc") config.transport = new LP2PShim.WebRTCTransport({ channelName: "lp2p-shim/webrtc/wt" });
+else config.transport = new LP2PShim.PostMessageTransport({ channelName: "lp2p-shim/wt" });
+if (params.get("auto") === "1") {
+  config.ui = new LP2PShim.AutoUI();
+  config.pairing = "none";
+}
+LP2PShim.configure(config);
+$("mode").textContent = `· ${name} · ${transportName}`;
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+function log(text, cls) {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = text;
+  $("log").append(d);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+function status(text) {
+  $("status").textContent = text;
+  document.body.dataset.status = text;
+}
+/** Results for tests: data-echo, data-ping, data-bulk on <body>. */
+function result(key, value) {
+  document.body.dataset[key] = value;
+}
+async function readAll(readable) {
+  const parts = [];
+  let n = 0;
+  for await (const chunk of readable) {
+    parts.push(chunk);
+    n += chunk.length;
+  }
+  const out = new Uint8Array(n);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.length;
+  }
+  return out;
+}
+async function sha256(bytes) {
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(h, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ---------------------------------------------------------------- receiver
+async function serve(transport) {
+  await transport.ready;
+  log(`Transport from a peer: reliability ${transport.reliability}, max datagram ${transport.datagrams.maxDatagramSize} bytes.`);
+  status(`Connected (${transport.reliability}).`);
+  transport.closed.then(
+    (info) => (log(`Transport closed: code ${info.closeCode} "${info.reason}".`), status("Disconnected.")),
+    (err) => (log(`Transport lost: ${err.message}`), status("Disconnected.")),
+  );
+  // Echo bidirectional streams.
+  (async () => {
+    for await (const stream of transport.incomingBidirectionalStreams) {
+      stream.readable.pipeTo(stream.writable).catch(() => {});
+    }
+  })().catch(() => {});
+  // Echo datagrams.
+  (async () => {
+    const writer = transport.datagrams.createWritable().getWriter();
+    for await (const d of transport.datagrams.readable) await writer.write(d);
+  })().catch(() => {});
+  // Hash unidirectional streams, answer on a new unidirectional stream.
+  for await (const readable of transport.incomingUnidirectionalStreams) {
+    const bytes = await readAll(readable);
+    const hash = await sha256(bytes);
+    log(`Received ${bytes.length} bytes, sha256 ${hash.slice(0, 16)}…`);
+    const back = await transport.createUnidirectionalStream();
+    const w = back.getWriter();
+    await w.write(enc.encode(hash));
+    await w.close();
+  }
+}
+
+$("listen").onclick = async () => {
+  const receiver = new LP2PReceiver({ nickname: name });
+  const listener = new LP2PQuicTransportListener(receiver);
+  try {
+    await listener.ready;
+    $("listen").disabled = $("connect").disabled = true;
+    status("Discoverable. Waiting for transports…");
+  } catch (err) {
+    status(`Could not advertise: ${err.name}: ${err.message}`);
+    return;
+  }
+  for await (const transport of listener.incomingTransports) serve(transport).catch((err) => log(`Error: ${err.message}`, "bad"));
+};
+
+// --------------------------------------------------------------- requester
+let transport = null;
+$("connect").onclick = async () => {
+  status("Picking a device…");
+  transport = new LP2PQuicTransport(new LP2PRequest({ nickname: name }));
+  try {
+    await transport.ready;
+  } catch (err) {
+    status(`Not connected: ${err.name}: ${err.message}`);
+    return;
+  }
+  $("listen").disabled = $("connect").disabled = true;
+  $("tools").hidden = false;
+  status(`Connected (${transport.reliability}).`);
+  log(`Transport ready: reliability ${transport.reliability}, max datagram ${transport.datagrams.maxDatagramSize} bytes.`);
+  transport.closed.then(
+    (info) => (log(`Transport closed: code ${info.closeCode} "${info.reason}".`), status("Disconnected.")),
+    (err) => (log(`Transport lost: ${err.message}`), status("Disconnected.")),
+  );
+};
+
+$("echo").onclick = async () => {
+  const text = `hello from ${name} at ${new Date().toLocaleTimeString()}`;
+  const stream = await transport.createBidirectionalStream();
+  const writer = stream.writable.getWriter();
+  await writer.write(enc.encode(text));
+  await writer.close();
+  const back = dec.decode(await readAll(stream.readable));
+  log(`Echo: "${back}"`, back === text ? "ok" : "bad");
+  result("echo", back === text ? "ok" : "mismatch");
+};
+
+$("ping").onclick = async () => {
+  const writer = transport.datagrams.createWritable().getWriter();
+  const reader = transport.datagrams.readable.getReader();
+  const sent = new Map();
+  const rtts = [];
+  const N = 20;
+  const collect = (async () => {
+    while (rtts.length < N) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      const seq = new DataView(value.buffer, value.byteOffset).getUint32(0);
+      if (sent.has(seq)) rtts.push(performance.now() - sent.get(seq));
+    }
+  })();
+  for (let i = 0; i < N; i++) {
+    const d = new Uint8Array(64);
+    new DataView(d.buffer).setUint32(0, i);
+    sent.set(i, performance.now());
+    await writer.write(d);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  await Promise.race([collect, new Promise((r) => setTimeout(r, 2000))]);
+  reader.releaseLock();
+  writer.releaseLock();
+  const avg = rtts.length ? (rtts.reduce((a, b) => a + b, 0) / rtts.length).toFixed(1) : "-";
+  log(`Datagrams: ${rtts.length}/${N} came back, average RTT ${avg} ms.`, rtts.length ? "ok" : "bad");
+  result("ping", String(rtts.length));
+};
+
+$("bulk").onclick = async () => {
+  const data = new Uint8Array(1 << 20);
+  for (let off = 0; off < data.length; off += 65536) crypto.getRandomValues(data.subarray(off, off + 65536));
+  const hash = await sha256(data);
+  const answer = (async () => {
+    const reader = transport.incomingUnidirectionalStreams.getReader();
+    const { value } = await reader.read();
+    reader.releaseLock();
+    return dec.decode(await readAll(value));
+  })();
+  const t0 = performance.now();
+  const stream = await transport.createUnidirectionalStream();
+  const writer = stream.getWriter();
+  for (let off = 0; off < data.length; off += 65536) await writer.write(data.subarray(off, off + 65536));
+  await writer.close();
+  const theirs = await answer;
+  const ms = (performance.now() - t0).toFixed(0);
+  log(`1 MiB in ${ms} ms; sha256 ${theirs === hash ? "matches" : "DIFFERS"}.`, theirs === hash ? "ok" : "bad");
+  result("bulk", theirs === hash ? "ok" : "mismatch");
+};
+
+$("close").onclick = () => transport.close({ closeCode: 1, reason: "user closed" });
+
+if (params.get("role") === "receiver") $("listen").click();
+if (params.get("role") === "requester") $("connect").click();
+</script>

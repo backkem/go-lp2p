@@ -5,6 +5,14 @@ import { adoptChannel, enforceUnsignedShort, type LP2PDataChannel, type LP2PData
 import { LP2PDataChannelEvent, getHandler, setHandler } from "./events.ts";
 
 let adopting: Session | null = null;
+const sessions = new WeakMap<LP2PConnection, Session>();
+
+/** The session behind a connection. Internal. */
+export function sessionOf(connection: LP2PConnection): Session {
+  const s = sessions.get(connection);
+  if (!s) throw new TypeError("not an LP2PConnection");
+  return s;
+}
 
 /** Creates the API object for an authenticated session. Internal. */
 export function adoptConnection(session: Session): LP2PConnection {
@@ -27,6 +35,7 @@ export class LP2PConnection extends EventTarget {
     adopting = null;
     if (!s) throw new TypeError("Illegal constructor");
     this.#session = s;
+    sessions.set(this, s);
     s.ondatachannel = (ep) => {
       const channel = adoptChannel(ep, true);
       this.dispatchEvent(new LP2PDataChannelEvent("datachannel", { channel }));

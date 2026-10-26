@@ -8,6 +8,10 @@
 // transfer ports (PortSignaler), else a BroadcastChannel named after the
 // connection, which only the two ends use. Streams are multiplexed over
 // that port; ordering per port is guaranteed by the platform.
+//
+// Datagrams go over the same port, so they are never lost or reordered:
+// the connection reports datagramsReliable, and a WebTransport session on
+// it has reliability "reliable-only".
 
 import { BaseConnection, BaseStream, randomId } from "./base.ts";
 import { Rendezvous, type RendezvousOptions } from "./rendezvous.ts";
@@ -35,6 +39,7 @@ type Frame =
   | { k: "open"; s: number }
   | { k: "msg"; s: number; d: Uint8Array }
   | { k: "close"; s: number }
+  | { k: "dgram"; d: Uint8Array }
   | { k: "bye"; reason: string };
 
 class PortStream extends BaseStream {
@@ -71,6 +76,18 @@ class PortConnection extends BaseConnection {
     // Dialer streams are even, listener streams odd, like QUIC.
     this.nextStreamId = dialer ? 0 : 1;
     port.onmessage = (e) => this.onFrame(e.data as Frame);
+  }
+
+  override get maxDatagramSize(): number {
+    // What fits a QUIC packet on a typical path, so pages see the same limit everywhere.
+    return 1200;
+  }
+  override get datagramsReliable(): boolean {
+    return true;
+  }
+
+  protected override doSendDatagram(d: Uint8Array): void {
+    this.post({ k: "dgram", d });
   }
 
   openStream(): TransportStream {
@@ -111,6 +128,9 @@ class PortConnection extends BaseConnection {
         if (s instanceof PortStream) s.remoteClosed();
         break;
       }
+      case "dgram":
+        this.deliverDatagram(f.d);
+        break;
       case "bye":
         this.remoteClosed(`closed by peer: ${f.reason}`);
         this.port.close();

@@ -17,20 +17,32 @@
     ControlChannel: () => ControlChannel,
     DataChannelEndpoint: () => DataChannelEndpoint,
     DomUI: () => DomUI,
+    LP2PBidirectionalStream: () => LP2PBidirectionalStream,
     LP2PConnection: () => LP2PConnection,
     LP2PConnectionEvent: () => LP2PConnectionEvent,
     LP2PDataChannel: () => LP2PDataChannel,
     LP2PDataChannelEvent: () => LP2PDataChannelEvent,
+    LP2PDatagramDuplexStream: () => LP2PDatagramDuplexStream,
+    LP2PDatagramsWritable: () => LP2PDatagramsWritable,
+    LP2PQuicTransport: () => LP2PQuicTransport,
+    LP2PQuicTransportListener: () => LP2PQuicTransportListener,
+    LP2PReceiveStream: () => LP2PReceiveStream,
     LP2PReceiver: () => LP2PReceiver,
     LP2PRequest: () => LP2PRequest,
+    LP2PSendGroup: () => LP2PSendGroup,
+    LP2PSendStream: () => LP2PSendStream,
     ManualSignaler: () => ManualSignaler,
     PortSignaler: () => PortSignaler,
     PostMessageTransport: () => PostMessageTransport,
     ProtocolError: () => ProtocolError,
     Rendezvous: () => Rendezvous,
     Session: () => Session,
+    StreamFrame: () => StreamFrame,
     UserAgent: () => UserAgent,
+    WTSession: () => WTSession,
+    WTStream: () => WTStream,
     WebRTCTransport: () => WebRTCTransport,
+    WebTransportError: () => WebTransportError,
     configure: () => configure,
     decodeCBOR: () => decodeCBOR,
     decodeVarint: () => decodeVarint,
@@ -121,6 +133,7 @@
     }
   };
   var live = /* @__PURE__ */ new Set();
+  var MAX_HELD_DATAGRAMS = 64;
   var pageHideHooked = false;
   function closeOnPageHide(c) {
     live.add(c);
@@ -136,7 +149,16 @@
     closeReason = null;
     closeFired = false;
     streams = /* @__PURE__ */ new Map();
+    datagramHandler = null;
+    heldDatagrams = [];
     remoteId;
+    /** Overridden by transports that carry datagrams. */
+    get maxDatagramSize() {
+      return 0;
+    }
+    get datagramsReliable() {
+      return false;
+    }
     constructor(remoteId) {
       this.remoteId = remoteId;
       closeOnPageHide(this);
@@ -156,6 +178,34 @@
     set onclose(fn) {
       this.closeHandler = fn;
       this.maybeFireClose();
+    }
+    get ondatagram() {
+      return this.datagramHandler;
+    }
+    set ondatagram(fn) {
+      this.datagramHandler = fn;
+      while (fn && this.heldDatagrams.length > 0) fn(this.heldDatagrams.shift());
+    }
+    sendDatagram(datagram) {
+      if (this.closed) throw new DOMException("connection is closed", "InvalidStateError");
+      if (datagram.byteLength > this.maxDatagramSize) {
+        throw new RangeError(`datagram of ${datagram.byteLength} bytes exceeds ${this.maxDatagramSize}`);
+      }
+      this.doSendDatagram(datagram);
+    }
+    /** For transports with datagrams: send one. */
+    doSendDatagram(_datagram) {
+      throw new DOMException("this transport has no datagrams", "NotSupportedError");
+    }
+    /** For implementations: deliver a received datagram. */
+    deliverDatagram(datagram) {
+      if (this.closed) return;
+      if (this.datagramHandler) {
+        this.datagramHandler(datagram);
+        return;
+      }
+      this.heldDatagrams.push(datagram);
+      if (this.heldDatagrams.length > MAX_HELD_DATAGRAMS) this.heldDatagrams.shift();
     }
     close(reason = "closed locally") {
       if (this.closed) return;
@@ -177,6 +227,7 @@
     teardown() {
       live.delete(this);
       this.incoming.clear();
+      this.heldDatagrams.length = 0;
       for (const s of this.streams.values()) {
         if (s instanceof BaseStream) s.remoteClosed();
         else s.close();
@@ -432,6 +483,15 @@
       this.nextStreamId = dialer ? 0 : 1;
       port.onmessage = (e) => this.onFrame(e.data);
     }
+    get maxDatagramSize() {
+      return 1200;
+    }
+    get datagramsReliable() {
+      return true;
+    }
+    doSendDatagram(d) {
+      this.post({ k: "dgram", d });
+    }
     openStream() {
       if (this.closed) throw new DOMException("connection is closed", "InvalidStateError");
       const s = new PortStream(this.nextStreamId, this);
@@ -440,8 +500,8 @@
       this.post({ k: "open", s: s.id });
       return s;
     }
-    post(frame) {
-      if (!this.closed) this.port.postMessage(frame);
+    post(frame2) {
+      if (!this.closed) this.port.postMessage(frame2);
     }
     forget(id) {
       this.streams.delete(id);
@@ -466,6 +526,9 @@
           if (s instanceof PortStream) s.remoteClosed();
           break;
         }
+        case "dgram":
+          this.deliverDatagram(f.d);
+          break;
         case "bye":
           this.remoteClosed(`closed by peer: ${f.reason}`);
           this.port.close();
@@ -1053,7 +1116,16 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
     AuthStatus: 1004,
     AuthSpake2Handshake: 1005,
     DataChannelOpenRequest: 1101,
-    DataChannelOpenResponse: 1102
+    DataChannelOpenResponse: 1102,
+    // Pooled WebTransport. Not in the LP2P spec, whose binding dials a
+    // separate QUIC connection instead (see webtransport.ts). 1201-1204 are
+    // go-lp2p's work-in-progress messages (openscreen-go/network/messages_wip.go);
+    // 1203 gains key 2 (unidirectional). 1205 is the shim's own.
+    DataTransportStartRequest: 1201,
+    DataTransportStartResponse: 1202,
+    DataTransportStreamRequest: 1203,
+    DataTransportStreamResponse: 1204,
+    DataTransportClose: 1205
   };
   var AgentCapability = {
     DataChannels: 1100,
@@ -1113,7 +1185,15 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       case TypeKey.DataChannelOpenRequest:
         return { 0: m.requestId, 1: m.channelId, 2: m.label, 3: m.protocol };
       case TypeKey.DataChannelOpenResponse:
+      case TypeKey.DataTransportStartResponse:
+      case TypeKey.DataTransportStreamResponse:
         return { 0: m.requestId, 1: m.result };
+      case TypeKey.DataTransportStartRequest:
+        return { 0: m.requestId, 1: m.exchangeId };
+      case TypeKey.DataTransportStreamRequest:
+        return m.unidirectional ? { 0: m.requestId, 1: m.exchangeId, 2: true } : { 0: m.requestId, 1: m.exchangeId };
+      case TypeKey.DataTransportClose:
+        return { 0: m.code, 1: m.reason };
     }
   }
   var DecodeError = class extends Error {
@@ -1203,6 +1283,20 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
           requestId: uint(m, 0, "data-channel-open-response"),
           result: uint(m, 1, "data-channel-open-response")
         };
+      case TypeKey.DataTransportStartRequest:
+        return { type, requestId: uint(m, 0, "data-transport-start-request"), exchangeId: uint(m, 1, "data-transport-start-request") };
+      case TypeKey.DataTransportStartResponse:
+      case TypeKey.DataTransportStreamResponse:
+        return { type, requestId: uint(m, 0, "data-transport-response"), result: uint(m, 1, "data-transport-response") };
+      case TypeKey.DataTransportStreamRequest:
+        return {
+          type,
+          requestId: uint(m, 0, "data-transport-stream-request"),
+          exchangeId: uint(m, 1, "data-transport-stream-request"),
+          unidirectional: m[2] === true
+        };
+      case TypeKey.DataTransportClose:
+        return { type, code: uint(m, 0, "data-transport-close"), reason: text(m, 1, "data-transport-close") };
       default:
         throw new DecodeError(`unknown type key ${type}`);
     }
@@ -1287,6 +1381,316 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       control.send({ type: TypeKey.AuthSpake2Confirmation, confirmationValue: await proof(pin, m.publicValue, nQ) });
     }
   }
+
+  // src/protocol/webtransport.ts
+  var StreamFrame = {
+    Data: 0,
+    Fin: 1,
+    Reset: 2,
+    StopSending: 3
+  };
+  function frame(tag, body) {
+    const out = new Uint8Array(1 + (body?.length ?? 0));
+    out[0] = tag;
+    if (body) out.set(body, 1);
+    return out;
+  }
+  var WTStream = class {
+    unidirectional;
+    /** True if this side opened it. */
+    outgoing;
+    bytesSent = 0;
+    bytesReceived = 0;
+    onfinished = null;
+    sendDone;
+    recvDone;
+    awaitingResponse;
+    sink = null;
+    held = [];
+    stream;
+    requestId;
+    constructor(stream, unidirectional, outgoing, requestId) {
+      this.stream = stream;
+      this.unidirectional = unidirectional;
+      this.outgoing = outgoing;
+      this.requestId = requestId;
+      this.sendDone = unidirectional && !outgoing;
+      this.recvDone = unidirectional && outgoing;
+      this.awaitingResponse = outgoing;
+      stream.onmessage = (b) => this.receive(b);
+      stream.onclose = () => this.closedUnderneath();
+    }
+    /** Delivers held events, then everything that follows, to sink. */
+    attach(sink) {
+      this.sink = sink;
+      for (const ev of this.held.splice(0)) ev(sink);
+    }
+    /** Acceptor only: answers the 1203. */
+    respond(result) {
+      this.stream.send(encodeMessage({ type: TypeKey.DataTransportStreamResponse, requestId: this.requestId, result }));
+      if (result !== Result.Success) {
+        this.sendDone = this.recvDone = true;
+        this.stream.close();
+      }
+    }
+    get sending() {
+      return !this.sendDone;
+    }
+    send(chunk) {
+      if (this.sendDone) throw new DOMException("stream is not writable", "InvalidStateError");
+      this.stream.send(frame(StreamFrame.Data, chunk));
+      this.bytesSent += chunk.length;
+    }
+    fin() {
+      if (this.sendDone) return;
+      this.sendDone = true;
+      this.stream.send(frame(StreamFrame.Fin));
+      this.maybeClose();
+    }
+    reset(code) {
+      if (this.sendDone) return;
+      this.sendDone = true;
+      this.stream.send(frame(StreamFrame.Reset, encodeVarint(code)));
+      this.maybeClose();
+    }
+    stopSending(code) {
+      if (this.recvDone) return;
+      this.recvDone = true;
+      this.stream.send(frame(StreamFrame.StopSending, encodeVarint(code)));
+      this.maybeClose();
+    }
+    /** The session ended: drop the stream, telling the sink why. */
+    abort(reason) {
+      if (this.sendDone && this.recvDone) return;
+      this.sendDone = this.recvDone = true;
+      this.stream.close();
+      this.emit((s) => s.abort(reason));
+      this.onfinished?.();
+    }
+    emit(ev) {
+      if (this.sink) ev(this.sink);
+      else this.held.push(ev);
+    }
+    receive(b) {
+      if (this.awaitingResponse) {
+        this.awaitingResponse = false;
+        let m = null;
+        try {
+          m = decodeMessage(b);
+        } catch {
+        }
+        if (m?.type !== TypeKey.DataTransportStreamResponse || m.requestId !== this.requestId || m.result !== Result.Success) {
+          this.abort("the peer refused the stream");
+        }
+        return;
+      }
+      const tag = b[0];
+      switch (tag) {
+        case StreamFrame.Data:
+          if (this.recvDone) return;
+          this.bytesReceived += b.length - 1;
+          this.emit((s) => s.data(b.subarray(1)));
+          break;
+        case StreamFrame.Fin:
+          if (this.recvDone) return;
+          this.recvDone = true;
+          this.emit((s) => s.fin());
+          this.maybeClose();
+          break;
+        case StreamFrame.Reset: {
+          if (this.recvDone) return;
+          this.recvDone = true;
+          const [code] = decodeVarint(b, 1);
+          this.emit((s) => s.reset(code));
+          this.maybeClose();
+          break;
+        }
+        case StreamFrame.StopSending: {
+          if (this.sendDone) return;
+          const [code] = decodeVarint(b, 1);
+          this.emit((s) => s.stopSending(code));
+          break;
+        }
+      }
+    }
+    maybeClose() {
+      if (!this.sendDone || !this.recvDone) return;
+      this.stream.close();
+      this.onfinished?.();
+    }
+    closedUnderneath() {
+      if (this.sendDone && this.recvDone) return;
+      this.sendDone = this.recvDone = true;
+      this.emit((s) => s.abort("stream closed"));
+      this.onfinished?.();
+    }
+  };
+  var WTSession = class {
+    exchangeId;
+    outgoing;
+    state;
+    bytesSent = 0;
+    bytesReceived = 0;
+    datagramsSent = 0;
+    datagramsReceived = 0;
+    /** Outgoing: the peer accepted. */
+    onready = null;
+    /** Called once: info is null for an abrupt close (the stream or the connection went away). */
+    onclose = null;
+    host;
+    control;
+    requestIdValue;
+    streams = /* @__PURE__ */ new Set();
+    heldStreams = [];
+    streamHandler = null;
+    heldDatagrams = [];
+    datagramHandler = null;
+    prefix;
+    constructor(host, exchangeId, control, outgoing, requestId) {
+      this.host = host;
+      this.exchangeId = exchangeId;
+      this.control = control;
+      this.outgoing = outgoing;
+      this.requestIdValue = requestId;
+      this.state = outgoing ? "connecting" : "pending";
+      this.prefix = encodeVarint(exchangeId);
+      control.onmessage = (b) => this.receiveControl(b);
+      control.onclose = () => this.teardown(null, "session stream closed");
+      if (outgoing) {
+        control.send(encodeMessage({ type: TypeKey.DataTransportStartRequest, requestId, exchangeId }));
+      }
+    }
+    get maxDatagramSize() {
+      return Math.max(0, this.host.maxDatagramSize - this.prefix.length);
+    }
+    get datagramsReliable() {
+      return this.host.datagramsReliable;
+    }
+    /** Incoming streams. Streams that arrive while this is null are held. */
+    set onstream(fn) {
+      this.streamHandler = fn;
+      while (fn && this.heldStreams.length > 0) fn(this.heldStreams.shift());
+    }
+    /** Incoming datagrams. Up to 64 that arrive while this is null are held. */
+    set ondatagram(fn) {
+      this.datagramHandler = fn;
+      while (fn && this.heldDatagrams.length > 0) fn(this.heldDatagrams.shift());
+    }
+    /** Incoming, pending: the local page took the session. */
+    accept() {
+      if (this.state !== "pending") return;
+      this.state = "open";
+      this.control.send(
+        encodeMessage({ type: TypeKey.DataTransportStartResponse, requestId: this.requestIdValue, result: Result.Success })
+      );
+      for (const s of this.streams) s.respond(Result.Success);
+    }
+    openStream(unidirectional) {
+      if (this.state !== "open") throw new DOMException("session is not open", "InvalidStateError");
+      const t = this.host.openStream();
+      const requestId = this.host.requestId();
+      t.send(
+        encodeMessage({ type: TypeKey.DataTransportStreamRequest, requestId, exchangeId: this.exchangeId, unidirectional })
+      );
+      const s = new WTStream(t, unidirectional, true, requestId);
+      this.track(s);
+      return s;
+    }
+    /** From the session layer: the peer opened a stream for this session. */
+    addIncomingStream(s) {
+      if (this.state === "closed") {
+        s.respond(Result.PermanentError);
+        return;
+      }
+      this.track(s);
+      if (this.state === "open" || this.state === "connecting") s.respond(Result.Success);
+      if (this.streamHandler) this.streamHandler(s);
+      else this.heldStreams.push(s);
+    }
+    sendDatagram(payload) {
+      if (this.state !== "open") throw new DOMException("session is not open", "InvalidStateError");
+      const d = new Uint8Array(this.prefix.length + payload.length);
+      d.set(this.prefix);
+      d.set(payload, this.prefix.length);
+      this.host.sendDatagram(d);
+      this.datagramsSent++;
+      this.bytesSent += payload.length;
+    }
+    /** From the session layer: a datagram for this session, without its prefix. */
+    receiveDatagram(payload) {
+      if (this.state !== "open") return;
+      this.datagramsReceived++;
+      this.bytesReceived += payload.length;
+      if (this.datagramHandler) {
+        this.datagramHandler(payload);
+        return;
+      }
+      this.heldDatagrams.push(payload);
+      if (this.heldDatagrams.length > 64) this.heldDatagrams.shift();
+    }
+    /**
+     * Closes the session. When open, tells the peer code and reason (1205);
+     * otherwise (connecting, or pending and refused) just drops it.
+     */
+    close(code = 0, reason = "") {
+      if (this.state === "closed") return;
+      if (this.state === "open") {
+        this.control.send(encodeMessage({ type: TypeKey.DataTransportClose, code, reason }));
+      } else if (this.state === "pending") {
+        this.control.send(
+          encodeMessage({ type: TypeKey.DataTransportStartResponse, requestId: this.requestIdValue, result: Result.PermanentError })
+        );
+      }
+      this.teardown({ code, reason }, "closed locally");
+    }
+    /** Payload bytes sent and received so far, on streams and in datagrams. */
+    totals() {
+      let sent = this.bytesSent;
+      let received = this.bytesReceived;
+      for (const s of this.streams) {
+        sent += s.bytesSent;
+        received += s.bytesReceived;
+      }
+      return { sent, received };
+    }
+    track(s) {
+      this.streams.add(s);
+      s.onfinished = () => {
+        this.streams.delete(s);
+        this.bytesSent += s.bytesSent;
+        this.bytesReceived += s.bytesReceived;
+      };
+    }
+    receiveControl(b) {
+      let m;
+      try {
+        m = decodeMessage(b);
+      } catch {
+        return;
+      }
+      if (m.type === TypeKey.DataTransportStartResponse && this.state === "connecting") {
+        if (m.requestId !== this.requestIdValue || m.result !== Result.Success) {
+          this.teardown(null, `the peer refused the session (result ${m.result})`);
+          return;
+        }
+        this.state = "open";
+        this.onready?.();
+      } else if (m.type === TypeKey.DataTransportClose) {
+        this.teardown({ code: m.code, reason: m.reason }, "closed by the peer");
+      }
+    }
+    teardown(info, why) {
+      if (this.state === "closed") return;
+      this.state = "closed";
+      this.control.close();
+      for (const s of [...this.streams]) s.abort(why);
+      this.streams.clear();
+      this.heldStreams.length = 0;
+      this.heldDatagrams.length = 0;
+      this.host.forgetTransport(this.exchangeId);
+      this.onclose?.(info, why);
+    }
+  };
 
   // src/protocol/session.ts
   var ProtocolError = class extends Error {
@@ -1452,17 +1856,25 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
     incoming = [];
     channelHandler = null;
     closeHandler = null;
+    closeListeners = [];
     closeReason = null;
+    transports = /* @__PURE__ */ new Map();
+    nextExchangeId;
+    incomingTransports = [];
+    transportHandler = null;
     connection;
     constructor(connection, role) {
       this.connection = connection;
       this.role = role;
       this.channelIdParity = role === "requester" ? 0 : 1;
+      this.nextExchangeId = this.channelIdParity;
       if (role === "requester") this.setControl(new ControlChannel(connection.openStream()));
       connection.onstream = (s) => this.classify(s);
+      connection.ondatagram = (d) => this.receiveDatagram(d);
       connection.onclose = (reason) => {
         this.closeReason = reason;
         this.closeHandler?.(reason);
+        for (const fn of this.closeListeners.splice(0)) fn(reason);
       };
     }
     get closed() {
@@ -1472,13 +1884,59 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       this.closeHandler = fn;
       if (fn && this.closeReason !== null) fn(this.closeReason);
     }
+    /** Like onclose, for any number of observers; called at once if already closed. */
+    whenClosed(fn) {
+      if (this.closeReason !== null) fn(this.closeReason);
+      else this.closeListeners.push(fn);
+    }
     /** Incoming data channels. Channels that arrive while this is null are held. */
     set ondatachannel(fn) {
       this.channelHandler = fn;
       while (fn && this.incoming.length > 0) fn(this.incoming.shift());
     }
+    /** Incoming WebTransport sessions, pending. Sessions that arrive while this is null are held. */
+    set ontransport(fn) {
+      this.transportHandler = fn;
+      while (fn && this.incomingTransports.length > 0) fn(this.incomingTransports.shift());
+    }
     requestId() {
       return this.nextRequestId++;
+    }
+    get maxDatagramSize() {
+      return this.connection.maxDatagramSize;
+    }
+    get datagramsReliable() {
+      return this.connection.datagramsReliable;
+    }
+    openStream() {
+      return this.connection.openStream();
+    }
+    sendDatagram(d) {
+      this.connection.sendDatagram(d);
+    }
+    forgetTransport(exchangeId) {
+      this.transports.delete(exchangeId);
+      const i = this.incomingTransports.findIndex((t) => t.exchangeId === exchangeId);
+      if (i >= 0) this.incomingTransports.splice(i, 1);
+    }
+    /** Opens a WebTransport session (1201). It is "connecting" until the peer's page takes it. */
+    openTransport() {
+      if (this.closed) throw new DOMException("session is closed", "InvalidStateError");
+      const id = this.nextExchangeId;
+      this.nextExchangeId += 2;
+      const t = new WTSession(this, id, this.connection.openStream(), true, this.requestId());
+      this.transports.set(id, t);
+      return t;
+    }
+    receiveDatagram(d) {
+      let id;
+      let n;
+      try {
+        [id, n] = decodeVarint(d);
+      } catch {
+        return;
+      }
+      this.transports.get(id)?.receiveDatagram(d.subarray(n));
     }
     /** The control stream, once the requester has opened it. */
     controlChannel(signal) {
@@ -1554,6 +2012,13 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
         }
         if (m.type === TypeKey.DataChannelOpenRequest) {
           this.acceptDataChannel(stream, m);
+        } else if (m.type === TypeKey.DataTransportStartRequest) {
+          this.acceptTransport(stream, m.requestId, m.exchangeId);
+        } else if (m.type === TypeKey.DataTransportStreamRequest) {
+          const ws = new WTStream(stream, m.unidirectional, false, m.requestId);
+          const t = this.transports.get(m.exchangeId);
+          if (t) t.addIncomingStream(ws);
+          else ws.respond(Result.PermanentError);
         } else if (!this.control && this.role === "receiver") {
           const c = new ControlChannel(stream);
           this.setControl(c);
@@ -1562,6 +2027,17 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
           stream.close();
         }
       };
+    }
+    acceptTransport(stream, requestId, exchangeId) {
+      if (this.transports.has(exchangeId) || exchangeId % 2 === this.channelIdParity) {
+        stream.send(encodeMessage({ type: TypeKey.DataTransportStartResponse, requestId, result: Result.PermanentError }));
+        stream.close();
+        return;
+      }
+      const t = new WTSession(this, exchangeId, stream, false, requestId);
+      this.transports.set(exchangeId, t);
+      if (this.transportHandler) this.transportHandler(t);
+      else this.incomingTransports.push(t);
     }
     acceptDataChannel(stream, req) {
       const ok = !this.usedIds.has(req.channelId);
@@ -1749,7 +2225,7 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       return {
         displayName: nickname,
         modelName: this.modelName,
-        capabilities: [AgentCapability.DataChannels],
+        capabilities: [AgentCapability.DataChannels, AgentCapability.QuicTransport],
         stateToken: randomId(4),
         locales: globalThis.navigator?.languages ? [...globalThis.navigator.languages] : []
       };
@@ -1957,23 +2433,23 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
         throw new DOMException(`LP2PDataChannel is ${this.#readyState}`, "InvalidStateError");
       }
       const ep = this.#endpoint;
-      let frame;
+      let frame2;
       if (typeof data === "string") {
-        frame = [DataEncoding.String, textEncoder2.encode(data)];
+        frame2 = [DataEncoding.String, textEncoder2.encode(data)];
       } else if (data instanceof ArrayBuffer) {
-        frame = [DataEncoding.ArrayBuffer, new Uint8Array(data.slice(0))];
+        frame2 = [DataEncoding.ArrayBuffer, new Uint8Array(data.slice(0))];
       } else if (ArrayBuffer.isView(data)) {
-        frame = [DataEncoding.ArrayBuffer, new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()];
+        frame2 = [DataEncoding.ArrayBuffer, new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice()];
       } else if (typeof Blob !== "undefined" && data instanceof Blob) {
-        frame = data.arrayBuffer().then((b) => [DataEncoding.Blob, new Uint8Array(b)]);
+        frame2 = data.arrayBuffer().then((b) => [DataEncoding.Blob, new Uint8Array(b)]);
       } else {
-        frame = [DataEncoding.String, textEncoder2.encode(String(data))];
+        frame2 = [DataEncoding.String, textEncoder2.encode(String(data))];
       }
-      if (!(frame instanceof Promise) && !this.#sendChain) {
-        ep.send(frame[0], frame[1]);
+      if (!(frame2 instanceof Promise) && !this.#sendChain) {
+        ep.send(frame2[0], frame2[1]);
         return;
       }
-      const pending = Promise.resolve(frame);
+      const pending = Promise.resolve(frame2);
       const chain = (this.#sendChain ?? Promise.resolve()).then(async () => {
         const [enc, payload] = await pending;
         if (ep.state === "open") ep.send(enc, payload);
@@ -2023,6 +2499,12 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
 
   // src/api/connection.ts
   var adopting2 = null;
+  var sessions = /* @__PURE__ */ new WeakMap();
+  function sessionOf(connection) {
+    const s = sessions.get(connection);
+    if (!s) throw new TypeError("not an LP2PConnection");
+    return s;
+  }
   function adoptConnection(session) {
     adopting2 = session;
     try {
@@ -2041,6 +2523,7 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       adopting2 = null;
       if (!s) throw new TypeError("Illegal constructor");
       this.#session = s;
+      sessions.set(this, s);
       s.ondatachannel = (ep) => {
         const channel = adoptChannel(ep, true);
         this.dispatchEvent(new LP2PDataChannelEvent("datachannel", { channel }));
@@ -2084,6 +2567,14 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
   };
 
   // src/api/receiver.ts
+  var internals = /* @__PURE__ */ new WeakMap();
+  function watchSessions(receiver, fn, existing) {
+    const i = internals.get(receiver);
+    if (!i) throw new TypeError("not an LP2PReceiver");
+    if (existing) for (const s of i.sessions) fn(s);
+    i.watchers.add(fn);
+    return () => i.watchers.delete(fn);
+  }
   var LP2PReceiver = class extends EventTarget {
     #nickname;
     #started = null;
@@ -2092,6 +2583,7 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
     constructor(options = {}) {
       super();
       this.#nickname = options.nickname === void 0 ? "" : String(options.nickname);
+      internals.set(this, { sessions: /* @__PURE__ */ new Set(), watchers: /* @__PURE__ */ new Set() });
     }
     /**
      * Asks the user for permission to advertise and starts advertising.
@@ -2105,7 +2597,12 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
           session.close("receiver stopped");
           return;
         }
-        this.dispatchEvent(new LP2PConnectionEvent("connection", { connection: adoptConnection(session) }));
+        const connection = adoptConnection(session);
+        const i = internals.get(this);
+        i.sessions.add(session);
+        session.whenClosed(() => i.sessions.delete(session));
+        this.dispatchEvent(new LP2PConnectionEvent("connection", { connection }));
+        for (const fn of [...i.watchers]) fn(session);
       }).then((ad) => {
         this.#advertisement = ad;
         if (this.#stopped) ad.close();
@@ -2154,6 +2651,789 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
     }
   };
 
+  // src/api/quictransport.ts
+  var WebTransportErrorPolyfill = class extends DOMException {
+    #source;
+    #code;
+    constructor(message = "", options = {}) {
+      super(message, "WebTransportError");
+      this.#source = options.source ?? "stream";
+      const c = options.streamErrorCode;
+      this.#code = c === void 0 || c === null ? null : Math.min(Math.max(Math.round(Number(c)) || 0, 0), 4294967295);
+    }
+    get source() {
+      return this.#source;
+    }
+    get streamErrorCode() {
+      return this.#code;
+    }
+  };
+  var native = globalThis.WebTransportError;
+  if (native) Object.setPrototypeOf(WebTransportErrorPolyfill.prototype, native.prototype);
+  var WebTransportError = WebTransportErrorPolyfill;
+  function sessionError(message) {
+    return new WebTransportError(message, { source: "session" });
+  }
+  function codeOf(reason) {
+    const c = reason?.streamErrorCode;
+    return reason instanceof DOMException && typeof c === "number" ? c : 0;
+  }
+  function toBytes(chunk) {
+    if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk.slice(0));
+    if (ArrayBuffer.isView(chunk)) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength).slice();
+    throw new TypeError("chunk must be an ArrayBuffer or an ArrayBufferView");
+  }
+  function handled(p) {
+    p.catch(() => {
+    });
+    return p;
+  }
+  var Hub = class {
+    unclaimed = [];
+    claimers = [];
+    pendingOpens = /* @__PURE__ */ new Set();
+    session;
+    constructor(session) {
+      this.session = session;
+      session.ontransport = (t) => this.incoming(t);
+    }
+    claimUnclaimed() {
+      for (let t = this.unclaimed.shift(); t; t = this.unclaimed.shift()) {
+        if (t.state !== "pending") continue;
+        t.onclose = null;
+        return t;
+      }
+      return null;
+    }
+    addClaimer(fn) {
+      this.claimers.push(fn);
+      for (const t of [...this.unclaimed]) {
+        if (t.state === "pending" && fn(t)) this.unclaimed.splice(this.unclaimed.indexOf(t), 1);
+      }
+      return () => {
+        const i = this.claimers.indexOf(fn);
+        if (i >= 0) this.claimers.splice(i, 1);
+      };
+    }
+    incoming(t) {
+      if (this.session.role === "receiver") {
+        for (const p of this.pendingOpens) {
+          this.pendingOpens.delete(p);
+          p.adopt(t);
+          return;
+        }
+      }
+      for (const c of this.claimers) if (c(t)) return;
+      this.unclaimed.push(t);
+      t.onclose = () => {
+        const i = this.unclaimed.indexOf(t);
+        if (i >= 0) this.unclaimed.splice(i, 1);
+      };
+    }
+  };
+  var hubs = /* @__PURE__ */ new WeakMap();
+  function hubFor(session) {
+    let h = hubs.get(session);
+    if (!h) hubs.set(session, h = new Hub(session));
+    return h;
+  }
+  function sessionFor(source, signal) {
+    if (source instanceof LP2PConnection) return Promise.resolve(sessionOf(source));
+    if (source instanceof LP2PRequest) return source.start().then(sessionOf);
+    return new Promise((resolve, reject) => {
+      const stop = watchSessions(
+        source,
+        (s) => {
+          stop();
+          resolve(s);
+        },
+        false
+      );
+      signal.addEventListener("abort", () => {
+        stop();
+        reject(signal.reason);
+      });
+      source.start().catch((err) => {
+        stop();
+        reject(err);
+      });
+    });
+  }
+  function checkSource(source, what, allowConnection) {
+    if (source instanceof LP2PRequest || source instanceof LP2PReceiver) return;
+    if (allowConnection && source instanceof LP2PConnection) return;
+    throw new TypeError(`${what}: source must be an LP2PRequest or LP2PReceiver${allowConnection ? " or LP2PConnection" : ""}`);
+  }
+  var CHUNK = 16 * 1024;
+  var LP2PSendGroup = class {
+    #streams = /* @__PURE__ */ new Set();
+    #owner;
+    constructor() {
+      const o = groupOwner;
+      groupOwner = null;
+      if (!o) throw new TypeError("Illegal constructor");
+      this.#owner = o;
+    }
+    /** Internal. */
+    static ownerOf(g) {
+      return g.#owner;
+    }
+    /** Internal. */
+    static add(g, s) {
+      g.#streams.add(s);
+    }
+    getStats() {
+      let n = 0;
+      for (const s of this.#streams) n += s.bytesSent;
+      return Promise.resolve({ bytesWritten: n, bytesSent: n, bytesAcknowledged: n });
+    }
+  };
+  var groupOwner = null;
+  var StreamHalves = class {
+    readable = null;
+    writable = null;
+    readableDone = false;
+    writableDone = false;
+    ws;
+    constructor(ws) {
+      this.ws = ws;
+    }
+    data(chunk) {
+      if (this.readableDone || !this.readable) return;
+      this.readable.enqueue(chunk.slice());
+    }
+    fin() {
+      if (this.readableDone || !this.readable) return;
+      this.readableDone = true;
+      this.readable.close();
+      try {
+        this.readable.byobRequest?.respond(0);
+      } catch {
+      }
+    }
+    reset(code) {
+      this.errorReadable(new WebTransportError("the peer reset the stream", { source: "stream", streamErrorCode: code }));
+    }
+    stopSending(code) {
+      this.errorWritable(new WebTransportError("the peer stopped reading", { source: "stream", streamErrorCode: code }));
+      this.ws.reset(code);
+    }
+    abort(reason) {
+      const err = sessionError(reason);
+      this.errorReadable(err);
+      this.errorWritable(err);
+    }
+    errorReadable(err) {
+      if (this.readableDone || !this.readable) return;
+      this.readableDone = true;
+      this.readable.error(err);
+    }
+    errorWritable(err) {
+      if (this.writableDone || !this.writable) return;
+      this.writableDone = true;
+      this.writable.error(err);
+    }
+  };
+  var ByteStream = ReadableStream;
+  var LP2PReceiveStream = class extends ByteStream {
+    #halves;
+    constructor(halves) {
+      if (!(halves instanceof StreamHalves)) throw new TypeError("Illegal constructor");
+      super({
+        type: "bytes",
+        start: (c) => {
+          halves.readable = c;
+        },
+        cancel: (reason) => {
+          halves.readableDone = true;
+          halves.ws.stopSending(codeOf(reason));
+        }
+      });
+      this.#halves = halves;
+    }
+    getStats() {
+      const h = this.#halves;
+      const queued = h.readableDone || !h.readable ? 0 : Math.max(0, -(h.readable.desiredSize ?? 0));
+      return Promise.resolve({ bytesReceived: h.ws.bytesReceived, bytesRead: h.ws.bytesReceived - queued });
+    }
+  };
+  var LP2PSendStream = class extends WritableStream {
+    #halves;
+    #transport;
+    #sendGroup = null;
+    #sendOrder = 0;
+    constructor(halves, transport, options) {
+      if (!(halves instanceof StreamHalves)) throw new TypeError("Illegal constructor");
+      super({
+        start: (c) => {
+          halves.writable = c;
+        },
+        write: (chunk) => {
+          const bytes2 = toBytes(chunk);
+          if (!halves.ws.sending) throw new DOMException("stream is not writable", "InvalidStateError");
+          for (let off = 0; off < bytes2.length; off += CHUNK) halves.ws.send(bytes2.subarray(off, off + CHUNK));
+        },
+        close: () => {
+          halves.writableDone = true;
+          halves.ws.fin();
+        },
+        abort: (reason) => {
+          halves.writableDone = true;
+          halves.ws.reset(codeOf(reason));
+        }
+      });
+      this.#halves = halves;
+      this.#transport = transport;
+      this.sendGroup = options.sendGroup ?? null;
+      this.sendOrder = options.sendOrder ?? 0;
+    }
+    get sendGroup() {
+      return this.#sendGroup;
+    }
+    set sendGroup(g) {
+      if (g !== null && (!(g instanceof LP2PSendGroup) || LP2PSendGroup.ownerOf(g) !== this.#transport)) {
+        throw new DOMException("sendGroup belongs to another transport", "InvalidStateError");
+      }
+      this.#sendGroup = g;
+      if (g) LP2PSendGroup.add(g, this.#halves.ws);
+    }
+    /** Stored, not applied: the shim's transports have no send scheduler to prioritize with. */
+    get sendOrder() {
+      return this.#sendOrder;
+    }
+    set sendOrder(v) {
+      this.#sendOrder = Math.trunc(Number(v)) || 0;
+    }
+    getStats() {
+      const n = this.#halves.ws.bytesSent;
+      return Promise.resolve({ bytesWritten: n, bytesSent: n, bytesAcknowledged: n });
+    }
+    /** A WebTransportWriter. Without flow control, atomicWrite() is write() and commit() does nothing. */
+    getWriter() {
+      const w = super.getWriter();
+      return Object.assign(w, {
+        atomicWrite: (chunk) => w.write(chunk).then(() => void 0),
+        commit: () => void 0
+      });
+    }
+  };
+  var LP2PBidirectionalStream = class {
+    #readable;
+    #writable;
+    constructor(readable, writable) {
+      if (!(readable instanceof LP2PReceiveStream) || !(writable instanceof LP2PSendStream)) {
+        throw new TypeError("Illegal constructor");
+      }
+      this.#readable = readable;
+      this.#writable = writable;
+    }
+    get readable() {
+      return this.#readable;
+    }
+    get writable() {
+      return this.#writable;
+    }
+  };
+  var DEFAULT_MAX_BUFFERED_DATAGRAMS = 1024;
+  var LP2PDatagramsWritable = class extends WritableStream {
+    #sendGroup;
+    #sendOrder;
+    constructor(sink, options) {
+      super(sink, { highWaterMark: 1 });
+      this.#sendGroup = options.sendGroup ?? null;
+      this.#sendOrder = options.sendOrder ?? 0;
+    }
+    get sendGroup() {
+      return this.#sendGroup;
+    }
+    set sendGroup(g) {
+      this.#sendGroup = g;
+    }
+    get sendOrder() {
+      return this.#sendOrder;
+    }
+    set sendOrder(v) {
+      this.#sendOrder = Math.trunc(Number(v)) || 0;
+    }
+  };
+  function maxAge(v) {
+    if (v === null) return null;
+    const n = Number(v);
+    if (Number.isNaN(n) || n < 0) throw new RangeError("max age must be a non-negative number or null");
+    return n === 0 ? null : n;
+  }
+  var LP2PDatagramDuplexStream = class {
+    #transport;
+    #readable;
+    #controller = null;
+    #writable = null;
+    #incomingMaxAge = null;
+    #outgoingMaxAge = null;
+    #incomingMaxBuffered = DEFAULT_MAX_BUFFERED_DATAGRAMS;
+    #outgoingMaxBuffered = DEFAULT_MAX_BUFFERED_DATAGRAMS;
+    #done = false;
+    droppedIncoming = 0;
+    constructor(transport, readableType) {
+      if (!(transport instanceof LP2PQuicTransport)) throw new TypeError("Illegal constructor");
+      this.#transport = transport;
+      const start = (c) => {
+        this.#controller = c;
+      };
+      this.#readable = readableType === "bytes" ? new ReadableStream({ type: "bytes", start }) : new ReadableStream({ start }, { highWaterMark: 0 });
+    }
+    get readable() {
+      return this.#readable;
+    }
+    /** Legacy (still shipped by Chromium): one shared writable. */
+    get writable() {
+      return this.#writable ??= this.createWritable();
+    }
+    createWritable(options = {}) {
+      const t = this.#transport;
+      return new LP2PDatagramsWritable(
+        {
+          write: async (chunk) => {
+            const bytes2 = toBytes(chunk);
+            await internalsOf(t).ready;
+            const ws = internalsOf(t).session;
+            if (!ws || ws.state !== "open") throw new DOMException("transport is closed", "InvalidStateError");
+            if (bytes2.length > ws.maxDatagramSize) return;
+            ws.sendDatagram(bytes2);
+          }
+        },
+        options
+      );
+    }
+    /** 0 until the transport is ready, then what fits one datagram of the underlying connection. */
+    get maxDatagramSize() {
+      return internalsOf(this.#transport).session?.maxDatagramSize ?? 0;
+    }
+    /** Stored; the shim does not expire datagrams. */
+    get incomingMaxAge() {
+      return this.#incomingMaxAge;
+    }
+    set incomingMaxAge(v) {
+      this.#incomingMaxAge = maxAge(v);
+    }
+    get outgoingMaxAge() {
+      return this.#outgoingMaxAge;
+    }
+    set outgoingMaxAge(v) {
+      this.#outgoingMaxAge = maxAge(v);
+    }
+    get incomingMaxBufferedDatagrams() {
+      return this.#incomingMaxBuffered;
+    }
+    set incomingMaxBufferedDatagrams(v) {
+      this.#incomingMaxBuffered = Math.max(0, Math.trunc(Number(v)) || 0);
+    }
+    get outgoingMaxBufferedDatagrams() {
+      return this.#outgoingMaxBuffered;
+    }
+    set outgoingMaxBufferedDatagrams(v) {
+      this.#outgoingMaxBuffered = Math.max(0, Math.trunc(Number(v)) || 0);
+    }
+    /** Legacy names. */
+    get incomingHighWaterMark() {
+      return this.incomingMaxBufferedDatagrams;
+    }
+    set incomingHighWaterMark(v) {
+      this.incomingMaxBufferedDatagrams = v;
+    }
+    get outgoingHighWaterMark() {
+      return this.outgoingMaxBufferedDatagrams;
+    }
+    set outgoingHighWaterMark(v) {
+      this.outgoingMaxBufferedDatagrams = v;
+    }
+    /** Internal: a datagram arrived. */
+    receive(d) {
+      const c = this.#controller;
+      if (this.#done || !c) return;
+      if (-(c.desiredSize ?? 0) >= this.#incomingMaxBuffered) {
+        this.droppedIncoming++;
+        return;
+      }
+      c.enqueue(d.slice());
+    }
+    /** Internal: the session ended. */
+    finish(err) {
+      if (this.#done || !this.#controller) return;
+      this.#done = true;
+      if (err === null) this.#controller.close();
+      else this.#controller.error(err);
+    }
+  };
+  var transportInternals = /* @__PURE__ */ new WeakMap();
+  function internalsOf(t) {
+    return transportInternals.get(t);
+  }
+  function enforceUnsignedShortOrNull(v, what) {
+    if (v === null || v === void 0) return null;
+    const n = Math.trunc(Number(v));
+    if (!Number.isFinite(Number(v)) || n < 0 || n > 65535) throw new TypeError(`${what} is outside the unsigned short range`);
+    return n;
+  }
+  var CONGESTION_CONTROL = ["default", "throughput", "low-latency"];
+  var MAX_REASON_BYTES = 1024;
+  var adopting3 = null;
+  function adoptTransport(session, init) {
+    adopting3 = { session, init };
+    try {
+      return new LP2PQuicTransport(null, init);
+    } finally {
+      adopting3 = null;
+    }
+  }
+  var LP2PQuicTransport = class {
+    #state = "connecting";
+    #session = null;
+    #reliability = "pending";
+    #congestionControl;
+    #requireUnreliable;
+    #anticipatedUni;
+    #anticipatedBidi;
+    #ready;
+    #resolveReady;
+    #rejectReady;
+    #closed;
+    #resolveClosed;
+    #rejectClosed;
+    #draining;
+    #resolveDraining;
+    #datagrams;
+    #incomingBidiController;
+    #incomingUniController;
+    #incomingBidi;
+    #incomingUni;
+    #abort = new AbortController();
+    #unbind = null;
+    /** Always true: the postMessage transport gives reliable-only sessions. */
+    static get supportsReliableOnly() {
+      return true;
+    }
+    /**
+     * Opens a WebTransport session with the peer of source. An LP2PRequest or
+     * LP2PReceiver that is not started yet is started, as the spec says. For
+     * an LP2PReceiver, the session is opened on its next connection.
+     */
+    constructor(source, quicTransportDict = {}) {
+      const a = adopting3;
+      adopting3 = null;
+      if (!a) {
+        if (arguments.length < 1) throw new TypeError("LP2PQuicTransport: source is required");
+        checkSource(source, "LP2PQuicTransport", true);
+      }
+      const init = quicTransportDict ?? {};
+      const cc = init.congestionControl ?? "default";
+      if (!CONGESTION_CONTROL.includes(cc)) throw new TypeError(`invalid congestionControl "${String(cc)}"`);
+      if (init.datagramsReadableType !== void 0 && init.datagramsReadableType !== "bytes") {
+        throw new TypeError(`invalid datagramsReadableType "${String(init.datagramsReadableType)}"`);
+      }
+      this.#congestionControl = cc;
+      this.#requireUnreliable = Boolean(init.requireUnreliable);
+      this.#anticipatedUni = enforceUnsignedShortOrNull(
+        init.anticipatedConcurrentIncomingUnidirectionalStreams,
+        "anticipatedConcurrentIncomingUnidirectionalStreams"
+      );
+      this.#anticipatedBidi = enforceUnsignedShortOrNull(
+        init.anticipatedConcurrentIncomingBidirectionalStreams,
+        "anticipatedConcurrentIncomingBidirectionalStreams"
+      );
+      this.#ready = handled(
+        new Promise((resolve, reject) => {
+          this.#resolveReady = () => resolve(void 0);
+          this.#rejectReady = reject;
+        })
+      );
+      this.#closed = handled(
+        new Promise((resolve, reject) => {
+          this.#resolveClosed = resolve;
+          this.#rejectClosed = reject;
+        })
+      );
+      this.#draining = new Promise((resolve) => {
+        this.#resolveDraining = () => resolve(void 0);
+      });
+      this.#datagrams = new LP2PDatagramDuplexStream(this, init.datagramsReadableType);
+      this.#incomingBidi = new ReadableStream(
+        { start: (c) => void (this.#incomingBidiController = c) },
+        { highWaterMark: 0 }
+      );
+      this.#incomingUni = new ReadableStream(
+        { start: (c) => void (this.#incomingUniController = c) },
+        { highWaterMark: 0 }
+      );
+      transportInternals.set(this, { session: null, ready: this.#ready });
+      if (a) {
+        this.#attach(a.session);
+        return;
+      }
+      sessionFor(source, this.#abort.signal).then(
+        (session) => this.#bind(session),
+        (err) => this.#fail(err instanceof DOMException ? err : sessionError(String(err)))
+      );
+    }
+    /** Opens a session on the LP2P session, or joins one the peer opened that nobody took. */
+    #bind(session) {
+      if (this.#state !== "connecting") return;
+      if (session.closed) {
+        this.#fail(sessionError("the LP2P connection is closed"));
+        return;
+      }
+      const hub = hubFor(session);
+      const waiting = hub.claimUnclaimed();
+      if (waiting) {
+        waiting.accept();
+        this.#attach(waiting);
+        return;
+      }
+      const out = session.openTransport();
+      const pending = {
+        adopt: (incoming) => {
+          out.onclose = null;
+          out.close();
+          incoming.accept();
+          this.#attach(incoming);
+        }
+      };
+      hub.pendingOpens.add(pending);
+      this.#unbind = () => hub.pendingOpens.delete(pending);
+      out.onready = () => {
+        hub.pendingOpens.delete(pending);
+        this.#attach(out);
+      };
+      out.onclose = (_info, why) => {
+        hub.pendingOpens.delete(pending);
+        this.#fail(sessionError(why));
+      };
+      this.#session = out;
+    }
+    #attach(ws) {
+      if (this.#state !== "connecting") {
+        ws.close();
+        return;
+      }
+      this.#session = ws;
+      internalsOf(this).session = ws;
+      this.#reliability = ws.datagramsReliable || ws.maxDatagramSize === 0 ? "reliable-only" : "supports-unreliable";
+      if (this.#requireUnreliable && this.#reliability !== "supports-unreliable") {
+        this.#fail(new WebTransportError("requireUnreliable: this connection only delivers reliably", { source: "session" }));
+        return;
+      }
+      this.#state = "connected";
+      ws.onclose = (info, why) => this.#cleanup(info, why);
+      ws.onstream = (s) => this.#incoming(s);
+      ws.ondatagram = (d) => this.#datagrams.receive(d);
+      this.#resolveReady();
+    }
+    #incoming(s) {
+      const halves = new StreamHalves(s);
+      const readable = new LP2PReceiveStream(halves);
+      if (s.unidirectional) {
+        s.attach(halves);
+        this.#incomingUniController.enqueue(readable);
+        return;
+      }
+      const writable = new LP2PSendStream(halves, this, {});
+      s.attach(halves);
+      this.#incomingBidiController.enqueue(new LP2PBidirectionalStream(readable, writable));
+    }
+    #fail(err) {
+      if (this.#state === "closed" || this.#state === "failed") return;
+      const ws = this.#session;
+      this.#state = "failed";
+      this.#reliability = "pending";
+      this.#abort.abort(err);
+      this.#unbind?.();
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+      this.#rejectReady(err);
+      this.#rejectClosed(err);
+      this.#incomingBidiController.error(err);
+      this.#incomingUniController.error(err);
+      this.#datagrams.finish(err);
+      this.#resolveDraining();
+    }
+    #cleanup(info, why) {
+      if (this.#state === "closed" || this.#state === "failed") return;
+      if (info === null) {
+        this.#fail(sessionError(why));
+        return;
+      }
+      this.#state = "closed";
+      this.#resolveClosed({ closeCode: info.code, reason: info.reason });
+      this.#incomingBidiController.close();
+      this.#incomingUniController.close();
+      this.#datagrams.finish(null);
+      this.#resolveDraining();
+    }
+    get ready() {
+      return this.#ready;
+    }
+    get closed() {
+      return this.#closed;
+    }
+    /** Resolves when the session closes: no peer page can ask for a drain (there is no GOAWAY). */
+    get draining() {
+      return this.#draining;
+    }
+    get reliability() {
+      return this.#reliability;
+    }
+    get congestionControl() {
+      return this.#congestionControl;
+    }
+    get anticipatedConcurrentIncomingUnidirectionalStreams() {
+      return this.#anticipatedUni;
+    }
+    set anticipatedConcurrentIncomingUnidirectionalStreams(v) {
+      this.#anticipatedUni = enforceUnsignedShortOrNull(v, "anticipatedConcurrentIncomingUnidirectionalStreams");
+    }
+    get anticipatedConcurrentIncomingBidirectionalStreams() {
+      return this.#anticipatedBidi;
+    }
+    set anticipatedConcurrentIncomingBidirectionalStreams(v) {
+      this.#anticipatedBidi = enforceUnsignedShortOrNull(v, "anticipatedConcurrentIncomingBidirectionalStreams");
+    }
+    /** Always null: there is no HTTP exchange. */
+    get responseHeaders() {
+      return null;
+    }
+    /** Always "": there is no subprotocol negotiation. */
+    get protocol() {
+      return "";
+    }
+    get datagrams() {
+      return this.#datagrams;
+    }
+    get incomingBidirectionalStreams() {
+      return this.#incomingBidi;
+    }
+    get incomingUnidirectionalStreams() {
+      return this.#incomingUni;
+    }
+    async #openStream(unidirectional) {
+      if (this.#state === "connecting") await this.#ready;
+      const ws = this.#session;
+      if (this.#state !== "connected" || !ws) throw new DOMException("transport is closed", "InvalidStateError");
+      const s = ws.openStream(unidirectional);
+      const halves = new StreamHalves(s);
+      return halves;
+    }
+    async createBidirectionalStream(options = {}) {
+      const halves = await this.#openStream(false);
+      const readable = new LP2PReceiveStream(halves);
+      const writable = new LP2PSendStream(halves, this, options ?? {});
+      halves.ws.attach(halves);
+      return new LP2PBidirectionalStream(readable, writable);
+    }
+    async createUnidirectionalStream(options = {}) {
+      const halves = await this.#openStream(true);
+      const writable = new LP2PSendStream(halves, this, options ?? {});
+      halves.ws.attach(halves);
+      return writable;
+    }
+    createSendGroup() {
+      groupOwner = this;
+      return new LP2PSendGroup();
+    }
+    /** Counts payload bytes; RTT and packet counts are not observable through the shim's transports. */
+    getStats() {
+      const t = this.#session?.totals() ?? { sent: 0, received: 0 };
+      return Promise.resolve({
+        bytesSent: t.sent,
+        bytesReceived: t.received,
+        datagrams: { droppedIncoming: this.#datagrams.droppedIncoming, expiredIncoming: 0, expiredOutgoing: 0, lostOutgoing: 0 },
+        estimatedSendRate: null,
+        atSendCapacity: false
+      });
+    }
+    /** Not supported: the shim has no TLS session to export keying material from. */
+    exportKeyingMaterial(_label, _context, _outputLength) {
+      return Promise.reject(new DOMException("exportKeyingMaterial is not supported by lp2p-shim", "NotSupportedError"));
+    }
+    close(closeInfo = {}) {
+      if (this.#state === "closed" || this.#state === "failed") return;
+      if (this.#state === "connecting") {
+        this.#fail(sessionError("closed before the session was established"));
+        return;
+      }
+      const code = Math.min(Math.max(Math.trunc(Number(closeInfo?.closeCode ?? 0)) || 0, 0), 4294967295);
+      let reason = String(closeInfo?.reason ?? "");
+      const enc = new TextEncoder();
+      while (enc.encode(reason).length > MAX_REASON_BYTES) reason = [...reason].slice(0, -1).join("");
+      this.#session?.close(code, reason);
+      return;
+    }
+  };
+  var LP2PQuicTransportListener = class {
+    #ready;
+    #incoming;
+    /**
+     * Hands out the WebTransport sessions peers open on source's connections:
+     * the one connection of an LP2PRequest, or every connection of an
+     * LP2PReceiver (current and future). Starts source if needed. Extension:
+     * source may also be an LP2PConnection.
+     */
+    constructor(source, quicTransportListenerDict = {}) {
+      if (arguments.length < 1) throw new TypeError("LP2PQuicTransportListener: source is required");
+      checkSource(source, "LP2PQuicTransportListener", true);
+      void quicTransportListenerDict;
+      const stops = [];
+      let controller;
+      let done = false;
+      const finish = (err) => {
+        if (done) return;
+        done = true;
+        for (const stop of stops.splice(0)) stop();
+        if (err === void 0) controller.close();
+        else controller.error(err);
+      };
+      this.#incoming = new ReadableStream(
+        {
+          start: (c) => void (controller = c),
+          cancel: () => {
+            done = true;
+            for (const stop of stops.splice(0)) stop();
+          }
+        },
+        { highWaterMark: 0 }
+      );
+      const claim = (t) => {
+        if (done) return false;
+        t.accept();
+        controller.enqueue(adoptTransport(t, {}));
+        return true;
+      };
+      const watch = (s, last) => {
+        if (done) return;
+        stops.push(hubFor(s).addClaimer(claim));
+        if (last) s.whenClosed(() => finish());
+      };
+      let started;
+      if (source instanceof LP2PConnection) {
+        watch(sessionOf(source), true);
+        started = Promise.resolve();
+      } else if (source instanceof LP2PRequest) {
+        started = source.start().then((conn) => watch(sessionOf(conn), true));
+      } else {
+        stops.push(watchSessions(source, (s) => watch(s, false), true));
+        started = source.start();
+      }
+      this.#ready = handled(started.then(() => void 0));
+      this.#ready.catch((err) => finish(err));
+    }
+    get ready() {
+      return this.#ready;
+    }
+    get incomingTransports() {
+      return this.#incoming;
+    }
+  };
+
   // src/install.ts
   var interfaces = {
     LP2PReceiver,
@@ -2161,7 +3441,9 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
     LP2PConnection,
     LP2PDataChannel,
     LP2PConnectionEvent,
-    LP2PDataChannelEvent
+    LP2PDataChannelEvent,
+    LP2PQuicTransport,
+    LP2PQuicTransportListener
   };
   function install(options = {}) {
     if (globalThis.isSecureContext === false) return [];
@@ -2176,6 +3458,13 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
 
   // src/transport/webrtc.ts
   var CONTROL_LABEL = "lp2p-shim/control";
+  var DATAGRAM_LABEL = "lp2p-shim/datagrams";
+  var MAX_DATAGRAM_SIZE = 1200;
+  function createDatagramChannel(pc) {
+    const dc = pc.createDataChannel(DATAGRAM_LABEL, { negotiated: true, id: 1, ordered: false, maxRetransmits: 0 });
+    dc.binaryType = "arraybuffer";
+    return dc;
+  }
   var DISCONNECT_GRACE_MS = 5e3;
   var ChannelStream = class extends BaseStream {
     pending = [];
@@ -2211,10 +3500,13 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
     nextId = 0;
     pc;
     control;
-    constructor(remoteId, pc, control, early) {
+    datagrams;
+    constructor(remoteId, pc, control, datagrams, early) {
       super(remoteId);
       this.pc = pc;
       this.control = control;
+      this.datagrams = datagrams;
+      datagrams.onmessage = (e) => this.deliverDatagram(new Uint8Array(e.data));
       pc.ondatachannel = (e) => this.accept(this.wrap(e.channel));
       for (const { dc, received } of early) this.accept(this.wrap(dc, received));
       control.onmessage = (e) => {
@@ -2237,6 +3529,13 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       const s = this.wrap(this.pc.createDataChannel(`lp2p-shim/stream`, { ordered: true }));
       this.streams.set(s.id, s);
       return s;
+    }
+    get maxDatagramSize() {
+      return MAX_DATAGRAM_SIZE;
+    }
+    doSendDatagram(d) {
+      if (this.datagrams.readyState !== "open" || this.datagrams.bufferedAmount > 256 * 1024) return;
+      this.datagrams.send(d);
     }
     forget(id) {
       this.streams.delete(id);
@@ -2286,27 +3585,28 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       this.rtcConfiguration = options.rtcConfiguration ?? { iceServers: [] };
     }
     listen(ad, onconnection) {
-      const sessions = /* @__PURE__ */ new Map();
+      const sessions2 = /* @__PURE__ */ new Map();
       return this.rendezvous.advertise(ad, (m) => {
         if (m.t !== "signal" || typeof m["conn"] !== "string") return;
         const connId = m["conn"];
         const data = m["data"];
-        if (data.sdp?.type === "offer" && !sessions.has(connId)) {
+        if (data.sdp?.type === "offer" && !sessions2.has(connId)) {
           const pc = new RTCPeerConnection(this.rtcConfiguration);
           const candidates = new CandidateQueue(pc);
-          sessions.set(connId, { pc, candidates });
+          sessions2.set(connId, { pc, candidates });
           const control = pc.createDataChannel(CONTROL_LABEL, { negotiated: true, id: 0 });
+          const datagrams = createDatagramChannel(pc);
           const early = collectEarlyChannels(pc);
           const reply = (d) => this.rendezvous.send({ t: "signal", from: ad.id, to: m.from, conn: connId, data: d });
           if (this.trickle) {
             pc.onicecandidate = (e) => e.candidate && reply({ candidate: e.candidate.toJSON() });
           }
           control.onopen = () => {
-            sessions.delete(connId);
-            onconnection(new RTCConnection(m.from, pc, control, early));
+            sessions2.delete(connId);
+            onconnection(new RTCConnection(m.from, pc, control, datagrams, early));
           };
           const fail = () => {
-            sessions.delete(connId);
+            sessions2.delete(connId);
             pc.close();
           };
           const timer = setTimeout(fail, this.connectTimeout);
@@ -2319,7 +3619,7 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
             reply({ sdp: pc.localDescription?.toJSON() });
           })().catch(fail);
         } else if (data.candidate) {
-          sessions.get(connId)?.candidates.add(data.candidate);
+          sessions2.get(connId)?.candidates.add(data.candidate);
         }
       });
     }
@@ -2331,6 +3631,7 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
       const pc = new RTCPeerConnection(this.rtcConfiguration);
       const candidates = new CandidateQueue(pc);
       const control = pc.createDataChannel(CONTROL_LABEL, { negotiated: true, id: 0 });
+      const datagrams = createDatagramChannel(pc);
       const early = collectEarlyChannels(pc);
       const send = (d) => this.rendezvous.send({ t: "signal", from: local.id, to: peerId, conn: connId, nickname: local.nickname, data: d });
       let registration;
@@ -2353,7 +3654,7 @@ input { width: 100%; box-sizing: border-box; font: 18px ui-monospace, monospace;
           if (this.trickle) {
             pc.onicecandidate = (e) => e.candidate && send({ candidate: e.candidate.toJSON() });
           }
-          control.onopen = () => resolve(new RTCConnection(peerId, pc, control, early));
+          control.onopen = () => resolve(new RTCConnection(peerId, pc, control, datagrams, early));
           void (async () => {
             await pc.setLocalDescription(await pc.createOffer());
             if (!this.trickle) await gathered(pc);

@@ -9,6 +9,11 @@ export declare const TypeKey: {
     readonly AuthSpake2Handshake: 1005;
     readonly DataChannelOpenRequest: 1101;
     readonly DataChannelOpenResponse: 1102;
+    readonly DataTransportStartRequest: 1201;
+    readonly DataTransportStartResponse: 1202;
+    readonly DataTransportStreamRequest: 1203;
+    readonly DataTransportStreamResponse: 1204;
+    readonly DataTransportClose: 1205;
 };
 export type TypeKey = (typeof TypeKey)[keyof typeof TypeKey];
 /** agent-capability values. The LP2P spec writes "11OO" (letter O); 1100 is meant. */
@@ -91,6 +96,27 @@ export type Message = {
     type: typeof TypeKey.DataChannelOpenResponse;
     requestId: number;
     result: number;
+} | {
+    type: typeof TypeKey.DataTransportStartRequest;
+    requestId: number;
+    exchangeId: number;
+} | {
+    type: typeof TypeKey.DataTransportStartResponse;
+    requestId: number;
+    result: number;
+} | {
+    type: typeof TypeKey.DataTransportStreamRequest;
+    requestId: number;
+    exchangeId: number;
+    unidirectional: boolean;
+} | {
+    type: typeof TypeKey.DataTransportStreamResponse;
+    requestId: number;
+    result: number;
+} | {
+    type: typeof TypeKey.DataTransportClose;
+    code: number;
+    reason: string;
 };
 /** Encodes a message as varint type key + CBOR body. */
 export declare function encodeMessage(m: Message): Uint8Array;

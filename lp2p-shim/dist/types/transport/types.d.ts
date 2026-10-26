@@ -56,6 +56,17 @@ export interface TransportConnection {
     onclose: ((reason: string) => void) | null;
     /** Closes the connection and all its streams. */
     close(reason?: string): void;
+    /** The largest datagram sendDatagram takes, in bytes; 0 if the connection has no datagrams. */
+    readonly maxDatagramSize: number;
+    /** True if datagrams are in fact delivered reliably and in order (no loss is possible). */
+    readonly datagramsReliable: boolean;
+    /**
+     * Sends one datagram, at most maxDatagramSize bytes. It may be lost,
+     * duplicated or reordered. Throws if the connection is closed.
+     */
+    sendDatagram(datagram: Uint8Array): void;
+    /** Called for each datagram. A few that arrive while this is null are held; older ones are dropped. */
+    ondatagram: ((datagram: Uint8Array) => void) | null;
 }
 export interface TransportStream {
     /** Unique within its connection. */

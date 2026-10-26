@@ -1,5 +1,6 @@
 import type { TransportConnection, TransportStream } from "../transport/types.js";
 import { DataEncoding, type AgentInfo, type Message } from "./messages.js";
+import { WTSession, type WTHost } from "./webtransport.js";
 export type Role = "requester" | "receiver";
 export declare class ProtocolError extends Error {
     name: string;
@@ -53,7 +54,7 @@ export declare class DataChannelEndpoint {
     private receive;
     private closed;
 }
-export declare class Session {
+export declare class Session implements WTHost {
     readonly role: Role;
     remoteInfo: AgentInfo | null;
     private control;
@@ -64,14 +65,31 @@ export declare class Session {
     private readonly incoming;
     private channelHandler;
     private closeHandler;
+    private readonly closeListeners;
     private closeReason;
+    private readonly transports;
+    private nextExchangeId;
+    private readonly incomingTransports;
+    private transportHandler;
     readonly connection: TransportConnection;
     constructor(connection: TransportConnection, role: Role);
     get closed(): boolean;
     set onclose(fn: ((reason: string) => void) | null);
+    /** Like onclose, for any number of observers; called at once if already closed. */
+    whenClosed(fn: (reason: string) => void): void;
     /** Incoming data channels. Channels that arrive while this is null are held. */
     set ondatachannel(fn: ((ep: DataChannelEndpoint) => void) | null);
+    /** Incoming WebTransport sessions, pending. Sessions that arrive while this is null are held. */
+    set ontransport(fn: ((t: WTSession) => void) | null);
     requestId(): number;
+    get maxDatagramSize(): number;
+    get datagramsReliable(): boolean;
+    openStream(): TransportStream;
+    sendDatagram(d: Uint8Array): void;
+    forgetTransport(exchangeId: number): void;
+    /** Opens a WebTransport session (1201). It is "connecting" until the peer's page takes it. */
+    openTransport(): WTSession;
+    private receiveDatagram;
     /** The control stream, once the requester has opened it. */
     controlChannel(signal?: AbortSignal): Promise<ControlChannel>;
     /** Exchanges agent-info: answers the peer's request and asks for the peer's. */
@@ -88,5 +106,6 @@ export declare class Session {
     private setControl;
     /** Looks at a new stream's first message to tell the control stream from data channels. */
     private classify;
+    private acceptTransport;
     private acceptDataChannel;
 }

@@ -6,6 +6,26 @@ export { LP2PRequest, type LP2PRequestOptions } from "./api/request.ts";
 export { LP2PConnection } from "./api/connection.ts";
 export { LP2PDataChannel, type LP2PDataChannelInit, type LP2PDataChannelState } from "./api/datachannel.ts";
 export {
+  LP2PQuicTransport,
+  LP2PQuicTransportListener,
+  LP2PBidirectionalStream,
+  LP2PReceiveStream,
+  LP2PSendStream,
+  LP2PSendGroup,
+  LP2PDatagramDuplexStream,
+  LP2PDatagramsWritable,
+  WebTransportError,
+  type LP2PQuicTransportInit,
+  type LP2PQuicTransportListenerInit,
+  type WebTransportCloseInfo,
+  type WebTransportConnectionStats,
+  type WebTransportErrorInit,
+  type WebTransportSendOptions,
+  type WebTransportSendStreamOptions,
+  type WebTransportSendStreamStats,
+  type WebTransportReceiveStreamStats,
+} from "./api/quictransport.ts";
+export {
   LP2PConnectionEvent,
   LP2PDataChannelEvent,
   type LP2PConnectionEventInit,
@@ -53,6 +73,7 @@ export {
 export { Rendezvous, type RendezvousOptions } from "./transport/rendezvous.ts";
 
 export { Session, DataChannelEndpoint, ControlChannel, ProtocolError, type Role } from "./protocol/session.ts";
+export { WTSession, WTStream, StreamFrame, type StreamSink, type CloseInfo } from "./protocol/webtransport.ts";
 export * as messages from "./protocol/messages.ts";
 export { encodeCBOR, decodeCBOR, type CBORValue } from "./codec/cbor.ts";
 export { encodeVarint, decodeVarint } from "./codec/varint.ts";

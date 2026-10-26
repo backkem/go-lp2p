@@ -10,9 +10,14 @@
 //   data-channel-open-response (1102) on the same stream, after which both
 //   sides send data-frames (24). Closing the stream closes the channel. This
 //   is how go-lp2p maps LP2P data channels onto QUIC streams.
+// - Streams that begin with 1201 or 1203 are WebTransport session and
+//   stream streams, and connection datagrams belong to WebTransport
+//   sessions; see webtransport.ts.
 
 import type { TransportConnection, TransportStream } from "../transport/types.ts";
+import { decodeVarint } from "../codec/varint.ts";
 import { DataEncoding, Result, TypeKey, decodeMessage, encodeMessage, type AgentInfo, type Message } from "./messages.ts";
+import { WTSession, WTStream, type WTHost } from "./webtransport.ts";
 
 export type Role = "requester" | "receiver";
 
@@ -202,7 +207,7 @@ export class DataChannelEndpoint {
   }
 }
 
-export class Session {
+export class Session implements WTHost {
   readonly role: Role;
   remoteInfo: AgentInfo | null = null;
   private control: ControlChannel | null = null;
@@ -213,7 +218,12 @@ export class Session {
   private readonly incoming: DataChannelEndpoint[] = [];
   private channelHandler: ((ep: DataChannelEndpoint) => void) | null = null;
   private closeHandler: ((reason: string) => void) | null = null;
+  private readonly closeListeners: ((reason: string) => void)[] = [];
   private closeReason: string | null = null;
+  private readonly transports = new Map<number, WTSession>();
+  private nextExchangeId: number;
+  private readonly incomingTransports: WTSession[] = [];
+  private transportHandler: ((t: WTSession) => void) | null = null;
 
   readonly connection: TransportConnection;
 
@@ -222,11 +232,14 @@ export class Session {
     this.role = role;
     // The requester (QUIC client) allocates even IDs, the receiver odd ones.
     this.channelIdParity = role === "requester" ? 0 : 1;
+    this.nextExchangeId = this.channelIdParity;
     if (role === "requester") this.setControl(new ControlChannel(connection.openStream()));
     connection.onstream = (s) => this.classify(s);
+    connection.ondatagram = (d) => this.receiveDatagram(d);
     connection.onclose = (reason) => {
       this.closeReason = reason;
       this.closeHandler?.(reason);
+      for (const fn of this.closeListeners.splice(0)) fn(reason);
     };
   }
 
@@ -239,14 +252,69 @@ export class Session {
     if (fn && this.closeReason !== null) fn(this.closeReason);
   }
 
+  /** Like onclose, for any number of observers; called at once if already closed. */
+  whenClosed(fn: (reason: string) => void): void {
+    if (this.closeReason !== null) fn(this.closeReason);
+    else this.closeListeners.push(fn);
+  }
+
   /** Incoming data channels. Channels that arrive while this is null are held. */
   set ondatachannel(fn: ((ep: DataChannelEndpoint) => void) | null) {
     this.channelHandler = fn;
     while (fn && this.incoming.length > 0) fn(this.incoming.shift() as DataChannelEndpoint);
   }
 
+  /** Incoming WebTransport sessions, pending. Sessions that arrive while this is null are held. */
+  set ontransport(fn: ((t: WTSession) => void) | null) {
+    this.transportHandler = fn;
+    while (fn && this.incomingTransports.length > 0) fn(this.incomingTransports.shift() as WTSession);
+  }
+
   requestId(): number {
     return this.nextRequestId++;
+  }
+
+  get maxDatagramSize(): number {
+    return this.connection.maxDatagramSize;
+  }
+
+  get datagramsReliable(): boolean {
+    return this.connection.datagramsReliable;
+  }
+
+  openStream(): TransportStream {
+    return this.connection.openStream();
+  }
+
+  sendDatagram(d: Uint8Array): void {
+    this.connection.sendDatagram(d);
+  }
+
+  forgetTransport(exchangeId: number): void {
+    this.transports.delete(exchangeId);
+    const i = this.incomingTransports.findIndex((t) => t.exchangeId === exchangeId);
+    if (i >= 0) this.incomingTransports.splice(i, 1);
+  }
+
+  /** Opens a WebTransport session (1201). It is "connecting" until the peer's page takes it. */
+  openTransport(): WTSession {
+    if (this.closed) throw new DOMException("session is closed", "InvalidStateError");
+    const id = this.nextExchangeId;
+    this.nextExchangeId += 2;
+    const t = new WTSession(this, id, this.connection.openStream(), true, this.requestId());
+    this.transports.set(id, t);
+    return t;
+  }
+
+  private receiveDatagram(d: Uint8Array): void {
+    let id: number;
+    let n: number;
+    try {
+      [id, n] = decodeVarint(d);
+    } catch {
+      return;
+    }
+    this.transports.get(id)?.receiveDatagram(d.subarray(n));
   }
 
   /** The control stream, once the requester has opened it. */
@@ -330,6 +398,13 @@ export class Session {
       }
       if (m.type === TypeKey.DataChannelOpenRequest) {
         this.acceptDataChannel(stream, m);
+      } else if (m.type === TypeKey.DataTransportStartRequest) {
+        this.acceptTransport(stream, m.requestId, m.exchangeId);
+      } else if (m.type === TypeKey.DataTransportStreamRequest) {
+        const ws = new WTStream(stream, m.unidirectional, false, m.requestId);
+        const t = this.transports.get(m.exchangeId);
+        if (t) t.addIncomingStream(ws);
+        else ws.respond(Result.PermanentError);
       } else if (!this.control && this.role === "receiver") {
         const c = new ControlChannel(stream);
         this.setControl(c);
@@ -338,6 +413,19 @@ export class Session {
         stream.close();
       }
     };
+  }
+
+  private acceptTransport(stream: TransportStream, requestId: number, exchangeId: number): void {
+    // The peer allocates exchange-ids of its own parity.
+    if (this.transports.has(exchangeId) || exchangeId % 2 === this.channelIdParity) {
+      stream.send(encodeMessage({ type: TypeKey.DataTransportStartResponse, requestId, result: Result.PermanentError }));
+      stream.close();
+      return;
+    }
+    const t = new WTSession(this, exchangeId, stream, false, requestId);
+    this.transports.set(exchangeId, t);
+    if (this.transportHandler) this.transportHandler(t);
+    else this.incomingTransports.push(t);
   }
 
   private acceptDataChannel(stream: TransportStream, req: Extract<Message, { type: typeof TypeKey.DataChannelOpenRequest }>): void {

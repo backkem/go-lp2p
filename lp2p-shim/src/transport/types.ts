@@ -7,6 +7,11 @@
 // session layer (../protocol/session.ts) speaks OSP messages over these
 // streams, and the API layer (../api) is built on the session layer only.
 //
+// Connections may also carry datagrams (maxDatagramSize > 0): small
+// messages with no ordering or delivery guarantee, the service QUIC
+// DATAGRAM frames (RFC 9221) give a WebTransport session. A transport that
+// cannot lose messages may still offer them and set datagramsReliable.
+//
 // A transport that bridges to a native OSP agent (for example a WebSocket to
 // a local go-lp2p helper that maps each stream to a QUIC stream) implements
 // this same interface; nothing above it needs to change.
@@ -79,6 +84,21 @@ export interface TransportConnection {
 
   /** Closes the connection and all its streams. */
   close(reason?: string): void;
+
+  /** The largest datagram sendDatagram takes, in bytes; 0 if the connection has no datagrams. */
+  readonly maxDatagramSize: number;
+
+  /** True if datagrams are in fact delivered reliably and in order (no loss is possible). */
+  readonly datagramsReliable: boolean;
+
+  /**
+   * Sends one datagram, at most maxDatagramSize bytes. It may be lost,
+   * duplicated or reordered. Throws if the connection is closed.
+   */
+  sendDatagram(datagram: Uint8Array): void;
+
+  /** Called for each datagram. A few that arrive while this is null are held; older ones are dropped. */
+  ondatagram: ((datagram: Uint8Array) => void) | null;
 }
 
 export interface TransportStream {

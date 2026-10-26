@@ -22,6 +22,15 @@ export const TypeKey = {
   AuthSpake2Handshake: 1005,
   DataChannelOpenRequest: 1101,
   DataChannelOpenResponse: 1102,
+  // Pooled WebTransport. Not in the LP2P spec, whose binding dials a
+  // separate QUIC connection instead (see webtransport.ts). 1201-1204 are
+  // go-lp2p's work-in-progress messages (openscreen-go/network/messages_wip.go);
+  // 1203 gains key 2 (unidirectional). 1205 is the shim's own.
+  DataTransportStartRequest: 1201,
+  DataTransportStartResponse: 1202,
+  DataTransportStreamRequest: 1203,
+  DataTransportStreamResponse: 1204,
+  DataTransportClose: 1205,
 } as const;
 export type TypeKey = (typeof TypeKey)[keyof typeof TypeKey];
 
@@ -88,7 +97,12 @@ export type Message =
   | { type: typeof TypeKey.AuthSpake2Confirmation; confirmationValue: Uint8Array }
   | { type: typeof TypeKey.AuthStatus; result: number }
   | { type: typeof TypeKey.DataChannelOpenRequest; requestId: number; channelId: number; label: string; protocol: string }
-  | { type: typeof TypeKey.DataChannelOpenResponse; requestId: number; result: number };
+  | { type: typeof TypeKey.DataChannelOpenResponse; requestId: number; result: number }
+  | { type: typeof TypeKey.DataTransportStartRequest; requestId: number; exchangeId: number }
+  | { type: typeof TypeKey.DataTransportStartResponse; requestId: number; result: number }
+  | { type: typeof TypeKey.DataTransportStreamRequest; requestId: number; exchangeId: number; unidirectional: boolean }
+  | { type: typeof TypeKey.DataTransportStreamResponse; requestId: number; result: number }
+  | { type: typeof TypeKey.DataTransportClose; code: number; reason: string };
 
 type CBORMap = { [key: string]: CBORValue };
 
@@ -120,7 +134,15 @@ function toCBOR(m: Message): CBORMap {
     case TypeKey.DataChannelOpenRequest:
       return { 0: m.requestId, 1: m.channelId, 2: m.label, 3: m.protocol };
     case TypeKey.DataChannelOpenResponse:
+    case TypeKey.DataTransportStartResponse:
+    case TypeKey.DataTransportStreamResponse:
       return { 0: m.requestId, 1: m.result };
+    case TypeKey.DataTransportStartRequest:
+      return { 0: m.requestId, 1: m.exchangeId };
+    case TypeKey.DataTransportStreamRequest:
+      return m.unidirectional ? { 0: m.requestId, 1: m.exchangeId, 2: true } : { 0: m.requestId, 1: m.exchangeId };
+    case TypeKey.DataTransportClose:
+      return { 0: m.code, 1: m.reason };
   }
 }
 
@@ -213,6 +235,20 @@ function fromCBOR(type: number, value: CBORValue): Message {
         requestId: uint(m, 0, "data-channel-open-response"),
         result: uint(m, 1, "data-channel-open-response"),
       };
+    case TypeKey.DataTransportStartRequest:
+      return { type, requestId: uint(m, 0, "data-transport-start-request"), exchangeId: uint(m, 1, "data-transport-start-request") };
+    case TypeKey.DataTransportStartResponse:
+    case TypeKey.DataTransportStreamResponse:
+      return { type, requestId: uint(m, 0, "data-transport-response"), result: uint(m, 1, "data-transport-response") };
+    case TypeKey.DataTransportStreamRequest:
+      return {
+        type,
+        requestId: uint(m, 0, "data-transport-stream-request"),
+        exchangeId: uint(m, 1, "data-transport-stream-request"),
+        unidirectional: m[2] === true,
+      };
+    case TypeKey.DataTransportClose:
+      return { type, code: uint(m, 0, "data-transport-close"), reason: text(m, 1, "data-transport-close") };
     default:
       throw new DecodeError(`unknown type key ${type}`);
   }

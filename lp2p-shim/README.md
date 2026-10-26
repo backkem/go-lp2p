@@ -1,8 +1,8 @@
 # lp2p-shim
 
 **An experimental polyfill for the [Local Peer-to-Peer API](https://github.com/WICG/local-peer-to-peer):
-`LP2PReceiver`, `LP2PRequest`, `LP2PConnection`, `LP2PDataChannel` and their events, working in today's
-browsers over pluggable transports.**
+`LP2PReceiver`, `LP2PRequest`, `LP2PConnection`, `LP2PDataChannel`, `LP2PQuicTransport`,
+`LP2PQuicTransportListener` and their events, working in today's browsers over pluggable transports.**
 
 > [!WARNING]
 > The shim offers **no security**. Pairing is simulated (a toy PIN check, not SPAKE2), nothing is
@@ -28,6 +28,10 @@ npm run serve        # http://localhost:8080/demo/
   transport, with the permission prompt, the device picker and PIN pairing.
 - **[WebRTC chat](demo/chat.html?transport=webrtc)**: open it in two tabs. Signaling goes over
   BroadcastChannel and data over RTCDataChannel.
+- **[WebTransport in two frames](demo/transport-iframes.html)**: `LP2PQuicTransport` and
+  `LP2PQuicTransportListener`: a stream echo, datagram pings and a 1 MiB upload with a hash check.
+- **[WebTransport over WebRTC](demo/transport.html?transport=webrtc)**: the same between two tabs. Datagrams
+  go over an unreliable, unordered RTCDataChannel.
 - **[WebRTC between two devices](demo/chat.html?transport=manual)**: open it on two devices on the same LAN
   and copy three codes across by hand. No server is involved. It needs HTTPS (or `localhost`) on
   both devices, since the API is `[SecureContext]`.
@@ -48,13 +52,21 @@ Using it from a page:
 </script>
 ```
 
+The WebTransport side works the same way (`LP2PQuicTransport` has WebTransport's API):
+
+```js
+const transport = new LP2PQuicTransport(new LP2PRequest({ nickname: "Phone" }));
+await transport.ready;
+const { readable, writable } = await transport.createBidirectionalStream();
+```
+
 Other code is the [spec's examples](https://wicg.github.io/local-peer-to-peer/) unchanged.
 
 ## Files
 
 | Path | What |
 |---|---|
-| `dist/lp2p-shim.js` | Standalone script (IIFE). It defines the six LP2P interfaces on `globalThis` where they are missing (in secure contexts only) and exposes the rest as `LP2PShim`. |
+| `dist/lp2p-shim.js` | Standalone script (IIFE). It defines the eight LP2P interfaces on `globalThis` where they are missing (in secure contexts only) and exposes the rest as `LP2PShim`. |
 | `dist/lp2p-shim.min.js` | The same, minified. |
 | `dist/lp2p-shim.esm.js` | ES module. It exports everything and installs nothing; call `install()` to install the globals. |
 | `dist/types/` | `.d.ts` files for the ES module. |
@@ -77,12 +89,15 @@ npm run build         # regenerate dist/
 
 ```
  page script ── LP2PReceiver · LP2PRequest · LP2PConnection · LP2PDataChannel   src/api
+                LP2PQuicTransport · LP2PQuicTransportListener (WHATWG streams)
                       │
  user agent  ── consent prompts, device picker, PIN pairing (UserAgentUI hooks)  src/ua
                       │
- session     ── OSP/LP2P messages: agent-info, auth-*, 1101/1102, data-frame     src/protocol, src/codec
+ session     ── OSP/LP2P messages: agent-info, auth-*, 1101/1102, data-frame,    src/protocol, src/codec
+                pooled WebTransport 1201-1205
                       │
- transport   ── discovery, connections, reliable ordered message streams         src/transport
+ transport   ── discovery, connections, reliable ordered message streams,        src/transport
+                datagrams
                ├─ PostMessageTransport  (BroadcastChannel / MessageChannel; same browser)
                ├─ WebRTCTransport       (RTCPeerConnection; signaling via a Signaler)
                └─ (future) a bridge to a native go-lp2p agent, e.g. WebSocket → OSP over QUIC
@@ -110,6 +125,10 @@ interface TransportConnection {
   onstream: ((s: TransportStream) => void) | null;   // held until set
   onclose: ((reason: string) => void) | null;
   close(reason?: string): void;
+  readonly maxDatagramSize: number;               // 0: no datagrams
+  readonly datagramsReliable: boolean;            // true if they cannot actually be lost
+  sendDatagram(d: Uint8Array): void;              // may be lost, duplicated or reordered
+  ondatagram: ((d: Uint8Array) => void) | null;
 }
 interface TransportStream {                       // reliable, ordered, message-preserving, bidirectional
   readonly id: number;
@@ -130,6 +149,11 @@ transport can concatenate them unchanged, because both parts are self-delimiting
 transport that bridges a page to a local go-lp2p helper can map each stream 1:1 to a QUIC stream and
 forward the bytes, and nothing above the seam changes. `BaseConnection` and `BaseStream` in
 `src/transport/base.ts` implement the holding and closing rules for new transports.
+
+Datagrams are the one unreliable service, for WebTransport's `datagrams`. QUIC has them as DATAGRAM
+frames (RFC 9221). A transport that can't lose messages may still carry them and set
+`datagramsReliable`. A WebTransport session on it then reports `reliability: "reliable-only"`, as
+WebTransport over HTTP/2 does.
 
 ### Session protocol
 
@@ -158,6 +182,21 @@ and the LP2P extension messages (spec Appendix A) on the wire:
    `LP2PDataChannelInit` that is in use or has the peer's parity throws `OperationError`. Open
    requests are accepted whatever the ID's parity, but one for an ID in use is answered with
    `permanent-error`.
+5. **WebTransport sessions are pooled on the connection**, as go-lp2p's WIP pooled WebTransport is
+   (`src/protocol/webtransport.ts`). A session is a stream that begins with
+   `data-transport-start-request` (1201: request-id, exchange-id). The peer answers
+   `data-transport-start-response` (1202) once its page takes the session, through a listener or its own
+   `LP2PQuicTransport`. `data-transport-close` (1205: code, reason; the shim's own) ends it, and so does
+   closing the stream (abruptly). Exchange-ids are even for the requester and odd for the receiver.
+   Each WebTransport stream is a stream that begins with `data-transport-stream-request` (1203:
+   request-id, exchange-id, key 2 = unidirectional, added by the shim). It is answered by 1204 without
+   the opener waiting. After that, each message is a frame: a tag byte, then DATA bytes, FIN, RESET
+   (varint code) or STOP_SENDING (varint code). These stand in for QUIC's own stream bytes, FIN bit,
+   RESET_STREAM and STOP_SENDING, which the shim's message streams don't have. A datagram is
+   `varint(exchange-id) ‖ payload`, as HTTP/3 datagrams carry a quarter stream ID. The spec's binding
+   dials a separate QUIC connection with ALPN `q2q` instead. The shim can't, for the reasons in spec
+   issue W1 below. go-lp2p's version is bidirectional only: it has no
+   unidirectional key, no 1205 and no datagrams, and doesn't wait for 1202.
 
 ### Transports
 
@@ -177,7 +216,12 @@ would mean writing our own framing, flow control and close handshake, for no gai
 pre-negotiated channel (id 0) gets SCTP into the offer, signals readiness and carries the
 goodbye. There are no ICE servers by default, so only host candidates are used, which is right for
 the same LAN. Pass `rtcConfiguration` to change that. Messages above the browser's SCTP
-max-message-size (about 256 KiB in Chrome) fail. The shim does not chunk them.
+max-message-size (about 256 KiB in Chrome) fail. The shim does not chunk them. (WebTransport stream
+writes are cut into 16 KiB frames, so any write size works there.) Datagrams use a second pre-negotiated
+channel (id 1), which is unordered with `maxRetransmits: 0`. That is real loss, like QUIC DATAGRAM
+frames, so sessions report `reliability: "supports-unreliable"`. `maxDatagramSize` is 1200 bytes
+minus the exchange-id prefix, to stay within one SCTP packet. In the postMessage transport,
+datagrams share the port and are never lost (`"reliable-only"`).
 
 Signaling is out of band, so it is pluggable (`Signaler`: a broadcast medium with addressed
 messages):
@@ -235,10 +279,15 @@ configuration current when its `start()` runs.
 | Events | Channels from `datachannel` are already open and also fire `open` right after the event, as RTCDataChannel does. `close()` fires `closing` and then `close`, as go-lp2p does. A remote close fires the same pair. |
 | `new LP2PDataChannel()` | Allowed, because the IDL has a constructor. The channel is attached to nothing and permanently `closed`. |
 | `new LP2PConnection()` | `TypeError` (no constructor in the IDL). |
-| `LP2PConnection.close()` / `onclose` | Added. Closing closes every channel on both sides. |
+| `LP2PConnection.close()` / `onclose` | Closing closes every channel and transport on both sides. |
 | `LP2PReceiver.stop()` | Added: stops advertising. Existing connections stay open. |
 | Peer identity | The page is told nothing about the peer (spec issue #15). Nicknames are shown in the browser UI only and marked "(unverified)". |
-| Not implemented | `LP2PQuicTransport`, `LP2PQuicTransportListener`, `bufferedAmount`, local HTTPS, and remembering paired peers. |
+| `new LP2PQuicTransport(source)` | `source` may be an `LP2PConnection`, an `LP2PRequest` (started if needed, then its connection is used) or an `LP2PReceiver` (started if needed, then its *next* connection is used). If the peer already opened a session on that connection that no page has taken, the transport joins it instead of opening another. If both pages open at once on the receiver side, the receiver's transport joins the requester's session. So the spec's example of both sides calling `new LP2PQuicTransport(conn)` gives one session. |
+| `LP2PQuicTransportListener(source)` | Takes the peer's sessions on the one connection of an `LP2PRequest`, or on every connection (current and future) of an `LP2PReceiver`. It also takes an `LP2PConnection` (an extension). `ready` resolves once `source` started. `incomingTransports` closes when a request's connection closes. Cancel it to stop listening. The first listener takes a session. A session nobody takes stays unanswered, so the opener's `ready` stays pending, until a listener or a local `LP2PQuicTransport` takes it. |
+| Lifecycle | Closing the `LP2PConnection` (either side) closes its transports abruptly: `closed` rejects with a `WebTransportError` (source `"session"`). `transport.close()` doesn't close the connection. `close()` before `ready` rejects `ready` and `closed`. |
+| WebTransport members | `close({closeCode, reason})` reaches the peer's `closed`. Stream `abort()`/`cancel()` with a `WebTransportError` carry its `streamErrorCode` as RESET/STOP_SENDING. `reliability` depends on the transport (above), and `requireUnreliable` rejects `ready` on `"reliable-only"`. `congestionControl`, `sendOrder`, `sendGroup`, `anticipatedConcurrentIncoming*` and the datagram max ages are stored but have no effect. `getStats()` counts payload bytes only (no RTT or packets). `protocol` is `""`, `responseHeaders` is `null` and `exportKeyingMaterial()` rejects with `NotSupportedError`. `draining` resolves only at close. Oversized datagrams are dropped silently, as in WebTransport. |
+| `instanceof WebTransport` | False. The browser's `WebTransport` can't be subclassed without a URL connection. `WebTransportError` is the shim's own (Chromium's constructor still takes a dictionary), chained to the browser's, so `instanceof WebTransportError` holds. |
+| Not implemented | `bufferedAmount` and backpressure on WebTransport writes (writes resolve once handed to the transport), local HTTPS, and remembering paired peers. |
 
 ## LP2P spec issues found while building this
 
@@ -278,3 +327,66 @@ configuration current when its `start()` runs.
     constructor argument is spelled `DataChannelEventInitDict` (capital D).
 13. Related OSP nit: Appendix B's padding rule ("zero-pad with `3 - len(N) mod 3` digits") adds three
     zeros when the length is already a multiple of three.
+
+### WebTransport (`LP2PQuicTransport`)
+
+Section names are those of `index.bs` on the `lp2p2/04-security-privacy` branch.
+
+- **W1. The OSP binding can't be implemented as written** (*WebTransport extension*). It says to dial a new
+  QUIC connection with ALPN `q2q`, but `q2q` is not defined anywhere, and draft-vvv-webtransport-quic
+  expired. Nothing maps streams, datagrams or session close onto it. A receiver can't dial a requester
+  that isn't advertising. Nothing binds the new connection to the authenticated session, or routes it
+  to an origin or `LP2PReceiver`. The shim pools sessions on the existing connection instead (1201–1205;
+  go-lp2p does the same). The spec should choose pooled or dedicated, which WebTransport's `allowPooling`
+  already distinguishes.
+- **W2. The abstraction quietly requires unreliable delivery** (*Operations*: "open a WebTransport
+  session"). "The capabilities of a WebTransport session" include datagrams. The OSP binding then needs
+  QUIC DATAGRAM (RFC 9221) negotiated, and says so nowhere. Bindings without loss (postMessage, a WebSocket
+  bridge) can only do `reliable-only`. The spec should allow that, map it to `reliability`, and say how
+  `requireUnreliable` fails.
+- **W3. No one is defined to receive an incoming session** (*LP2PQuicTransportListener*, *Operations*).
+  "The other side is notified" has no accept or refuse step, unlike data channels. Nothing says what
+  happens with no listener (the shim leaves it unanswered), with several listeners (the shim lets the first
+  take it), or when the LP2PQuicTransport was built on an `LP2PConnection`, which no listener accepts (the
+  shim accepts one as an extension).
+- **W4. The connection examples assume a symmetric open** (*LP2PConnection Examples*). Both sides call
+  `new LP2PQuicTransport(conn)` and await `ready`, but the operation is asymmetric (open, then incoming).
+  The spec doesn't say whether that makes one session or two. The shim makes one: a constructor joins an
+  untaken incoming session, and on a simultaneous open the requester's session wins.
+- **W5. `new LP2PQuicTransport(receiver)` is ambiguous** (*LP2PQuicTransport*). A receiver has zero or many
+  connections. The shim uses the next one. More generally, there are no constructor steps. A constructor
+  that "must start" an `LP2PRequest` shows a device picker, and nothing says whether that needs user
+  activation.
+- **W6. `LP2PQuicTransport : WebTransport` can't inherit WebTransport's constructor or internal slots**.
+  Those assume a URL and HTTP/3 or HTTP/2. LP2P must define the constructor steps and slot setup itself.
+  The exposure also differs: WebTransport is `(Window,Worker)`, LP2P is `(Window,DedicatedWorker)`.
+- **W7. `LP2PQuicTransportInit` and `LP2PQuicTransportListenerInit` are empty**, with an open Issue.
+  `headers`, `responseHeaders`, `serverCertificateHashes` and `allowPooling` are HTTP or server
+  concepts. `protocols`/`protocol` would be useful, as a counterpart to the data channel `protocol`, but
+  have no wire field. A listener has no way to set options such as `datagramsReadableType` or
+  `requireUnreliable` for the transports it hands out. The shim accepts `requireUnreliable`,
+  `congestionControl`, `anticipatedConcurrentIncoming*` and `datagramsReadableType`.
+- **W8. The lifecycle coupling is one-way and has no error defined** (*Operations*: "close a session";
+  *LP2PConnection*). Closing the session closes its WebTransport sessions, but the spec doesn't say with
+  which `closed` outcome. The shim rejects with a session `WebTransportError`. A transport built from
+  an `LP2PRequest` hides its `LP2PConnection`, so closing the transport leaves the LP2P session open, and
+  the page can only close it by calling `start()` again. The spec doesn't say what `LP2PReceiver.stop()`
+  does to listeners.
+- **W9. Nothing on the wire covers close codes, stream errors or draining**. `close({closeCode, reason})`
+  needs a message like HTTP/3's CLOSE_WEBTRANSPORT_SESSION (the shim uses 1205). Reset and STOP_SENDING
+  codes are 32-bit in WebTransport and need a mapping onto QUIC application error codes. `draining`
+  has no trigger between peers, since there is no GOAWAY and neither page can ask for a drain.
+- **W10. Pooling leaks across origins**. Keying material from `exportKeyingMaterial()` on a shared OSP
+  connection is shared by every origin on it. RTT and packet counts in `getStats()` would show other
+  origins' traffic. Both need per-session separation, or must be unsupported. The shim rejects the
+  first and counts only the session's own bytes.
+- **W11. The `quic-transport` capability (1200) has no defined use** (*Appendix A*). The spec doesn't say
+  what happens when the peer lacks it (which error `ready` rejects with), and the capability is per agent,
+  not per origin.
+- **W12. `incomingTransports` is an untyped `ReadableStream`, and the listener has no `close()`.** Only
+  `cancel()` stops it. The spec doesn't say whether the stream ends when the request's connection
+  closes (the shim ends it) or when the receiver stops.
+- **W13. Evidence for Issue(29)** (*Operations*). In the shim, a data channel and a bidirectional
+  WebTransport stream use the same wire pattern (a request/response header on a stream, then frames).
+  A data channel is a WebTransport stream with a label, a protocol and message framing, which argues
+  for converging the two.

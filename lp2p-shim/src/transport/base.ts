@@ -104,6 +104,7 @@ export abstract class BaseStream implements TransportStream {
 // peer learns at once instead of waiting for a timeout (or, on media with no
 // liveness signal like BroadcastChannel, never).
 const live = new Set<BaseConnection>();
+const MAX_HELD_DATAGRAMS = 64;
 let pageHideHooked = false;
 function closeOnPageHide(c: BaseConnection): void {
   live.add(c);
@@ -120,8 +121,17 @@ export abstract class BaseConnection implements TransportConnection {
   private closeReason: string | null = null;
   private closeFired = false;
   protected readonly streams = new Map<number, TransportStream>();
+  private datagramHandler: ((datagram: Uint8Array) => void) | null = null;
+  private readonly heldDatagrams: Uint8Array[] = [];
 
   readonly remoteId: string;
+  /** Overridden by transports that carry datagrams. */
+  get maxDatagramSize(): number {
+    return 0;
+  }
+  get datagramsReliable(): boolean {
+    return false;
+  }
 
   constructor(remoteId: string) {
     this.remoteId = remoteId;
@@ -147,8 +157,40 @@ export abstract class BaseConnection implements TransportConnection {
     this.maybeFireClose();
   }
 
+  get ondatagram(): ((datagram: Uint8Array) => void) | null {
+    return this.datagramHandler;
+  }
+  set ondatagram(fn: ((datagram: Uint8Array) => void) | null) {
+    this.datagramHandler = fn;
+    while (fn && this.heldDatagrams.length > 0) fn(this.heldDatagrams.shift() as Uint8Array);
+  }
+
   abstract openStream(): TransportStream;
   protected abstract doClose(reason: string): void;
+
+  sendDatagram(datagram: Uint8Array): void {
+    if (this.closed) throw new DOMException("connection is closed", "InvalidStateError");
+    if (datagram.byteLength > this.maxDatagramSize) {
+      throw new RangeError(`datagram of ${datagram.byteLength} bytes exceeds ${this.maxDatagramSize}`);
+    }
+    this.doSendDatagram(datagram);
+  }
+
+  /** For transports with datagrams: send one. */
+  protected doSendDatagram(_datagram: Uint8Array): void {
+    throw new DOMException("this transport has no datagrams", "NotSupportedError");
+  }
+
+  /** For implementations: deliver a received datagram. */
+  protected deliverDatagram(datagram: Uint8Array): void {
+    if (this.closed) return;
+    if (this.datagramHandler) {
+      this.datagramHandler(datagram);
+      return;
+    }
+    this.heldDatagrams.push(datagram);
+    if (this.heldDatagrams.length > MAX_HELD_DATAGRAMS) this.heldDatagrams.shift();
+  }
 
   close(reason = "closed locally"): void {
     if (this.closed) return;
@@ -173,6 +215,7 @@ export abstract class BaseConnection implements TransportConnection {
   private teardown(): void {
     live.delete(this);
     this.incoming.clear();
+    this.heldDatagrams.length = 0;
     for (const s of this.streams.values()) {
       if (s instanceof BaseStream) s.remoteClosed();
       else s.close();

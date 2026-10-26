@@ -206,7 +206,7 @@ export class UserAgent {
     return {
       displayName: nickname,
       modelName: this.modelName,
-      capabilities: [AgentCapability.DataChannels],
+      capabilities: [AgentCapability.DataChannels, AgentCapability.QuicTransport],
       stateToken: randomId(4),
       locales: globalThis.navigator?.languages ? [...globalThis.navigator.languages] : [],
     };
