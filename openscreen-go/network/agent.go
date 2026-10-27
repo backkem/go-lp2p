@@ -148,9 +148,11 @@ type AgentAuthenticationInfo struct {
 type AgentInfo struct {
 	DisplayName string
 	ModelName   string
-	// Capabilities []agentCapability
-	StateToken string // 8 characters in the range [0-9A-Za-z]
-	Locales    []string
+	// Capabilities as listed in agent-info. For a remote agent they are
+	// what it advertised; for a local agent see AgentInfoMessage.
+	Capabilities []AgentCapability
+	StateToken   string // 8 characters in the range [0-9A-Za-z]
+	Locales      []string
 }
 
 func NewAgent(c AgentConfig) (*Agent, error) {
@@ -295,11 +297,29 @@ func (a *Agent) Info() *AgentInfo {
 	}
 
 	return &AgentInfo{
-		DisplayName: a.info.DisplayName,
-		ModelName:   a.info.ModelName,
-		StateToken:  a.info.StateToken,
-		Locales:     a.info.Locales,
+		DisplayName:  a.info.DisplayName,
+		ModelName:    a.info.ModelName,
+		Capabilities: append([]AgentCapability(nil), a.info.Capabilities...),
+		StateToken:   a.info.StateToken,
+		Locales:      a.info.Locales,
 	}
+}
+
+// HasCapability reports whether a remote agent listed cap in its agent-info.
+// It is false until the agent's info is known.
+func (a *Agent) HasCapability(cap AgentCapability) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.info == nil {
+		return false
+	}
+	for _, c := range a.info.Capabilities {
+		if c == cap {
+			return true
+		}
+	}
+	return false
 }
 
 // AgentInfoMessage returns the agent-info a local agent sends in an

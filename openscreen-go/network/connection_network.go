@@ -676,10 +676,11 @@ func (c *baseConnection) handleAgentInfoResponse(msg *msgAgentInfoResponse) erro
 	}
 
 	c.remoteAgent.setInfo(AgentInfo{
-		DisplayName: msg.AgentInfo.DisplayName,
-		ModelName:   msg.AgentInfo.ModelName,
-		StateToken:  msg.AgentInfo.StateToken,
-		Locales:     msg.AgentInfo.Locales,
+		DisplayName:  msg.AgentInfo.DisplayName,
+		ModelName:    msg.AgentInfo.ModelName,
+		Capabilities: msg.AgentInfo.Capabilities,
+		StateToken:   msg.AgentInfo.StateToken,
+		Locales:      msg.AgentInfo.Locales,
 	})
 
 	c.checkAgentInfoComplete()
