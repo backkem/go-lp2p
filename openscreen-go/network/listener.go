@@ -499,6 +499,10 @@ func (c *UnauthenticatedConnection) AcceptAuthenticate(ctx context.Context) (rol
 // InteropQuirks.Spake2SuiteP256 it fails with ErrSpake2SuiteUnsupported and
 // closes the connection. A malformed psk returns ErrInvalidPSK and leaves the
 // connection open.
+//
+// On the client of a connection made with DialSession, the returned
+// Connection must not be used before CompleteSession returns it: until the
+// server accepted the session, streams it opens are held.
 func (c *UnauthenticatedConnection) AuthenticatePSK(ctx context.Context, psk []byte) (*Connection, error) {
 	conn, err := c.base.AuthenticatePSK(ctx, psk)
 	if err != nil {

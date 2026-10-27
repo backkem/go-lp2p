@@ -444,6 +444,15 @@ func (c *baseConnection) finishAuthentication() (*Connection, error) {
 		return nil, fmt.Errorf("%w: remote result %v", ErrAuthenticationFailed, remoteResult)
 	}
 
+	if c.session != nil && c.agentRole == AgentRoleClient {
+		// Session extension: the client sends nothing of the other
+		// extensions before it treats the session as accepted, and holds
+		// the streams the server opens right after sending success until
+		// then. CompleteSession hands off; the transport holds the streams
+		// meanwhile and discards them if the connection closes first.
+		c.remoteAgent.setAuthenticated()
+		return &Connection{base: c}, nil
+	}
 	return c.handOff(true)
 }
 

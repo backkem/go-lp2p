@@ -237,6 +237,99 @@ func TestSessionTrustedPeers(t *testing.T) {
 	checkDataChannel(t, server.conn, client.conn)
 }
 
+// TestSessionClientHoldsEarlyStreams: the server opens a data channel right
+// after sending success; the client, which treats the session as accepted
+// only later, holds it until then.
+func TestSessionClientHoldsEarlyStreams(t *testing.T) {
+	checkNoLeaks(t)
+	var serverConn *Connection
+	opened := make(chan error, 1)
+	server, client := runSessionPair(t,
+		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
+		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
+			conn, err := serverCeremony(t, testOrigin)(ctx, uc)
+			if err != nil {
+				return nil, err
+			}
+			serverConn = conn
+			go func() {
+				// Outlives the pair's context, which ends when both sides returned.
+				octx, cancel := context.WithTimeout(context.Background(), testTimeout)
+				defer cancel()
+				dc, err := conn.OpenDataChannel(octx, DataChannelInit{Label: "early"})
+				if err == nil {
+					err = dc.SendMessage([]byte("hi"))
+				}
+				opened <- err
+			}()
+			return conn, nil
+		},
+		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
+			if _, err := uc.AwaitSession(ctx); err != nil {
+				return nil, err
+			}
+			if _, err := uc.AcceptAuthenticate(ctx); err != nil {
+				return nil, err
+			}
+			if _, err := uc.AuthenticatePSK(ctx, []byte(sessionPSK)); err != nil {
+				return nil, err
+			}
+			// Let the server's data channel arrive before the session is
+			// treated as accepted.
+			time.Sleep(300 * time.Millisecond)
+			if uc.base.app.Load() != nil {
+				return nil, errors.New("client handed off before CompleteSession")
+			}
+			return uc.CompleteSession(ctx)
+		})
+	if server.err != nil || client.err != nil {
+		t.Fatalf("session failed: server %v, client %v", server.err, client.err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	dc, err := client.conn.AcceptDataChannel(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dc.Close()
+	if msg, err := dc.ReceiveMessage(); err != nil || string(msg) != "hi" {
+		t.Fatalf("received %q, %v", msg, err)
+	}
+	if err := <-opened; err != nil {
+		t.Fatal(err)
+	}
+	_ = serverConn
+}
+
+// TestSessionLateCeremonyFails: a server that accepted on trust answers a
+// ceremony the client starts afterwards, and closes the connection when it
+// fails.
+func TestSessionLateCeremonyFails(t *testing.T) {
+	checkNoLeaks(t)
+	server, client := runSessionPair(t,
+		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
+		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
+			if err := uc.TrustPeer(); err != nil {
+				return nil, err
+			}
+			if _, err := uc.CompleteSession(ctx); err != nil {
+				return nil, err
+			}
+			_, err := uc.AuthenticatePSK(ctx, []byte("111111"))
+			return nil, err
+		},
+		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
+			if _, err := uc.AwaitSession(ctx); err != nil {
+				return nil, err
+			}
+			_, err := uc.AuthenticatePSK(ctx, []byte("222222"))
+			return nil, err
+		})
+	if !errors.Is(server.err, ErrAuthenticationFailed) && !errors.Is(client.err, ErrAuthenticationFailed) {
+		t.Fatalf("late ceremony with different PSKs succeeded: server %v, client %v", server.err, client.err)
+	}
+}
+
 // TestSessionAcceptedUntrustedServer: the server trusts the client and
 // accepts right away, but the client doesn't trust the server, so it
 // authenticates after the success response; the server only answers.

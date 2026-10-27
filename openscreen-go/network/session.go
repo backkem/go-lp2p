@@ -452,17 +452,10 @@ func (c *UnauthenticatedConnection) CompleteSession(ctx context.Context) (*Conne
 }
 
 // TrustPeer marks the peer's certificate as verified without SPAKE2, because
-// its fingerprint (RemoteAgent().PeerID) is a trust anchor of the caller. It
-// hands the connection to the application protocol. With the session
-// extension, CompleteSession still has to run before the connection is used.
+// its fingerprint (RemoteAgent().PeerID) is a trust anchor of the caller.
+// CompleteSession then hands the connection to the application protocol.
 func (c *UnauthenticatedConnection) TrustPeer() error {
-	if c.authenticated.Load() {
-		return nil
-	}
-	if _, err := c.base.handOff(true); err != nil {
-		return err
-	}
-	c.authenticated.Store(true)
+	c.base.remoteAgent.setAuthenticated()
 	return nil
 }
 
