@@ -341,6 +341,7 @@ const sessionRefusalGrace = 2 * time.Second
 // or after sessionRefusalGrace. Closing the QUIC connection right away could
 // discard the response before the client reads it.
 func (c *baseConnection) closeAfterRefusal(stream ApplicationStream, cause error) {
+	c.pendingCause.Store(&cause)
 	ended := make(chan struct{})
 	go func() {
 		defer close(ended)

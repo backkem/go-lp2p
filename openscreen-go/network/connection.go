@@ -143,6 +143,10 @@ type baseConnection struct {
 
 	// session is the state of the session extension, nil without it.
 	session *sessionState
+	// pendingCause is the reason a close already decided on, set while
+	// waiting for the peer before closing (see closeAfterRefusal). It wins
+	// over a transport error the peer's own close causes meanwhile.
+	pendingCause atomic.Pointer[error]
 
 	// app is set once authenticated, before the Connection is handed out
 	// and before the application goroutines start.
@@ -230,6 +234,9 @@ func (c *baseConnection) Close() error {
 // called from connection goroutines, but not while holding c.mu.
 func (c *baseConnection) shutdown(cause error) {
 	c.closeOnce.Do(func() {
+		if pending := c.pendingCause.Load(); pending != nil {
+			cause = *pending
+		}
 		c.goMu.Lock()
 		c.stopped = true
 		c.goMu.Unlock()
