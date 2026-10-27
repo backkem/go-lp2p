@@ -72,7 +72,6 @@ func newBrowser(name string, ui ua.UI) *Browser {
 // Close the browser.
 func (b *Browser) Close() { _ = b.UA.Close() }
 
-
 // Pair returns a script for each side of a pairing in which the simulated
 // user correctly reads the PIN from one screen and types it on the other.
 func Pair() (presenter, consumer *ua.Scripted) {
