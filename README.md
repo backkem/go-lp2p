@@ -109,31 +109,53 @@ go test -tags interop ./openscreen-go/application/...
 
 - **LP2P API**
   - [x] `LP2PReceiver` and `LP2PRequest`, with WebIDL names and
-        `DOMException` errors
+        `DOMException` errors; `allowedOrigins`, `stop()`, and a
+        `NotAllowedError` for every failure of `start()`
+  - [x] `LP2PConnection.close()` and its `close` event
   - [x] `LP2PDataChannel`, including events and a closing handshake
-  - [x] `LP2PQuicTransport` and `LP2PQuicTransportListener` over an OSP
-        connection (pooled)
+  - [x] `LP2PQuicTransport` and `LP2PQuicTransportListener` on an
+        `LP2PConnection`: streams, datagrams, close code and reason,
+        `closed` and `draining`, `exportKeyingMaterial()`
   - [ ] `LP2PQuicTransport` over a dedicated QUIC connection
-  - [ ] Teardown in the proposal itself: `LP2PConnection.Close` and
-        `LP2PReceiver.Close` are Go-only additions
 - **Mock user agent**
   - [x] Permission prompts for advertising and for each incoming connection
   - [x] Continuous discovery and a live device picker (peer listing and
         selection)
   - [x] PIN presentation and entry
   - [x] Scripted and interactive (terminal) UIs
+  - [x] Trust store, known peers and per-origin peer grants (in memory):
+        a trusted peer doesn't pair again, a granted one doesn't prompt
   - [ ] Peers disappearing from the picker (ospc discovery doesn't report
         removals yet)
-  - [ ] Remembered grants: every connection prompts and pairs again
+  - [ ] Nickname next to the device name: OSP has no field for it, so the
+        agent's display name carries the page's nickname
 - **Open Screen Protocol**
   - [x] Discovery, listen and dial
   - [x] SPAKE2 authentication
-  - [x] Data-channel protocol extension
+  - [x] LP2P session, data-channel and WebTransport extensions
   - [ ] Complete application protocol (presentation, remote playback, streaming)
 - **Beyond OSP**
   - [ ] Abstract the LP2P API from the underlying transport, so others (Wi-Fi
         Direct, Cast) can plug in
   - [ ] Lots of cleanup
+
+## Flags
+
+Everything follows the specs by default. Deviations are opt-in and
+documented where they live:
+
+- `ospc.InteropQuirks` (`openscreen-go/network/quirks.go`): per-quirk
+  deviations from OSP for interop with older `osp_demo` builds, each
+  naming the rule it breaks. `Spake2SuiteP256` is the one every example
+  turns on, as the spec's edwards25519 suite isn't implemented.
+- `ospc.AgentConfig.SessionExtension`: a listener expects the LP2P session
+  extension (`lp2p-session-request`) on every connection. Off for plain
+  OSP agents; the user agent turns it on.
+- `ua.Config.DisableSessionExtension`: the user agent falls back to plain
+  OSP for peers that don't implement the session extension, such as
+  openscreen's `lp2p_demo`. It then can't check `allowedOrigins`, pairs on
+  every connection and lets either side start SPAKE2, against index.bs
+  "Session extension" and "Incoming sessions".
 
 ## Related work
 

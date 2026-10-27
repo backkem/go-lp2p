@@ -30,6 +30,54 @@ Agents must opt in to the RFC 9382 P-256 suite with
 `InteropQuirks.Spake2SuiteP256` (Chromium's `osp_demo --spake2_suite=p256`);
 without it `AuthenticatePSK` fails with `ErrSpake2SuiteUnsupported`.
 
+### LP2P sessions
+
+The LP2P session extension (local-peer-to-peer index.bs "Session extension")
+is opt-in: `AgentConfig.SessionExtension` on a listening agent,
+`DiscoveredAgent.DialSession` on the dialing one. Plain OSP agents are
+unaffected, which keeps the `osp_demo` and `lp2p_demo` interop working.
+
+- The client sends `lp2p-session-request` with the requesting origin on a
+  new bidirectional stream once the agent-info-response lists
+  `data-channels` or `quic-transport` (else `ErrSessionUnsupported`).
+- The server reports it as `RequestingOrigin` and holds back its
+  `auth-capabilities`. It refuses with `RefuseSession` (permanent-error,
+  then the connection is closed once the client ended the stream, so the
+  response isn't lost), asks for authentication with
+  `RequestAuthentication` (sends `auth-capabilities`), or accepts with
+  `CompleteSession` (success) once the client's certificate is verified by
+  `AuthenticatePSK` or asserted with `TrustPeer`.
+- The client waits for the cue with `AwaitSession`: `auth-capabilities`
+  (authenticate) or success (accepted; still authenticate if the server's
+  certificate isn't trusted, assuming the server's auth-capabilities equal
+  its own as none were received). Only the client starts SPAKE2; a server
+  that accepted on trust still answers a handshake after the hand-off.
+- A second `lp2p-session-request`, or one received by an agent without the
+  extension, is refused and closes the connection.
+
+### WebTransport
+
+The WebTransport extension (index.bs "WebTransport extension") pools
+`WebTransportSession`s on the connection: `OpenWebTransport` and
+`AcceptWebTransport` (accept or refuse), bidirectional and unidirectional
+streams starting with `data-transport-stream`, datagrams as QUIC DATAGRAM
+frames prefixed with the exchange-id (QUIC datagrams are enabled on every
+connection), `Close` with code and reason (`data-transport-close` then FIN;
+it waits for the peer's FIN so a connection close right after doesn't lose
+it), `Drain`, and `ExportKeyingMaterial` with the exporter context of
+WebTransport over HTTP/3. Stream error codes 0..2^32-1 map to QUIC
+application error codes; 2^32 is session-gone, used for streams of unknown
+or closed sessions (held for `webTransportHoldTimeout` while the session may
+still be opening). Sessions aren't opened towards a peer that doesn't list
+`quic-transport`. Dedicated (`q2q`) connections aren't implemented.
+
+### Listeners
+
+`Listener.Close` doesn't close the connections it accepted. quic-go closes
+a server's connections with its listener, so the QUIC listener and its UDP
+socket are closed once the last accepted connection ends; handshakes that
+complete meanwhile are closed right away.
+
 ### Data channels
 
 The LP2P data channel extension (local-peer-to-peer index.bs "Data channel
