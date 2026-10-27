@@ -194,6 +194,13 @@ func (w *webTransportState) remove(s *WebTransportSession) {
 	w.mu.Unlock()
 }
 
+// count is the number of open sessions.
+func (w *webTransportState) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.sessions)
+}
+
 func (w *webTransportState) get(id uint64) *WebTransportSession {
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -282,32 +282,54 @@ func TestSessionAcceptedUntrustedServer(t *testing.T) {
 
 func TestSessionSecondRequestCloses(t *testing.T) {
 	checkNoLeaks(t)
-	server, client := runSessionPair(t,
-		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
-		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			select {
-			case <-uc.base.ctx.Done():
-				return nil, uc.base.err()
-			case <-ctx.Done():
-				return nil, errors.New("connection not closed")
-			}
-		},
-		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			s, err := uc.base.netConn.(networkStreamOpener).OpenNetworkStream(ctx)
-			if err != nil {
-				return nil, err
-			}
-			if err := writeMessage(&msgLp2pSessionRequest{RequestingOrigin: testOrigin}, s); err != nil {
-				return nil, err
-			}
-			_, err = uc.AwaitSession(ctx)
-			return nil, err
-		})
-	if !errors.Is(server.err, ErrSessionProtocol) {
-		t.Errorf("server: got %v, want ErrSessionProtocol", server.err)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	l, ra := startTestListener(t, newSessionTestAgent(t, "Server", true))
+
+	// The server closes the connection on the second request, usually
+	// before the listener hands it to Accept; if Accept does return it, the
+	// connection is closed with ErrSessionProtocol.
+	accepted := make(chan *UnauthenticatedConnection, 1)
+	go func() {
+		uc, err := l.Accept(ctx)
+		if err != nil {
+			uc = nil
+		}
+		accepted <- uc
+	}()
+
+	uc, err := ra.DialSession(ctx, AgentTransportQUIC, newSessionTestAgent(t, "Client", false), testOrigin)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if client.err == nil {
-		t.Error("client: session survived a second lp2p-session-request")
+	defer uc.Close()
+	s, err := uc.base.netConn.(networkStreamOpener).OpenNetworkStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMessage(&msgLp2pSessionRequest{RequestingOrigin: testOrigin}, s); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := uc.AwaitSession(ctx); err == nil {
+		t.Fatal("session survived a second lp2p-session-request")
+	}
+	select {
+	case <-uc.base.ctx.Done():
+	case <-ctx.Done():
+		t.Fatal("client connection not closed")
+	}
+
+	l.Close() // Unblocks Accept if the listener never handed the connection out.
+	if serverConn := <-accepted; serverConn != nil {
+		defer serverConn.Close()
+		select {
+		case <-serverConn.base.ctx.Done():
+		case <-ctx.Done():
+			t.Fatal("server connection not closed")
+		}
+		if err := serverConn.base.err(); !errors.Is(err, ErrSessionProtocol) {
+			t.Errorf("server: got %v, want ErrSessionProtocol", err)
+		}
 	}
 }
 

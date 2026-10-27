@@ -217,9 +217,9 @@ func TestWebTransportGlare(t *testing.T) {
 	if !ids[0] || !ids[1] {
 		t.Errorf("exchange-ids %v, want 0 (client) and 1 (server)", ids)
 	}
-	if n := len(server.base.app.Load().wt.sessions); n != 2 {
-		t.Errorf("server has %d sessions, want 2", n)
-	}
+	// The server's Accept may still be registering its session.
+	wt := server.base.app.Load().wt
+	waitFor(t, "two sessions on the server", func() bool { return wt.count() == 2 })
 }
 
 func TestWebTransportClose(t *testing.T) {

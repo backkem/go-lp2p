@@ -22,7 +22,12 @@ type Dialer interface {
 // Peer is a remote device as the user agent knows it.
 type Peer struct {
 	// ID is stable for the peer's identity (its certificate fingerprint).
+	// One device advertises every page that receives, all with its ID, so
+	// discovered entries are told apart by Instance too.
 	ID string
+	// Instance is the mDNS instance name the peer was discovered under, or
+	// empty.
+	Instance string
 	// DisplayName is the name to show the user. Check NameStatus before
 	// showing it: truncated names shouldn't be shown and unverified names
 	// should be marked as such.
@@ -108,7 +113,7 @@ func (m mdnsDiscoverer) Next(ctx context.Context) (DiscoveryEvent, error) {
 	name, status := a.DisplayName()
 	return DiscoveryEvent{
 		Kind: PeerAdded,
-		Peer: Peer{ID: string(a.PeerID), DisplayName: name, NameStatus: status, Dialer: a},
+		Peer: Peer{ID: string(a.PeerID), Instance: a.InstanceName().Name, DisplayName: name, NameStatus: status, Dialer: a},
 	}, nil
 }
 
@@ -136,12 +141,20 @@ func (l *PeerList) Peers() []Peer {
 	return peers
 }
 
-// Get returns the peer with the given ID.
+// key tells discovered entries apart: one device advertises every page
+// that receives, all with the same ID.
+func (p Peer) key() string { return p.ID + "\x00" + p.Instance }
+
+// Get returns a peer with the given ID, any of its instances.
 func (l *PeerList) Get(id string) (Peer, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	p, ok := l.peers[id]
-	return p, ok
+	for _, p := range l.peers {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return Peer{}, false
 }
 
 // Watch sends a snapshot of the list right away and then after every change,
@@ -191,7 +204,7 @@ func (l *PeerList) apply(ev DiscoveryEvent) (PeerEventKind, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	id := ev.Peer.ID
+	id := ev.Peer.key()
 	old, exists := l.peers[id]
 	var kind PeerEventKind
 	switch {
