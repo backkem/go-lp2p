@@ -5,14 +5,20 @@
 async function exampleLP2PReceiver() {
     const receiver = new LP2PReceiver({
         nickname: "example-receiver",
+        // Also accept sessions requested by this origin.
+        allowedOrigins: ["https://partner.example"],
     });
     receiver.onconnection = e => {
         console.log("Connection established!");
         const conn = e.connection;
+        conn.onclose = () => console.log("Connection closed.");
     };
 
     // Blocks until permission is received.
     await receiver.start();
+
+    // Later: stop advertising. Delivered connections stay open.
+    receiver.stop();
 }
 
 exampleLP2PReceiver();
@@ -22,88 +28,44 @@ async function exampleLP2PRequest() {
         nickname: "example-request",
     });
 
-    // Blocks until connection is received.
-    const conn = await request.start();
-    console.log("Connection established!");
+    try {
+        // Blocks until the user picked a peer and it accepted the session.
+        const conn = await request.start();
+        console.log("Connection established!");
+
+        // Later: close the connection, its data channels and its transports.
+        conn.close();
+    } catch (e) {
+        // NotAllowedError: dismissed, refused or failed; script can't tell which.
+    }
 }
 
 exampleLP2PRequest();
 
 async function exampleLP2PQuicTransport() {
-    // Peer A
+    // Receiver
     const receiver = new LP2PReceiver({
-        nickname: "Peer A",
+        nickname: "example-receiver",
     });
+    receiver.onconnection = async e => {
+        const listener = new LP2PQuicTransportListener(e.connection);
+        for await (const transport of listener.incomingTransports) {
+            // Incoming transports are already ready.
+            const stream = await transport.createBidirectionalStream();
+        }
+    };
+    await receiver.start();
 
-    const listener = new LP2PQuicTransportListener(receiver);
-
-    for await (const transport of listener.incomingTransports) {
-        // Blocks until transport is ready.
-        await transport.ready;
-    }
-
-    // Peer B
+    // Requester
     const request = new LP2PRequest({
-        nickname: "Peer B",
+        nickname: "example-request",
     });
-
-    const transport = new LP2PQuicTransport(request);
-
-    // Blocks until transport is opened.
+    const conn = await request.start();
+    const transport = new LP2PQuicTransport(conn);
     await transport.ready;
 }
 
 exampleLP2PQuicTransport();
-
-
-async function exampleLP2PQuicTransportOverConnection() {
-    // Peer A
-    const receiver = new LP2PReceiver({
-        nickname: "Peer A",
-    });
-    receiver.onconnection = async e => {
-        const conn = e.connection;
-
-        const transport = new LP2PQuicTransport(conn);
-
-        // Blocks until transport is ready.
-        await transport.ready;
-    };
-
-    // Blocks until permission is received.
-    await receiver.start();
-
-    // Peer B
-    const request = new LP2PRequest({
-        nickname: "Peer B",
-    });
-
-    // Blocks until connection is received.
-    const conn = await request.start();
-
-    const transport = new LP2PQuicTransport(conn);
-
-    // Blocks until transport is ready.
-    await transport.ready;
-}
-
-exampleLP2PQuicTransportOverConnection();
-
-async function exampleIncomingTransports() {
-    // Peer A
-    const receiver = new LP2PReceiver({
-        nickname: "Peer A",
-    });
-
-    const listener = new LP2PQuicTransportListener(receiver);
-
-    for await (const transport of listener.incomingTransports) {
-        // Blocks until transport is ready.
-        await transport.ready;
-    }
-}
-
-exampleIncomingTransports();
 
 async function exampleLP2PDataChannel() {
     // Peer A

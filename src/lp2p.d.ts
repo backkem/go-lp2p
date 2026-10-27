@@ -2,9 +2,11 @@ class LP2PReceiver extends EventTarget {
     constructor(options?: LP2PReceiverOptions): LP2PReceiver;
     onconnection: EventHandler<LP2PConnectionEvent>;
     start(): Promise<undefined>;
+    stop(): undefined;
 }
 interface LP2PReceiverOptions {
     nickname?: string;
+    allowedOrigins?: string[];
 }
 class LP2PConnectionEvent extends Event {
     constructor(type: string, connectionEventInitDict: LP2PConnectionEventInit): LP2PConnectionEvent;
@@ -21,6 +23,8 @@ interface LP2PRequestOptions {
     nickname?: string;
 }
 interface LP2PConnection extends EventTarget {
+    close(): undefined;
+    onclose: EventHandler<Event>;
 }
 class LP2PDataChannel extends EventTarget {
     constructor(label: string, dataChannelDict?: LP2PDataChannelInit): LP2PDataChannel;
@@ -52,16 +56,19 @@ interface LP2PDataChannelEventInit extends EventInit {
     channel: LP2PDataChannel;
 }
 class LP2PQuicTransport extends WebTransport {
-    constructor(source: LP2PRequest | LP2PReceiver, quicTransportDict?: LP2PQuicTransportInit): LP2PQuicTransport;
-    constructor(connection: LP2PConnection, quicTransportDict?: LP2PQuicTransportInit): LP2PQuicTransport;
+    constructor(connection: LP2PConnection, options?: LP2PQuicTransportInit): LP2PQuicTransport;
 }
 
 interface LP2PQuicTransportInit {
+    requireUnreliable?: boolean;
+    congestionControl?: WebTransportCongestionControl;
+    anticipatedConcurrentIncomingUnidirectionalStreams?: number | null;
+    anticipatedConcurrentIncomingBidirectionalStreams?: number | null;
 }
 class LP2PQuicTransportListener {
-    constructor(source: LP2PRequest | LP2PReceiver, quicTransportListenerDict?: LP2PQuicTransportListenerInit): LP2PQuicTransportListener;
-    readonly ready: Promise<undefined>;
+    constructor(connection: LP2PConnection, options?: LP2PQuicTransportListenerInit): LP2PQuicTransportListener;
     readonly incomingTransports: ReadableStream<LP2PQuicTransport>;
+    close(): undefined;
 }
-interface LP2PQuicTransportListenerInit {
+interface LP2PQuicTransportListenerInit extends LP2PQuicTransportInit {
 }
