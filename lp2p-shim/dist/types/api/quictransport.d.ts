@@ -1,7 +1,5 @@
 import type { StreamSink, WTStream } from "../protocol/webtransport.js";
 import { LP2PConnection } from "./connection.js";
-import { LP2PReceiver } from "./receiver.js";
-import { LP2PRequest } from "./request.js";
 export interface WebTransportErrorInit {
     source?: "stream" | "session";
     streamErrorCode?: number | null;
@@ -124,16 +122,17 @@ export declare class LP2PDatagramDuplexStream {
     finish(err: unknown | null): void;
 }
 export interface LP2PQuicTransportInit {
-    /** Fail (ready rejects) unless datagrams can be lost, i.e. the transport is not reliable-only. */
+    /** Fail unless datagrams can be lost, i.e. the session is not "reliable-only". */
     requireUnreliable?: boolean;
     /** Accepted and reflected; the shim has no congestion controller to choose. */
     congestionControl?: "default" | "throughput" | "low-latency";
     anticipatedConcurrentIncomingUnidirectionalStreams?: number | null;
     anticipatedConcurrentIncomingBidirectionalStreams?: number | null;
-    /** "bytes" makes datagrams.readable a byte stream. */
+    /** Extension (from WebTransportOptions): "bytes" makes datagrams.readable a byte stream. */
     datagramsReadableType?: "bytes";
 }
-export interface LP2PQuicTransportListenerInit {
+/** The options of a listener apply to each transport it creates. */
+export interface LP2PQuicTransportListenerInit extends LP2PQuicTransportInit {
 }
 export interface WebTransportCloseInfo {
     closeCode?: number;
@@ -153,17 +152,17 @@ export interface WebTransportConnectionStats {
 }
 export declare class LP2PQuicTransport {
     #private;
-    /** Always true: the postMessage transport gives reliable-only sessions. */
+    /** Always true: some shim transports only give reliable-only sessions. */
     static get supportsReliableOnly(): boolean;
     /**
-     * Opens a WebTransport session with the peer of source. An LP2PRequest or
-     * LP2PReceiver that is not started yet is started, as the spec says. For
-     * an LP2PReceiver, the session is opened on its next connection.
+     * Opens a new WebTransport session on connection. Each construction opens
+     * its own session; the peer receives it through its
+     * LP2PQuicTransportListener on the connection.
      */
-    constructor(source: LP2PConnection | LP2PRequest | LP2PReceiver, quicTransportDict?: LP2PQuicTransportInit);
+    constructor(connection: LP2PConnection, options?: LP2PQuicTransportInit);
     get ready(): Promise<undefined>;
     get closed(): Promise<WebTransportCloseInfo>;
-    /** Resolves when the session closes: no peer page can ask for a drain (there is no GOAWAY). */
+    /** Resolves when the peer drains the session (data-transport-drain), or when it ends. */
     get draining(): Promise<undefined>;
     get reliability(): "pending" | "reliable-only" | "supports-unreliable";
     get congestionControl(): "default" | "throughput" | "low-latency";
@@ -183,20 +182,26 @@ export declare class LP2PQuicTransport {
     createSendGroup(): LP2PSendGroup;
     /** Counts payload bytes; RTT and packet counts are not observable through the shim's transports. */
     getStats(): Promise<WebTransportConnectionStats>;
-    /** Not supported: the shim has no TLS session to export keying material from. */
-    exportKeyingMaterial(_label: BufferSource, _context: BufferSource, _outputLength: number): Promise<Uint8Array>;
+    /**
+     * Keying material of this session only, derived as the binding says (the
+     * connection's exporter with label "EXPORTER-WebTransport" and the
+     * WebTransport Exporter Context, with the exchange-id as session ID). In
+     * the shim the connection's exporter is the handshake stand-in of
+     * protocol/identity.ts, not TLS. Extension: outputLength, default 32.
+     */
+    exportKeyingMaterial(label: BufferSource, context?: BufferSource, outputLength?: number): Promise<ArrayBuffer>;
     close(closeInfo?: WebTransportCloseInfo): undefined;
 }
 export declare class LP2PQuicTransportListener {
     #private;
     /**
-     * Hands out the WebTransport sessions peers open on source's connections:
-     * the one connection of an LP2PRequest, or every connection of an
-     * LP2PReceiver (current and future). Starts source if needed. Extension:
-     * source may also be an LP2PConnection.
+     * Receives the incoming WebTransport sessions of connection. There is at
+     * most one listener per connection at a time; with none, or with a full
+     * queue, incoming sessions are refused.
      */
-    constructor(source: LP2PRequest | LP2PReceiver | LP2PConnection, quicTransportListenerDict?: LP2PQuicTransportListenerInit);
-    get ready(): Promise<undefined>;
+    constructor(connection: LP2PConnection, options?: LP2PQuicTransportListenerInit);
     get incomingTransports(): ReadableStream<LP2PQuicTransport>;
+    /** Stops listening. Transports already queued can still be read; a new listener can then be constructed. */
+    close(): undefined;
 }
 export {};

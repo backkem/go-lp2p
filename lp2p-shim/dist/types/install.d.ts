@@ -13,6 +13,10 @@ export declare const interfaces: {
     readonly LP2PDataChannelEvent: typeof LP2PDataChannelEvent;
     readonly LP2PQuicTransport: typeof LP2PQuicTransport;
     readonly LP2PQuicTransportListener: typeof LP2PQuicTransportListener;
+    readonly lp2p: Readonly<{
+        makeDiscoverable: typeof import("./index.js").makeDiscoverable;
+        connect: typeof import("./index.js").connect;
+    }>;
 };
 export interface InstallOptions {
     /** Replace interfaces the browser already has. Default false. */

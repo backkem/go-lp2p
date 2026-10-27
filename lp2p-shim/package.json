@@ -1,8 +1,8 @@
 {
   "name": "lp2p-shim",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Experimental polyfill for the WICG Local Peer-to-Peer API (LP2PReceiver, LP2PRequest, LP2PConnection, LP2PDataChannel) over pluggable in-browser transports. Not secure.",
+  "description": "Experimental polyfill for the WICG Local Peer-to-Peer API (LP2PReceiver, LP2PRequest, LP2PConnection, LP2PDataChannel, LP2PQuicTransport and the lp2p shorthand) over pluggable in-browser transports. Not secure.",
   "license": "ISC",
   "type": "module",
   "main": "dist/lp2p-shim.esm.js",

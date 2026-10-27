@@ -2,12 +2,13 @@
 export interface PeerInfo {
     /** Transport-level ID, stable while the peer advertises. */
     id: string;
-    /** Nickname the peer's page chose. Never verified in the shim. */
+    /** Nickname the peer's page chose, from discovery. A hint, never verified. Empty if unknown. */
     nickname: string;
+    /** The device's name (agent-info display-name), once known. Not the page's nickname. */
+    displayName?: string;
     /**
-     * Whether the name is verified. A browser can verify names against the
-     * peer's certificate after pairing; the shim never can, so this is
-     * always false.
+     * Whether displayName is trusted: it was obtained on a session that is
+     * authenticated. Nicknames never are.
      */
     verified: boolean;
 }
@@ -53,7 +54,10 @@ export interface UserAgentUI {
     /** Asks the user for the PIN shown on the other device; null if canceled. */
     enterPIN(p: PINPrompt, signal: AbortSignal): Promise<string | null>;
 }
-/** Display label for a peer, marking it unverified like go-lp2p's Peer.Label. */
+/**
+ * Display label for a peer, like go-lp2p's Peer.Label: the page's nickname
+ * (a hint) and, once trusted, the device's name.
+ */
 export declare function peerLabel(p: PeerInfo): string;
 export interface AutoUIOptions {
     /** Answer to permission prompts. Default: allow everything. */

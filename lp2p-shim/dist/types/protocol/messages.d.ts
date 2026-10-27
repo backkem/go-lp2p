@@ -9,13 +9,23 @@ export declare const TypeKey: {
     readonly AuthSpake2Handshake: 1005;
     readonly DataChannelOpenRequest: 1101;
     readonly DataChannelOpenResponse: 1102;
+    readonly SessionRequest: 1110;
+    readonly SessionResponse: 1111;
     readonly DataTransportStartRequest: 1201;
     readonly DataTransportStartResponse: 1202;
-    readonly DataTransportStreamRequest: 1203;
-    readonly DataTransportStreamResponse: 1204;
+    readonly DataTransportStream: 1203;
     readonly DataTransportClose: 1205;
+    readonly DataTransportDrain: 1206;
+    readonly ShimHello: 32001;
+    readonly ShimFinished: 32002;
 };
 export type TypeKey = (typeof TypeKey)[keyof typeof TypeKey];
+/** exchange-id = uint .lt 2^62 */
+export declare const MAX_EXCHANGE_ID: number;
+/** data-transport-close reason: text .size (0..1024) */
+export declare const MAX_CLOSE_REASON_BYTES = 1024;
+/** data-transport-start-request session-binding: bytes .size 32 */
+export declare const SESSION_BINDING_BYTES = 32;
 /** agent-capability values. The LP2P spec writes "11OO" (letter O); 1100 is meant. */
 export declare const AgentCapability: {
     readonly DataChannels: 1100;
@@ -97,27 +107,43 @@ export type Message = {
     requestId: number;
     result: number;
 } | {
+    type: typeof TypeKey.SessionRequest;
+    requestId: number;
+    requestingOrigin: string;
+} | {
+    type: typeof TypeKey.SessionResponse;
+    requestId: number;
+    result: number;
+} | {
     type: typeof TypeKey.DataTransportStartRequest;
     requestId: number;
     exchangeId: number;
+    sessionBinding?: Uint8Array;
 } | {
     type: typeof TypeKey.DataTransportStartResponse;
     requestId: number;
     result: number;
 } | {
-    type: typeof TypeKey.DataTransportStreamRequest;
-    requestId: number;
+    type: typeof TypeKey.DataTransportStream;
     exchangeId: number;
-    unidirectional: boolean;
-} | {
-    type: typeof TypeKey.DataTransportStreamResponse;
-    requestId: number;
-    result: number;
 } | {
     type: typeof TypeKey.DataTransportClose;
     code: number;
     reason: string;
+} | {
+    type: typeof TypeKey.DataTransportDrain;
+} | {
+    type: typeof TypeKey.ShimHello;
+    signingKey: Uint8Array;
+    exchangeKey: Uint8Array;
+    nonce: Uint8Array;
+} | {
+    type: typeof TypeKey.ShimFinished;
+    signature: Uint8Array;
 };
+export declare class DecodeError extends Error {
+    name: string;
+}
 /** Encodes a message as varint type key + CBOR body. */
 export declare function encodeMessage(m: Message): Uint8Array;
 /** Decodes one message that fills buf exactly. */

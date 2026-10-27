@@ -1,11 +1,12 @@
-import type { TransportConnection, TransportStream } from "./types.js";
+import type { StreamOptions, TransportConnection, TransportStream } from "./types.js";
 export declare abstract class BaseStream implements TransportStream {
     private readonly inbox;
     private closeHandler;
     private closeFired;
     private isClosed;
     readonly id: number;
-    constructor(id: number);
+    readonly unidirectional: boolean;
+    constructor(id: number, unidirectional?: boolean);
     get closed(): boolean;
     get onmessage(): ((message: Uint8Array) => void) | null;
     set onmessage(fn: ((message: Uint8Array) => void) | null);
@@ -43,7 +44,7 @@ export declare abstract class BaseConnection implements TransportConnection {
     set onclose(fn: ((reason: string) => void) | null);
     get ondatagram(): ((datagram: Uint8Array) => void) | null;
     set ondatagram(fn: ((datagram: Uint8Array) => void) | null);
-    abstract openStream(): TransportStream;
+    abstract openStream(options?: StreamOptions): TransportStream;
     protected abstract doClose(reason: string): void;
     sendDatagram(datagram: Uint8Array): void;
     /** For transports with datagrams: send one. */
