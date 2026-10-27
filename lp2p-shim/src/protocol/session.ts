@@ -42,6 +42,9 @@ const CONTROL_TYPES: readonly number[] = [
   TypeKey.AuthSpake2Handshake,
 ];
 
+/** How long a refusing server, or an agent that sent data-transport-close, waits for the peer to end its side. */
+export const REFUSAL_LINGER_MS = 2000;
+
 type Waiter = { types: readonly number[]; resolve: (m: Message) => void; reject: (e: Error) => void };
 
 /** The control stream, with a queue of messages no caller has taken yet. */
@@ -139,8 +142,12 @@ export class ControlChannel {
 export interface SessionRequest {
   /** The requesting origin hint, as sent. */
   requestingOrigin: string;
-  /** Sends lp2p-session-response and ends the stream. */
-  respond(result: number): void;
+  /**
+   * Sends lp2p-session-response. On success both sides end the stream; on a
+   * refusal the promise resolves once the client ended its side, or after a
+   * timeout, and the caller then closes the connection.
+   */
+  respond(result: number): Promise<void>;
 }
 
 export type ChannelState = "connecting" | "open" | "closed";
@@ -417,7 +424,6 @@ export class Session implements WTHost {
           return;
         }
         if (m.type !== TypeKey.SessionResponse || m.requestId !== requestId) return;
-        if (m.result === Result.Success) this.markAccepted();
         resolve(m.result);
         stream.onclose = null;
         stream.close(); // both agents end their side of the stream
@@ -467,16 +473,32 @@ export class Session implements WTHost {
     return ep;
   }
 
+  /**
+   * Closes the connection. WebTransport sessions that sent
+   * data-transport-close get until their peer ended the control stream, or
+   * a timeout, so the close isn't lost.
+   */
   close(reason?: string): void {
-    this.connection.close(reason);
+    if (this.closing.size === 0) {
+      this.connection.close(reason);
+      return;
+    }
+    void Promise.all(this.closing).then(() => this.connection.close(reason));
   }
+
+  /** WebTransport sessions waiting for the peer to end their control stream. Internal. */
+  readonly closing = new Set<Promise<void>>();
 
   private setControl(c: ControlChannel): void {
     this.control = c;
     for (const w of this.controlWaiters.splice(0)) w(c);
   }
 
-  private markAccepted(): void {
+  /**
+   * The session is accepted: the server sent success, or the client got
+   * success and verified the server. Streams the client held are routed now.
+   */
+  markAccepted(): void {
     if (this.isAccepted) return;
     this.isAccepted = true;
     for (const [stream, first] of this.early.splice(0)) this.route(stream, first);
@@ -543,11 +565,23 @@ export class Session implements WTHost {
     const req: SessionRequest = {
       requestingOrigin,
       respond: (result) => {
-        if (answered || stream.closed) return;
+        if (answered || stream.closed) return Promise.resolve();
         answered = true;
         stream.send(encodeMessage({ type: TypeKey.SessionResponse, requestId, result }));
-        if (result === Result.Success) this.markAccepted();
-        stream.close();
+        if (result === Result.Success) {
+          this.markAccepted();
+          stream.close(); // both agents end their side
+          return Promise.resolve();
+        }
+        // After a refusal, wait for the client to end its side, so the
+        // response is not lost when the connection closes, or time out.
+        return new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, REFUSAL_LINGER_MS);
+          stream.onclose = () => {
+            clearTimeout(t);
+            resolve();
+          };
+        });
       },
     };
     if (this.sessionRequestHandler) this.sessionRequestHandler(req);

@@ -143,8 +143,8 @@ export class UserAgent {
     session.onclose = (reason) => ac.abort(new DOMException(`connection closed: ${reason}`, "AbortError"));
     const refuse = (req: SessionRequest, why: string): void => {
       this.log(`refused session: ${why}`);
-      req.respond(Result.PermanentError);
-      session.close(`refused: ${why}`);
+      // Close once the client ended its side of the stream, or after a timeout.
+      void req.respond(Result.PermanentError).then(() => session.close(`refused: ${why}`));
     };
     try {
       const identity = await this.local.identity();
@@ -152,17 +152,19 @@ export class UserAgent {
         session.onsessionrequest = resolve;
         ac.signal.addEventListener("abort", () => reject(ac.signal.reason), { once: true });
       });
+      let info!: Promise<AgentInfo>;
       const { control, tls, req } = await this.withTimeout(
         (async () => {
           const control = await session.controlChannel(ac.signal);
           const tls = await handshake(control, identity, "server", ac.signal);
           session.tls = tls;
+          // The client sends its session request once it has our agent-info.
+          info = session.exchangeInfo(this.agentInfo(), ac.signal);
+          info.catch(() => {});
           return { control, tls, req: await request };
         })(),
         ac,
       );
-      const info = session.exchangeInfo(this.agentInfo(), ac.signal);
-      info.catch(() => {});
 
       // The hint: refuse before any ceremony or prompt if no receiver allows it.
       const hint = parseOrigin(req.requestingOrigin) ?? "null";
@@ -182,7 +184,10 @@ export class UserAgent {
         const live = new AbortController();
         session.whenClosed(() => live.abort(new DOMException("connection closed", "AbortError")));
         const show = this.pairing === "pin" ? this.pinPresenter(own, peer, live.signal) : null;
-        answerCeremony(control, parties, show, live.signal).catch(() => {});
+        // If that ceremony fails, the server closes the connection.
+        answerCeremony(control, parties, show, live.signal).catch((err: unknown) => {
+          if (err instanceof AuthError) session.close("authentication after success failed");
+        });
       } else {
         sendAuthCapabilities(control);
         await answerCeremony(control, parties, showPIN, ac.signal);
@@ -273,8 +278,8 @@ export class UserAgent {
       const control = await session.controlChannel(ac.signal);
       const tls = await this.withTimeout(handshake(control, identity, "client", ac.signal), ac);
       session.tls = tls;
-      const info = session.exchangeInfo(this.agentInfo(), ac.signal);
-      info.catch(() => {});
+      // The session request follows the agent-info exchange.
+      const remote = await this.withTimeout(session.exchangeInfo(this.agentInfo(), ac.signal), ac);
       const result = session.requestSession(this.origin);
       result.catch(() => {});
       const cue = control.next([TypeKey.AuthCapabilities], ac.signal).then(() => "cue" as const);
@@ -284,7 +289,6 @@ export class UserAgent {
       const trusted = this.local.isAuthenticated(tls.peerFingerprint);
       const first = await Promise.race([cue, result]);
       if (first !== "cue" && first !== Result.Success) throw notAllowed("The peer refused the session.");
-      const remote = await this.withTimeout(info, ac);
       const verified: PeerInfo = { ...peer, displayName: remote.displayName, verified: false };
       if (first === "cue" || !trusted) {
         await startCeremony(control, parties, () => this.ui.enterPIN({ origin: this.origin, nickname, peer: verified }, ac.signal), ac.signal);
@@ -292,6 +296,8 @@ export class UserAgent {
       }
       verified.verified = true;
       if ((await result) !== Result.Success) throw notAllowed("The peer refused the session.");
+      // Accepted: success and a verified server. Streams held until now are routed.
+      session.markAccepted();
       this.local.rememberPeer({ identity: tls.peerFingerprint, anchorKey: tls.peerFingerprint, displayName: remote.displayName });
       this.local.addGrant(this.origin, tls.peerFingerprint);
       session.onclose = null;

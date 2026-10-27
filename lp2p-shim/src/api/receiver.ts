@@ -43,10 +43,10 @@ export class LP2PReceiver extends EventTarget {
    * promise while pending or after success.
    */
   start(): Promise<undefined> {
-    if (this.#startPromise) return this.#startPromise;
     if (this.#state === "stopped") {
       return Promise.reject(new DOMException("the receiver was stopped", "InvalidStateError"));
     }
+    if (this.#startPromise) return this.#startPromise;
     const ua = getUserAgent();
     if (ua.origin === "null") return Promise.reject(new DOMException("opaque origin", "NotAllowedError"));
     const handle: ReceiverHandle = {

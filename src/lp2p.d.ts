@@ -57,6 +57,7 @@ interface LP2PDataChannelEventInit extends EventInit {
 }
 class LP2PQuicTransport extends WebTransport {
     constructor(connection: LP2PConnection, options?: LP2PQuicTransportInit): LP2PQuicTransport;
+    readonly connection: LP2PConnection;
 }
 
 interface LP2PQuicTransportInit {

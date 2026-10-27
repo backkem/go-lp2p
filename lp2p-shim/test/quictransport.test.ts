@@ -387,6 +387,22 @@ test("quic: close codes, FIN without close, drain, session-gone on open streams"
   }
 });
 
+test("quic: closing the connection right after transport.close() still delivers the close", async () => {
+  const p = pages();
+  try {
+    const { local, remote } = await connect(p);
+    const [a, b] = await transportPairOver(local, remote);
+    assert.equal(a.connection, local);
+    assert.equal(b.connection, remote);
+    a.close({ closeCode: 9, reason: "then the connection" });
+    local.close();
+    assert.deepEqual(await b.closed, { closeCode: 9, reason: "then the connection" });
+    await once(remote, "close");
+  } finally {
+    closeAll(...p.transports);
+  }
+});
+
 test("quic: data-transport-drain resolves draining; FIN without close is code 0", async () => {
   const p = pages();
   try {

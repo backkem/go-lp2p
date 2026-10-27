@@ -41,6 +41,8 @@ export const StreamFrame = {
 export const SESSION_GONE = 2 ** 32;
 /** How long a stream for a session that is not open yet is held. */
 const HOLD_MS = 2000;
+/** How long an agent that sent data-transport-close waits for the peer to end the control stream. */
+const CLOSE_LINGER_MS = 2000;
 
 /** What happens on a WebTransport stream, in order. */
 export interface StreamSink {
@@ -220,6 +222,8 @@ export interface WTHost {
   sendDatagram(d: Uint8Array): void;
   requestId(): number;
   forgetTransport(exchangeId: number): void;
+  /** Promises of sessions that sent data-transport-close and wait for the peer's end of the control stream. */
+  readonly closing: Set<Promise<void>>;
   exportKeyingMaterial(label: string, context: Uint8Array, length: number): Promise<Uint8Array>;
 }
 
@@ -258,6 +262,7 @@ export class WTSession {
   private datagramHandler: ((d: Uint8Array) => void) | null = null;
   private readonly prefix: Uint8Array;
   private peerClose: CloseInfo | null = null;
+  private lingering = false;
 
   constructor(host: WTHost, exchangeId: number, control: TransportStream, outgoing: boolean, requestId: number) {
     this.host = host;
@@ -391,6 +396,21 @@ export class WTSession {
     }
     if (this.state === "open") {
       this.control.send(encodeMessage({ type: TypeKey.DataTransportClose, code, reason }));
+      // Keep our side of the control stream until the peer ended its side
+      // (or a timeout), so the close isn't lost to a connection close.
+      this.lingering = true;
+      const done = new Promise<void>((resolve) => {
+        const t = setTimeout(() => {
+          this.control.close();
+          resolve();
+        }, CLOSE_LINGER_MS);
+        this.control.onclose = () => {
+          clearTimeout(t);
+          resolve();
+        };
+      });
+      this.host.closing.add(done);
+      void done.then(() => this.host.closing.delete(done));
     }
     this.teardown({ code, reason }, "closed locally");
   }
@@ -456,7 +476,7 @@ export class WTSession {
     this.state = "closed";
     if (this.earlyTimer) clearTimeout(this.earlyTimer);
     for (const s of this.early.splice(0)) s.refuse(SESSION_GONE);
-    this.control.close();
+    if (!this.lingering) this.control.close();
     for (const s of [...this.streams]) s.sessionGone(why);
     this.streams.clear();
     for (const s of this.heldStreams.splice(0)) s.refuse(SESSION_GONE);

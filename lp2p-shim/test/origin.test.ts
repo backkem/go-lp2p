@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LP2PReceiver, LP2PRequest, LocalState, configure, type ShimConfig } from "../src/index.ts";
+import { LP2PDataChannelEvent, LP2PReceiver, LP2PRequest, LocalState, configure, type ShimConfig } from "../src/index.ts";
 import type { PostMessageTransport } from "../src/transport/postmessage.ts";
 import { AutoUI, type PermissionRequest } from "../src/ua/ui.ts";
 import { closeAll, once, transportPair } from "./helpers.ts";
@@ -144,13 +144,26 @@ test("local state: a server that trusts the client accepts without auth-capabili
   try {
     configure({ ...p.a, localState: stateA });
     const receiver = new LP2PReceiver({ nickname: "R" });
+    // The receiver opens a data channel as soon as it has the connection,
+    // which is right after its success response: the client is still in
+    // the ceremony then, and holds the stream until it accepts.
+    receiver.onconnection = (e) => {
+      try {
+        e.connection.createDataChannel("early");
+      } catch {
+        // the first client closes at once
+      }
+    };
     await receiver.start();
     configure({ ...p.b, localState: stateB });
     (await new LP2PRequest().start()).close();
     assert.equal(p.pins.length, 1);
     // The client forgets the server; the server still trusts the client.
     for (const a of [...stateB.anchors.values()]) stateB.removeAnchor(a);
-    (await new LP2PRequest().start()).close();
+    const conn = await new LP2PRequest().start();
+    const early = await once<LP2PDataChannelEvent>(conn, "datachannel");
+    assert.equal(early.channel.label, "early");
+    conn.close();
     // Success arrived while the client had not verified the server: it ran
     // the ceremony, so the server showed a PIN again, without a new prompt.
     assert.equal(p.pins.length, 2);

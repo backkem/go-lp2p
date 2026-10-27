@@ -73,7 +73,9 @@ export class LP2PDataChannel extends EventTarget {
       this.#readyState = "open";
       this.dispatchEvent(new Event("open"));
     };
-    ep.onframe = (enc, payload) => this.#receive(enc, payload);
+    // An incoming channel starts reading after its datachannel event, so
+    // messages that came early reach the handler the page sets there.
+    if (!a.incoming) ep.onframe = (enc, payload) => this.#receive(enc, payload);
     ep.onerror = (err) => {
       const ev = new Event("error");
       Object.defineProperty(ev, "error", { value: err });
@@ -85,6 +87,7 @@ export class LP2PDataChannel extends EventTarget {
       // right after the datachannel event that delivered them.
       queueMicrotask(() => {
         if (this.#readyState === "open") this.dispatchEvent(new Event("open"));
+        ep.onframe = (enc, payload) => this.#receive(enc, payload);
       });
     }
   }

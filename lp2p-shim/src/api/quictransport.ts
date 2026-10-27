@@ -523,6 +523,7 @@ export class LP2PQuicTransport {
   #state: State = "connecting";
   #session: WTSession | null = null;
   #slots: ConnectionSlots;
+  readonly #connection: LP2PConnection;
   #reliability: "pending" | "reliable-only" | "supports-unreliable" = "pending";
   readonly #congestionControl: "default" | "throughput" | "low-latency";
   readonly #requireUnreliable: boolean;
@@ -563,6 +564,7 @@ export class LP2PQuicTransport {
     const slots = slotsOf(connection);
     if (!a && slots.closed) throw new DOMException("the LP2PConnection is closed", "InvalidStateError");
     this.#slots = slots;
+    this.#connection = connection;
     const init = options ?? {};
     const cc = init.congestionControl ?? "default";
     if (!CONGESTION_CONTROL.includes(cc)) throw new TypeError(`invalid congestionControl "${String(cc)}"`);
@@ -698,6 +700,10 @@ export class LP2PQuicTransport {
     this.#resolveDraining();
   }
 
+  /** [[Connection]]: the LP2PConnection this transport's session is on. */
+  get connection(): LP2PConnection {
+    return this.#connection;
+  }
   get ready(): Promise<undefined> {
     return this.#ready;
   }

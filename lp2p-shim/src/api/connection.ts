@@ -52,17 +52,19 @@ export class LP2PConnection extends EventTarget {
     if (!s) throw new TypeError("Illegal constructor");
     this.#slots = { session: s, transports: new Set(), listener: null, closed: false };
     slots.set(this, this.#slots);
-    s.ondatachannel = (ep) => {
-      const channel = adoptChannel(ep, true);
-      this.dispatchEvent(new LP2PDataChannelEvent("datachannel", { channel }));
-    };
     s.whenClosed(() => setTimeout(() => this.#finalize(), 0));
     // Incoming WebTransport sessions reported before the connection is
     // exposed to script are held until then, so script can construct a
     // listener first. The connection is exposed when start() resolves or
     // the connection event is dispatched, both right after this; script
     // reacting to them runs before the next task.
+    // Data channels that came early are held the same way, so script can
+    // set ondatachannel first.
     setTimeout(() => {
+      s.ondatachannel = (ep) => {
+        const channel = adoptChannel(ep, true);
+        this.dispatchEvent(new LP2PDataChannelEvent("datachannel", { channel }));
+      };
       s.ontransport = (t) => {
         const listener = this.#slots.listener;
         if (this.#slots.closed || !listener || !listener.incoming(t)) t.refuse();

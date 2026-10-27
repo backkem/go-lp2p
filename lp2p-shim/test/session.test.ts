@@ -37,8 +37,9 @@ async function accepted(): Promise<{ cli: Session; srv: Session; done: () => voi
   await Promise.all([s.cli.exchangeInfo(info("C")), s.srv.exchangeInfo(info("S"))]);
   const req = new Promise<SessionRequest>((r) => (s.srv.onsessionrequest = r));
   const result = s.cli.requestSession("https://app.example");
-  (await req).respond(Result.Success);
+  void (await req).respond(Result.Success);
   assert.equal(await result, Result.Success);
+  s.cli.markAccepted(); // the user agent does this once it verified the server
   assert.ok(s.cli.accepted && s.srv.accepted);
   return s;
 }

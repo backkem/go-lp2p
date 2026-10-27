@@ -21,7 +21,10 @@ export type Checks = [
   Assert<Covers<shim.LP2PQuicTransportListener, LP2PQuicTransportListener>>,
   Assert<Covers<shim.LP2PDatagramDuplexStream, WebTransportDatagramDuplexStream>>,
   Assert<Covers<shim.LP2PBidirectionalStream, WebTransportBidirectionalStream>>,
-  Assert<Assignable<shim.LP2PQuicTransportListener, LP2PQuicTransportListener>>,
+  // Not Assignable for the listener: its transports' connection attribute
+  // brings in LP2PConnection's event handlers, whose parameter variance
+  // gets in the way. Covers above checks the members.
+  Assert<Assignable<shim.LP2PQuicTransport["connection"], shim.LP2PConnection>>,
   // Member types too, where event handler parameter variance doesn't get in the way.
   Assert<Assignable<shim.LP2PDataChannel, LP2PDataChannel>>,
   Assert<Assignable<ReturnType<shim.LP2PRequest["start"]>, Promise<unknown>>>,
