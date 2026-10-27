@@ -5,7 +5,7 @@ type TypeKey uint64
 // Message structs are defined in:
 // * messages_osp.go: Generated based on OSP CDDL
 // * messages_lp2p.go: Generated based on lp2p CDDL
-// * messages_wip.go: handwritten messages yet to be defined in CDDL
+// * messages_lp2p_ext.go: handwritten LP2P session and WebTransport messages
 
 ////
 // The below is generated semi-automatically
@@ -178,8 +178,7 @@ func newMessageByType(key TypeKey) (interface{}, error) {
 		return &msgDataChannelOpenResponse{}, nil
 
 	default:
-		return newMessageByTypeWIP(key)
-		// return nil, fmt.Errorf("unknown type key: %d", key)
+		return newMessageByTypeLP2P(key)
 	}
 }
 
@@ -287,7 +286,6 @@ func typeKeyByMessage(msg interface{}) (TypeKey, error) {
 		return typeKeyDataChannelOpenResponse, nil
 
 	default:
-		return typeKeyByMessageWIP(msg)
-		// return 0, fmt.Errorf("unknown message type: %T", msg)
+		return typeKeyByMessageLP2P(msg)
 	}
 }

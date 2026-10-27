@@ -51,7 +51,7 @@ func (c *baseConnection) routeStream(s ApplicationStream) {
 	}
 
 	switch typeKey {
-	case typeKeyDataChannelOpenRequest, typeKeyDataTransportStartRequest, typeKeyDataTransportStreamRequest:
+	case typeKeyDataChannelOpenRequest, typeKeyDataTransportStartRequest, typeKeyDataTransportStream:
 	default:
 		// Not ours: hand the stream over as received.
 		deliver(c, c.app.Load().acceptStream, ApplicationStream(&prefixedStream{
@@ -83,8 +83,7 @@ func (c *baseConnection) routeStream(s ApplicationStream) {
 		// further messages.
 		deliver(c, app.acceptTransport, c.createDataTransport(), s.Close)
 
-	case *msgDataTransportStreamRequest:
-		// TODO: send data-transport-stream-response
+	case *msgDataTransportStream:
 		deliver(c, app.acceptTransportStream, s, s.Close)
 	}
 }

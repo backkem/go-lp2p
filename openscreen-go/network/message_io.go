@@ -96,6 +96,9 @@ func EncodeCBOR(v interface{}) ([]byte, error) {
 // prefixed with the type key. The message is emitted with a single Write
 // call.
 func WriteTypedMessage(w io.Writer, typeKey TypeKey, v interface{}) error {
+	if err := validateMessage(v); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	if err := writeTypeKey(typeKey, &buf); err != nil {
 		return err
@@ -134,7 +137,10 @@ func decodeCBOR(r io.Reader, v interface{}) error {
 	if err != nil {
 		return err
 	}
-	return cbor.Unmarshal(item, v)
+	if err := cbor.Unmarshal(item, v); err != nil {
+		return err
+	}
+	return validateMessage(v)
 }
 
 const (

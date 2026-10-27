@@ -18,7 +18,7 @@ func (c *Connection) NewTransport(ctx context.Context) (*PooledWebTransport, err
 
 func (c *baseConnection) NewTransport(ctx context.Context) (*PooledWebTransport, error) {
 	_, err := c.openStream(ctx, &msgDataTransportStartRequest{
-		RequestID: c.nextRequestID(),
+		msgRequest: msgRequest{RequestId: msgRequestId(c.nextRequestID())},
 	})
 	if err != nil {
 		return nil, err
@@ -49,14 +49,10 @@ func (t *PooledWebTransport) AcceptStream(ctx context.Context) (*QuicStream, err
 }
 
 func (t *PooledWebTransport) OpenStreamSync(ctx context.Context) (*QuicStream, error) {
-	s, err := t.conn.openStream(ctx, &msgDataTransportStreamRequest{
-		RequestID: t.conn.nextRequestID(),
-	})
+	s, err := t.conn.openStream(ctx, &msgDataTransportStream{})
 	if err != nil {
 		return nil, err
 	}
-
-	// TODO: await data-transport-stream-response
 
 	return &QuicStream{stream: s}, nil
 }
