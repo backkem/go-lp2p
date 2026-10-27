@@ -10,12 +10,11 @@ import (
 type connectedState struct {
 	appConn ApplicationConnection
 
-	acceptDataChannel     chan *DataChannel
-	acceptTransport       chan *PooledWebTransport
-	acceptTransportStream chan ApplicationStream
-	acceptStream          chan ApplicationStream
+	acceptDataChannel chan *DataChannel
+	acceptStream      chan ApplicationStream
 
 	dataChannelIDs dataChannelIDs
+	wt             *webTransportState
 }
 
 // runApplication starts the application stream dispatcher. It is the only
@@ -93,12 +92,14 @@ func (c *baseConnection) routeStream(s ApplicationStream) {
 		c.acceptDataChannelRequest(typedMsg, s)
 
 	case *msgDataTransportStartRequest:
-		// TODO: send data-transport-start-response. The stream carries no
-		// further messages.
-		deliver(c, app.acceptTransport, c.createDataTransport(), s.Close)
+		c.handleTransportStart(typedMsg, s)
 
 	case *msgDataTransportStream:
-		deliver(c, app.acceptTransportStream, s, s.Close)
+		uni := false
+		if q, ok := s.(interface{ receiveOnly() bool }); ok {
+			uni = q.receiveOnly()
+		}
+		app.wt.route(typedMsg.ExchangeId, newWebTransportStream(nil, s, uni))
 	}
 }
 
@@ -163,12 +164,6 @@ func (c *baseConnection) openStream(ctx context.Context, msg interface{}) (Appli
 		return nil, err
 	}
 	return stream, nil
-}
-
-func (c *baseConnection) createDataTransport() *PooledWebTransport {
-	return &PooledWebTransport{
-		conn: c,
-	}
 }
 
 // recordingReader records the bytes read through it.

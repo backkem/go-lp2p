@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	ua "github.com/backkem/go-lp2p/lp2p-api/useragent"
+	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
 // LP2PConnection is an authenticated connection to a peer, the user granted
@@ -88,14 +89,22 @@ func (c *LP2PConnection) acceptDataChannels() {
 func (c *LP2PConnection) acceptTransports() {
 	defer c.wg.Done()
 	for {
-		t, err := c.conn.AcceptTransport(c.ctx)
+		inc, err := c.conn.AcceptWebTransport(c.ctx)
 		if err != nil {
 			c.peerGone()
 			return
 		}
 		l := c.transportListener()
-		if l == nil || !l.deliver(c.ctx, t) {
-			_ = t.CloseWithError(0, "no LP2PQuicTransportListener")
+		if l == nil {
+			_ = inc.Refuse()
+			continue
+		}
+		t, err := inc.Accept()
+		if err != nil {
+			continue
+		}
+		if !l.deliver(c.ctx, t) {
+			_ = t.Close(ospc.WebTransportCloseInfo{})
 		}
 	}
 }

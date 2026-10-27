@@ -474,16 +474,18 @@ func (c *baseConnection) handOff(authenticated bool) (*Connection, error) {
 	}
 
 	c.app.Store(&connectedState{
-		appConn:               appConn,
-		acceptDataChannel:     make(chan *DataChannel),
-		acceptTransport:       make(chan *PooledWebTransport),
-		acceptTransportStream: make(chan ApplicationStream),
-		acceptStream:          make(chan ApplicationStream),
+		appConn:           appConn,
+		acceptDataChannel: make(chan *DataChannel),
+		acceptStream:      make(chan ApplicationStream),
+		wt:                newWebTransportState(c),
 	})
 	if !c.runApplication() {
 		// Closed concurrently, make sure the application connection is too.
 		_ = appConn.Close()
 		return nil, c.err()
+	}
+	if dc, ok := appConn.(datagramConnection); ok && dc.SupportsDatagrams() {
+		c.goroutine(func() { c.app.Load().wt.runDatagrams(dc) })
 	}
 
 	return &Connection{

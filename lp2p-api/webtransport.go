@@ -3,6 +3,7 @@ package lp2p
 import (
 	"fmt"
 
+	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 	"github.com/backkem/go-lp2p/webtransport-api"
 )
 
@@ -57,11 +58,11 @@ func openTransport(c *LP2PConnection, init LP2PQuicTransportInit, owned bool) (*
 	if c.isClosed() {
 		return nil, errClosed("LP2PConnection")
 	}
-	s, err := c.conn.NewTransport(c.ctx)
+	s, err := c.conn.OpenWebTransport(c.ctx)
 	if err != nil {
 		return nil, toDOMException(err)
 	}
-	t, err := newLP2PQuicTransport(webtransport.NewSessionAdaptor(s), init)
+	t, err := newLP2PQuicTransport(webtransport.NewSessionAdaptor(sessionAdaptor{s}), init)
 	if err != nil {
 		return nil, err
 	}
@@ -92,4 +93,11 @@ func (t *LP2PQuicTransport) Close(info webtransport.WebTransportCloseInfo) error
 		}
 	}
 	return err
+}
+
+// sessionAdaptor adapts an ospc session to webtransport.ConcreteSession.
+type sessionAdaptor struct{ *ospc.WebTransportSession }
+
+func (a sessionAdaptor) CloseWithError(code uint64, reason string) error {
+	return a.Close(ospc.WebTransportCloseInfo{CloseCode: uint32(code), Reason: reason})
 }

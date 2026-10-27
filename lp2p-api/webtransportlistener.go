@@ -70,8 +70,8 @@ func (l *LP2PQuicTransportListener) Close() error {
 
 // deliver hands an incoming transport to the reader. It reports false if the
 // listener is closed or ctx is done before anyone read it.
-func (l *LP2PQuicTransportListener) deliver(ctx context.Context, pt *ospc.PooledWebTransport) bool {
-	t, err := newLP2PQuicTransport(webtransport.NewSessionAdaptor(pt), LP2PQuicTransportInit{AllowPooling: true})
+func (l *LP2PQuicTransportListener) deliver(ctx context.Context, pt *ospc.WebTransportSession) bool {
+	t, err := newLP2PQuicTransport(webtransport.NewSessionAdaptor(sessionAdaptor{pt}), LP2PQuicTransportInit{AllowPooling: true})
 	if err != nil {
 		return false
 	}

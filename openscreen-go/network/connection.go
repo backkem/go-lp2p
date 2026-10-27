@@ -239,6 +239,7 @@ func (c *baseConnection) shutdown(cause error) {
 		}
 		c.cancel(cause)
 		if app := c.app.Load(); app != nil {
+			app.wt.abortAll(cause)
 			if err := app.appConn.Close(); err != nil {
 				c.log.Debug("close application connection", "err", err)
 			}

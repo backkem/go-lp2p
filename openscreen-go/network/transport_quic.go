@@ -54,6 +54,9 @@ func (t *QuicTransport) quicConfig() *quic.Config {
 		// QUIC PING frames should not be used to keep the connection alive,
 		// agent-status-request messages are used instead.
 		KeepAlivePeriod: 0,
+		// The LP2P WebTransport extension carries datagrams in QUIC DATAGRAM
+		// frames (RFC 9221).
+		EnableDatagrams: true,
 	}
 }
 
@@ -598,6 +601,25 @@ func (q *quicApplicationConnection) Close() error {
 	return q.owner.closeConn(QuicErrorCodeNoLongerNeeded, "Closed")
 }
 
+// SupportsDatagrams reports whether QUIC datagrams were negotiated.
+func (q *quicApplicationConnection) SupportsDatagrams() bool {
+	return q.owner.conn.ConnectionState().SupportsDatagrams
+}
+
+// SendDatagram sends a QUIC DATAGRAM frame.
+func (q *quicApplicationConnection) SendDatagram(p []byte) error {
+	err := q.owner.conn.SendMessage(p)
+	if err == nil {
+		q.owner.keepAlive.reset()
+	}
+	return err
+}
+
+// ReceiveDatagram returns the next received QUIC DATAGRAM frame.
+func (q *quicApplicationConnection) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	return q.owner.conn.ReceiveMessage(ctx)
+}
+
 var _ ApplicationStream = &quicApplicationStream{}
 
 // ErrStreamDirection is returned when reading from a stream that can only be
@@ -653,10 +675,26 @@ func (s *quicApplicationStream) streamID() quic.StreamID {
 
 // cancel aborts both directions of the stream.
 func (s *quicApplicationStream) cancel() {
+	s.cancelRead(0)
+	s.cancelWrite(0)
+}
+
+// cancelRead stops receiving with the given application error code.
+func (s *quicApplicationStream) cancelRead(code uint64) {
 	if s.recv != nil {
-		s.recv.CancelRead(0)
+		s.recv.CancelRead(quic.StreamErrorCode(code))
 	}
+}
+
+// cancelWrite aborts sending with the given application error code.
+func (s *quicApplicationStream) cancelWrite(code uint64) {
 	if s.send != nil {
-		s.send.CancelWrite(0)
+		s.send.CancelWrite(quic.StreamErrorCode(code))
 	}
+}
+
+// receiveOnly reports whether the stream is the receiving half of a
+// unidirectional stream.
+func (s *quicApplicationStream) receiveOnly() bool {
+	return s.send == nil
 }
