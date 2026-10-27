@@ -160,6 +160,8 @@ export declare class LP2PQuicTransport {
      * LP2PQuicTransportListener on the connection.
      */
     constructor(connection: LP2PConnection, options?: LP2PQuicTransportInit);
+    /** [[Connection]]: the LP2PConnection this transport's session is on. */
+    get connection(): LP2PConnection;
     get ready(): Promise<undefined>;
     get closed(): Promise<WebTransportCloseInfo>;
     /** Resolves when the peer drains the session (data-transport-drain), or when it ends. */

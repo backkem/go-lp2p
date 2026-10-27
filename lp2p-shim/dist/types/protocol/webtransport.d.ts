@@ -64,6 +64,8 @@ export interface WTHost {
     sendDatagram(d: Uint8Array): void;
     requestId(): number;
     forgetTransport(exchangeId: number): void;
+    /** Promises of sessions that sent data-transport-close and wait for the peer's end of the control stream. */
+    readonly closing: Set<Promise<void>>;
     exportKeyingMaterial(label: string, context: Uint8Array, length: number): Promise<Uint8Array>;
 }
 /**
@@ -99,6 +101,7 @@ export declare class WTSession {
     private datagramHandler;
     private readonly prefix;
     private peerClose;
+    private lingering;
     constructor(host: WTHost, exchangeId: number, control: TransportStream, outgoing: boolean, requestId: number);
     get maxDatagramSize(): number;
     get datagramsReliable(): boolean;

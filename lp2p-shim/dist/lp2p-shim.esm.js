@@ -1249,10 +1249,10 @@ function fromCBOR(type, value) {
         pskMinBitsOfEntropy: uint(m, 2, "auth-capabilities")
       };
     case TypeKey.AuthSpake2Handshake: {
-      const token2 = asMap(m[0], "auth-initiation-token")[0];
+      const token = asMap(m[0], "auth-initiation-token")[0];
       return {
         type,
-        ...typeof token2 === "string" ? { initiationToken: token2 } : {},
+        ...typeof token === "string" ? { initiationToken: token } : {},
         pskStatus: uint(m, 1, "auth-spake2-handshake"),
         publicValue: bytes(m, 2, "auth-spake2-handshake")
       };
@@ -1516,6 +1516,7 @@ var StreamFrame = {
 };
 var SESSION_GONE = 2 ** 32;
 var HOLD_MS = 2e3;
+var CLOSE_LINGER_MS = 2e3;
 function frame(tag, body) {
   const out = new Uint8Array(1 + (body?.length ?? 0));
   out[0] = tag;
@@ -1678,6 +1679,7 @@ var WTSession = class {
   datagramHandler = null;
   prefix;
   peerClose = null;
+  lingering = false;
   constructor(host, exchangeId, control, outgoing, requestId) {
     this.host = host;
     this.exchangeId = exchangeId;
@@ -1795,6 +1797,19 @@ var WTSession = class {
     }
     if (this.state === "open") {
       this.control.send(encodeMessage({ type: TypeKey.DataTransportClose, code, reason }));
+      this.lingering = true;
+      const done = new Promise((resolve) => {
+        const t = setTimeout(() => {
+          this.control.close();
+          resolve();
+        }, CLOSE_LINGER_MS);
+        this.control.onclose = () => {
+          clearTimeout(t);
+          resolve();
+        };
+      });
+      this.host.closing.add(done);
+      void done.then(() => this.host.closing.delete(done));
     }
     this.teardown({ code, reason }, "closed locally");
   }
@@ -1854,7 +1869,7 @@ var WTSession = class {
     this.state = "closed";
     if (this.earlyTimer) clearTimeout(this.earlyTimer);
     for (const s of this.early.splice(0)) s.refuse(SESSION_GONE);
-    this.control.close();
+    if (!this.lingering) this.control.close();
     for (const s of [...this.streams]) s.sessionGone(why);
     this.streams.clear();
     for (const s of this.heldStreams.splice(0)) s.refuse(SESSION_GONE);
@@ -1875,6 +1890,7 @@ var CONTROL_TYPES = [
   TypeKey.AuthCapabilities,
   TypeKey.AuthSpake2Handshake
 ];
+var REFUSAL_LINGER_MS = 2e3;
 var ControlChannel = class {
   queue = [];
   waiters = [];
@@ -2182,7 +2198,6 @@ var Session = class {
           return;
         }
         if (m.type !== TypeKey.SessionResponse || m.requestId !== requestId) return;
-        if (m.result === Result.Success) this.markAccepted();
         resolve(m.result);
         stream.onclose = null;
         stream.close();
@@ -2228,13 +2243,28 @@ var Session = class {
     );
     return ep;
   }
+  /**
+   * Closes the connection. WebTransport sessions that sent
+   * data-transport-close get until their peer ended the control stream, or
+   * a timeout, so the close isn't lost.
+   */
   close(reason) {
-    this.connection.close(reason);
+    if (this.closing.size === 0) {
+      this.connection.close(reason);
+      return;
+    }
+    void Promise.all(this.closing).then(() => this.connection.close(reason));
   }
+  /** WebTransport sessions waiting for the peer to end their control stream. Internal. */
+  closing = /* @__PURE__ */ new Set();
   setControl(c) {
     this.control = c;
     for (const w of this.controlWaiters.splice(0)) w(c);
   }
+  /**
+   * The session is accepted: the server sent success, or the client got
+   * success and verified the server. Streams the client held are routed now.
+   */
   markAccepted() {
     if (this.isAccepted) return;
     this.isAccepted = true;
@@ -2294,11 +2324,21 @@ var Session = class {
     const req = {
       requestingOrigin,
       respond: (result) => {
-        if (answered || stream.closed) return;
+        if (answered || stream.closed) return Promise.resolve();
         answered = true;
         stream.send(encodeMessage({ type: TypeKey.SessionResponse, requestId, result }));
-        if (result === Result.Success) this.markAccepted();
-        stream.close();
+        if (result === Result.Success) {
+          this.markAccepted();
+          stream.close();
+          return Promise.resolve();
+        }
+        return new Promise((resolve) => {
+          const t = setTimeout(resolve, REFUSAL_LINGER_MS);
+          stream.onclose = () => {
+            clearTimeout(t);
+            resolve();
+          };
+        });
       }
     };
     if (this.sessionRequestHandler) this.sessionRequestHandler(req);
@@ -2493,8 +2533,7 @@ var UserAgent = class {
     session.onclose = (reason) => ac.abort(new DOMException(`connection closed: ${reason}`, "AbortError"));
     const refuse = (req, why) => {
       this.log(`refused session: ${why}`);
-      req.respond(Result.PermanentError);
-      session.close(`refused: ${why}`);
+      void req.respond(Result.PermanentError).then(() => session.close(`refused: ${why}`));
     };
     try {
       const identity = await this.local.identity();
@@ -2502,18 +2541,19 @@ var UserAgent = class {
         session.onsessionrequest = resolve;
         ac.signal.addEventListener("abort", () => reject(ac.signal.reason), { once: true });
       });
+      let info;
       const { control, tls, req } = await this.withTimeout(
         (async () => {
           const control2 = await session.controlChannel(ac.signal);
           const tls2 = await handshake(control2, identity, "server", ac.signal);
           session.tls = tls2;
+          info = session.exchangeInfo(this.agentInfo(), ac.signal);
+          info.catch(() => {
+          });
           return { control: control2, tls: tls2, req: await request };
         })(),
         ac
       );
-      const info = session.exchangeInfo(this.agentInfo(), ac.signal);
-      info.catch(() => {
-      });
       const hint = parseOrigin(req.requestingOrigin) ?? "null";
       if (!this.receiverFor(hint, own)) {
         refuse(req, `no receiver allows ${hint}`);
@@ -2527,7 +2567,8 @@ var UserAgent = class {
         const live2 = new AbortController();
         session.whenClosed(() => live2.abort(new DOMException("connection closed", "AbortError")));
         const show = this.pairing === "pin" ? this.pinPresenter(own, peer, live2.signal) : null;
-        answerCeremony(control, parties, show, live2.signal).catch(() => {
+        answerCeremony(control, parties, show, live2.signal).catch((err) => {
+          if (err instanceof AuthError) session.close("authentication after success failed");
         });
       } else {
         sendAuthCapabilities(control);
@@ -2610,9 +2651,7 @@ var UserAgent = class {
       const control = await session.controlChannel(ac.signal);
       const tls = await this.withTimeout(handshake(control, identity, "client", ac.signal), ac);
       session.tls = tls;
-      const info = session.exchangeInfo(this.agentInfo(), ac.signal);
-      info.catch(() => {
-      });
+      const remote = await this.withTimeout(session.exchangeInfo(this.agentInfo(), ac.signal), ac);
       const result = session.requestSession(this.origin);
       result.catch(() => {
       });
@@ -2623,7 +2662,6 @@ var UserAgent = class {
       const trusted = this.local.isAuthenticated(tls.peerFingerprint);
       const first = await Promise.race([cue, result]);
       if (first !== "cue" && first !== Result.Success) throw notAllowed("The peer refused the session.");
-      const remote = await this.withTimeout(info, ac);
       const verified = { ...peer, displayName: remote.displayName, verified: false };
       if (first === "cue" || !trusted) {
         await startCeremony(control, parties, () => this.ui.enterPIN({ origin: this.origin, nickname, peer: verified }, ac.signal), ac.signal);
@@ -2631,6 +2669,7 @@ var UserAgent = class {
       }
       verified.verified = true;
       if (await result !== Result.Success) throw notAllowed("The peer refused the session.");
+      session.markAccepted();
       this.local.rememberPeer({ identity: tls.peerFingerprint, anchorKey: tls.peerFingerprint, displayName: remote.displayName });
       this.local.addGrant(this.origin, tls.peerFingerprint);
       session.onclose = null;
@@ -2789,7 +2828,7 @@ var LP2PDataChannel = class extends EventTarget {
       this.#readyState = "open";
       this.dispatchEvent(new Event("open"));
     };
-    ep.onframe = (enc, payload) => this.#receive(enc, payload);
+    if (!a.incoming) ep.onframe = (enc, payload) => this.#receive(enc, payload);
     ep.onerror = (err) => {
       const ev = new Event("error");
       Object.defineProperty(ev, "error", { value: err });
@@ -2799,6 +2838,7 @@ var LP2PDataChannel = class extends EventTarget {
     if (a.incoming) {
       queueMicrotask(() => {
         if (this.#readyState === "open") this.dispatchEvent(new Event("open"));
+        ep.onframe = (enc, payload) => this.#receive(enc, payload);
       });
     }
   }
@@ -2951,12 +2991,12 @@ var LP2PConnection = class extends EventTarget {
     if (!s) throw new TypeError("Illegal constructor");
     this.#slots = { session: s, transports: /* @__PURE__ */ new Set(), listener: null, closed: false };
     slots.set(this, this.#slots);
-    s.ondatachannel = (ep) => {
-      const channel = adoptChannel(ep, true);
-      this.dispatchEvent(new LP2PDataChannelEvent("datachannel", { channel }));
-    };
     s.whenClosed(() => setTimeout(() => this.#finalize(), 0));
     setTimeout(() => {
+      s.ondatachannel = (ep) => {
+        const channel = adoptChannel(ep, true);
+        this.dispatchEvent(new LP2PDataChannelEvent("datachannel", { channel }));
+      };
       s.ontransport = (t) => {
         const listener = this.#slots.listener;
         if (this.#slots.closed || !listener || !listener.incoming(t)) t.refuse();
@@ -3030,10 +3070,10 @@ var LP2PReceiver = class extends EventTarget {
    * promise while pending or after success.
    */
   start() {
-    if (this.#startPromise) return this.#startPromise;
     if (this.#state === "stopped") {
       return Promise.reject(new DOMException("the receiver was stopped", "InvalidStateError"));
     }
+    if (this.#startPromise) return this.#startPromise;
     const ua = getUserAgent();
     if (ua.origin === "null") return Promise.reject(new DOMException("opaque origin", "NotAllowedError"));
     const handle = {
@@ -3487,6 +3527,7 @@ var LP2PQuicTransport = class {
   #state = "connecting";
   #session = null;
   #slots;
+  #connection;
   #reliability = "pending";
   #congestionControl;
   #requireUnreliable;
@@ -3525,6 +3566,7 @@ var LP2PQuicTransport = class {
     const slots2 = slotsOf(connection);
     if (!a && slots2.closed) throw new DOMException("the LP2PConnection is closed", "InvalidStateError");
     this.#slots = slots2;
+    this.#connection = connection;
     const init = options ?? {};
     const cc = init.congestionControl ?? "default";
     if (!CONGESTION_CONTROL.includes(cc)) throw new TypeError(`invalid congestionControl "${String(cc)}"`);
@@ -3650,6 +3692,10 @@ var LP2PQuicTransport = class {
     this.#incomingUniController.close();
     this.#datagrams.finish(null);
     this.#resolveDraining();
+  }
+  /** [[Connection]]: the LP2PConnection this transport's session is on. */
+  get connection() {
+    return this.#connection;
   }
   get ready() {
     return this.#ready;
@@ -3849,11 +3895,6 @@ function transportOptions(o) {
   }
   return t;
 }
-function expose(target, connection) {
-  if (getConfig().quirks?.exposeShorthandConnection) {
-    Object.defineProperty(target, "connection", { value: connection, configurable: true, enumerable: false });
-  }
-}
 var MERGED_HIGH_WATER_MARK = 8;
 function makeDiscoverable(options = {}) {
   const opts = options ?? {};
@@ -3880,7 +3921,7 @@ function makeDiscoverable(options = {}) {
     },
     { highWaterMark: MERGED_HIGH_WATER_MARK }
   );
-  const pump = async (listener, connection) => {
+  const pump = async (listener) => {
     const reader = listener.incomingTransports.getReader();
     for (; ; ) {
       while (!done && (controller.desiredSize ?? 0) <= 0) await pulled();
@@ -3891,7 +3932,6 @@ function makeDiscoverable(options = {}) {
         value.close();
         break;
       }
-      expose(value, connection);
       controller.enqueue(value);
     }
     reader.releaseLock();
@@ -3905,7 +3945,7 @@ function makeDiscoverable(options = {}) {
     const listener = new LP2PQuicTransportListener(connection, listenerInit);
     listeners.add(listener);
     connection.addEventListener("close", () => listeners.delete(listener));
-    void pump(listener, connection);
+    void pump(listener);
   });
   receiver.start().catch((err) => {
     if (done) return;
@@ -3914,244 +3954,18 @@ function makeDiscoverable(options = {}) {
   });
   return merged;
 }
-function connect(options = {}) {
-  return new LP2PShorthandTransport(options ?? {}, token);
+async function connect(options = {}) {
+  const opts = options ?? {};
+  const connection = await new LP2PRequest(opts).start();
+  try {
+    const transport = new LP2PQuicTransport(connection, transportOptions(opts));
+    await transport.ready;
+    return transport;
+  } catch (err) {
+    connection.close();
+    throw err;
+  }
 }
-var token = /* @__PURE__ */ Symbol("LP2PShorthandTransport");
-var PendingDatagrams = class {
-  #owner;
-  #readable;
-  #writable = null;
-  #settings = {};
-  constructor(owner) {
-    this.#owner = owner;
-    let reader = null;
-    this.#readable = new ReadableStream(
-      {
-        pull: async (c) => {
-          const t = await owner.transportWhenReady();
-          reader ??= t.datagrams.readable.getReader();
-          const { value, done } = await reader.read();
-          if (done) c.close();
-          else c.enqueue(value);
-        },
-        cancel: (r) => reader?.cancel(r)
-      },
-      { highWaterMark: 0 }
-    );
-  }
-  /** Internal: the transport exists; apply what the page set before. */
-  apply(t) {
-    Object.assign(t.datagrams, this.#settings);
-  }
-  get readable() {
-    return this.#readable;
-  }
-  get writable() {
-    return this.#writable ??= this.createWritable();
-  }
-  createWritable(options = {}) {
-    let writer = null;
-    const get = async () => {
-      const t = await this.#owner.transportWhenReady();
-      return writer ??= t.datagrams.createWritable(options).getWriter();
-    };
-    return new WritableStream(
-      {
-        write: async (chunk) => (await get()).write(chunk),
-        close: async () => (await get()).close(),
-        abort: async (r) => writer?.abort(r)
-      },
-      { highWaterMark: 1 }
-    );
-  }
-  get maxDatagramSize() {
-    return this.#owner.transport?.datagrams.maxDatagramSize ?? 0;
-  }
-  #get(k) {
-    const t = this.#owner.transport;
-    return t ? t.datagrams[k] : this.#settings[k] ?? (k.endsWith("Age") ? null : 1024);
-  }
-  #set(k, v) {
-    const t = this.#owner.transport;
-    if (t) t.datagrams[k] = v;
-    else this.#settings[k] = v;
-  }
-  get incomingMaxAge() {
-    return this.#get("incomingMaxAge");
-  }
-  set incomingMaxAge(v) {
-    this.#set("incomingMaxAge", v);
-  }
-  get outgoingMaxAge() {
-    return this.#get("outgoingMaxAge");
-  }
-  set outgoingMaxAge(v) {
-    this.#set("outgoingMaxAge", v);
-  }
-  get incomingMaxBufferedDatagrams() {
-    return this.#get("incomingMaxBufferedDatagrams");
-  }
-  set incomingMaxBufferedDatagrams(v) {
-    this.#set("incomingMaxBufferedDatagrams", v);
-  }
-  get outgoingMaxBufferedDatagrams() {
-    return this.#get("outgoingMaxBufferedDatagrams");
-  }
-  set outgoingMaxBufferedDatagrams(v) {
-    this.#set("outgoingMaxBufferedDatagrams", v);
-  }
-};
-function forwardStream(get) {
-  let reader = null;
-  return new ReadableStream(
-    {
-      pull: async (c) => {
-        reader ??= (await get()).getReader();
-        const { value, done } = await reader.read();
-        if (done) c.close();
-        else c.enqueue(value);
-      },
-      cancel: (r) => reader?.cancel(r)
-    },
-    { highWaterMark: 0 }
-  );
-}
-var LP2PShorthandTransport = class {
-  #transport = null;
-  #aborted = null;
-  #options;
-  #ready;
-  #closed;
-  #draining;
-  #transportReady;
-  #fail;
-  #datagrams;
-  #incomingBidi;
-  #incomingUni;
-  constructor(options, key) {
-    if (key !== token) throw new TypeError("Illegal constructor: use lp2p.connect()");
-    this.#options = transportOptions(options);
-    let attach;
-    const transport = new Promise((resolve, reject) => {
-      attach = resolve;
-      this.#fail = reject;
-    });
-    transport.catch(() => {
-    });
-    this.#ready = transport.then((t) => t.ready);
-    this.#ready.catch(() => {
-    });
-    this.#closed = transport.then((t) => t.closed);
-    this.#closed.catch(() => {
-    });
-    this.#draining = transport.then(
-      (t) => t.draining,
-      () => void 0
-    );
-    this.#transportReady = this.#ready.then(() => this.#transport);
-    this.#transportReady.catch(() => {
-    });
-    this.#datagrams = new PendingDatagrams(this);
-    this.#incomingBidi = forwardStream(async () => (await this.transportWhenReady()).incomingBidirectionalStreams);
-    this.#incomingUni = forwardStream(async () => (await this.transportWhenReady()).incomingUnidirectionalStreams);
-    new LP2PRequest(options).start().then(
-      (connection) => {
-        if (this.#aborted !== null) {
-          connection.close();
-          return;
-        }
-        let t;
-        try {
-          t = new LP2PQuicTransport(connection, this.#options);
-        } catch (err) {
-          connection.close();
-          this.#fail(err);
-          return;
-        }
-        this.#transport = t;
-        expose(this, connection);
-        this.#datagrams.apply(t);
-        t.closed.then(
-          () => connection.close(),
-          () => connection.close()
-        );
-        attach(t);
-      },
-      (err) => this.#fail(err)
-    );
-  }
-  /** Internal: the LP2PQuicTransport, or null before the peer is picked. */
-  get transport() {
-    return this.#transport;
-  }
-  /** Internal: resolves with the transport once ready. */
-  transportWhenReady() {
-    return this.#transportReady;
-  }
-  get ready() {
-    return this.#ready;
-  }
-  get closed() {
-    return this.#closed;
-  }
-  get draining() {
-    return this.#draining;
-  }
-  get reliability() {
-    return this.#transport?.reliability ?? "pending";
-  }
-  get congestionControl() {
-    return this.#transport?.congestionControl ?? this.#options.congestionControl ?? "default";
-  }
-  get protocol() {
-    return "";
-  }
-  get responseHeaders() {
-    return null;
-  }
-  get datagrams() {
-    return this.#datagrams;
-  }
-  get incomingBidirectionalStreams() {
-    return this.#incomingBidi;
-  }
-  get incomingUnidirectionalStreams() {
-    return this.#incomingUni;
-  }
-  async createBidirectionalStream(options) {
-    return (await this.transportWhenReady()).createBidirectionalStream(options);
-  }
-  async createUnidirectionalStream(options) {
-    return (await this.transportWhenReady()).createUnidirectionalStream(options);
-  }
-  /** Only once a peer is picked: a send group belongs to one LP2PQuicTransport. */
-  createSendGroup() {
-    if (!this.#transport) throw new DOMException("no peer picked yet", "InvalidStateError");
-    return this.#transport.createSendGroup();
-  }
-  async getStats() {
-    return (await this.transportWhenReady()).getStats();
-  }
-  async exportKeyingMaterial(label, context, outputLength) {
-    return (await this.transportWhenReady()).exportKeyingMaterial(label, context, outputLength);
-  }
-  /**
-   * Closes the transport and its connection. Before a peer is picked, the
-   * picker stays up (LP2PRequest.start() can't be aborted), and the
-   * connection is closed as soon as it exists.
-   */
-  close(closeInfo = {}) {
-    if (this.#transport) {
-      this.#transport.close(closeInfo);
-      return;
-    }
-    if (this.#aborted !== null) return;
-    this.#aborted = new WebTransportError("closed before the session was established", { source: "session" });
-    this.#fail(this.#aborted);
-    return;
-  }
-};
 var lp2p = Object.freeze({ makeDiscoverable, connect });
 
 // src/install.ts
@@ -4442,7 +4256,6 @@ export {
   LP2PRequest,
   LP2PSendGroup,
   LP2PSendStream,
-  LP2PShorthandTransport,
   LocalState,
   ManualSignaler,
   PortSignaler,

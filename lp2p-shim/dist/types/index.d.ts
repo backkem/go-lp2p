@@ -4,7 +4,7 @@ export { LP2PConnection } from "./api/connection.js";
 export { LP2PDataChannel, type LP2PDataChannelInit, type LP2PDataChannelState } from "./api/datachannel.js";
 export { LP2PQuicTransport, LP2PQuicTransportListener, LP2PBidirectionalStream, LP2PReceiveStream, LP2PSendStream, LP2PSendGroup, LP2PDatagramDuplexStream, LP2PDatagramsWritable, WebTransportError, type LP2PQuicTransportInit, type LP2PQuicTransportListenerInit, type WebTransportCloseInfo, type WebTransportConnectionStats, type WebTransportErrorInit, type WebTransportSendOptions, type WebTransportSendStreamOptions, type WebTransportSendStreamStats, type WebTransportReceiveStreamStats, } from "./api/quictransport.js";
 export { LP2PConnectionEvent, LP2PDataChannelEvent, type LP2PConnectionEventInit, type LP2PDataChannelEventInit, } from "./api/events.js";
-export { lp2p, makeDiscoverable, connect, LP2PShorthandTransport, type MakeDiscoverableOptions, type ConnectOptions, } from "./api/shorthand.js";
+export { lp2p, makeDiscoverable, connect, type MakeDiscoverableOptions, type ConnectOptions, } from "./api/shorthand.js";
 export { configure, getConfig, getUserAgent, type ShimConfig, type ShimQuirks } from "./config.js";
 export { LocalState, localStateFor, parseOrigin, type KnownPeer, type TrustAnchor, type ReceiverRegistration } from "./ua/localstate.js";
 export { createIdentity, fingerprintOf, type Identity, type HandshakeResult } from "./protocol/identity.js";

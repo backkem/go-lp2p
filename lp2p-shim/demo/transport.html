@@ -149,10 +149,9 @@ $("listen").onclick = async () => {
 let transport = null;
 $("connect").onclick = async () => {
   status("Picking a device…");
-  // The shorthand: a transport right away; ready once a peer is picked and the session is up.
-  transport = lp2p.connect({ nickname: name });
+  // The shorthand: resolves with a ready transport once a peer is picked and the session is up.
   try {
-    await transport.ready;
+    transport = await lp2p.connect({ nickname: name });
   } catch (err) {
     status(`Not connected: ${err.name}: ${err.message}`);
     return;
@@ -228,7 +227,11 @@ $("bulk").onclick = async () => {
   result("bulk", theirs === hash ? "ok" : "mismatch");
 };
 
-$("close").onclick = () => transport.close({ closeCode: 1, reason: "user closed" });
+$("close").onclick = () => {
+  transport.close({ closeCode: 1, reason: "user closed" });
+  // The connection is the page's: close it too (transport.connection).
+  transport.connection.close();
+};
 
 if (params.get("role") === "receiver") $("listen").click();
 if (params.get("role") === "requester") $("connect").click();

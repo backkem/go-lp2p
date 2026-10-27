@@ -36,7 +36,6 @@ export {
   lp2p,
   makeDiscoverable,
   connect,
-  LP2PShorthandTransport,
   type MakeDiscoverableOptions,
   type ConnectOptions,
 } from "./api/shorthand.ts";

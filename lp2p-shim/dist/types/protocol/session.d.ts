@@ -6,6 +6,8 @@ export type Role = "client" | "server";
 export declare class ProtocolError extends Error {
     name: string;
 }
+/** How long a refusing server, or an agent that sent data-transport-close, waits for the peer to end its side. */
+export declare const REFUSAL_LINGER_MS = 2000;
 /** The control stream, with a queue of messages no caller has taken yet. */
 export declare class ControlChannel {
     private readonly queue;
@@ -35,8 +37,12 @@ export declare class ControlChannel {
 export interface SessionRequest {
     /** The requesting origin hint, as sent. */
     requestingOrigin: string;
-    /** Sends lp2p-session-response and ends the stream. */
-    respond(result: number): void;
+    /**
+     * Sends lp2p-session-response. On success both sides end the stream; on a
+     * refusal the promise resolves once the client ended its side, or after a
+     * timeout, and the caller then closes the connection.
+     */
+    respond(result: number): Promise<void>;
 }
 export type ChannelState = "connecting" | "open" | "closed";
 export interface ChannelParams {
@@ -135,9 +141,20 @@ export declare class Session implements WTHost {
     releaseChannelId(id: number): void;
     /** Opens a data channel; params.id must come from reserveChannelId. */
     openDataChannel(params: ChannelParams): DataChannelEndpoint;
+    /**
+     * Closes the connection. WebTransport sessions that sent
+     * data-transport-close get until their peer ended the control stream, or
+     * a timeout, so the close isn't lost.
+     */
     close(reason?: string): void;
+    /** WebTransport sessions waiting for the peer to end their control stream. Internal. */
+    readonly closing: Set<Promise<void>>;
     private setControl;
-    private markAccepted;
+    /**
+     * The session is accepted: the server sent success, or the client got
+     * success and verified the server. Streams the client held are routed now.
+     */
+    markAccepted(): void;
     /** Looks at a new stream's first message to tell what it is. */
     private classify;
     private route;

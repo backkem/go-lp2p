@@ -7,13 +7,6 @@ import type { LocalState } from "./ua/localstate.js";
  * go-lp2p's ospc.InteropQuirks. Turn them on to experiment, never to ship.
  */
 export interface ShimQuirks {
-    /**
-     * Gives the transports of lp2p.makeDiscoverable() and lp2p.connect() a
-     * non-standard `connection` property: the LP2PConnection the shorthand
-     * made for them. The explainer's shorthand hides it, so a page can't
-     * open data channels on it, close it, or listen on it itself.
-     */
-    exposeShorthandConnection?: boolean;
 }
 export interface ShimConfig {
     transport?: Transport;

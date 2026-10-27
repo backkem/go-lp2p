@@ -176,19 +176,22 @@ accepts is the **server**.
    requesting origin). The server refuses with `lp2p-session-response` (1111) `permanent-error` and
    closes if no advertising receiver on the device allows that origin, before any ceremony or prompt.
    A second 1110 on a connection closes it.
-3. **Trust ceremony, client-initiated.** If the client's key doesn't chain to a trust anchor, the server
+3. **Trust ceremony, client-initiated.** The session request waits for the server's agent-info. If the client's key doesn't chain to a trust anchor, the server
    sends `auth-capabilities` (1001) as the cue. The client starts: `auth-spake2-handshake` (1005,
    `psk-needs-presentation`, a nonce). The server shows a 9-digit PIN and answers with its handshake
    (`psk-input`, its nonce); the client's user enters the PIN, the client sends
    `auth-spake2-confirmation` (1003) = `SHA-512(tag ‖ PIN ‖ nonceS ‖ nonceQ ‖ fpClient ‖ fpServer)`, and
-   the server answers `auth-status` (1004). Success adds a one-peer trust anchor on each side. This is
+   the server answers `auth-status` (1004). Success adds a one-peer trust anchor on each side; a
+   ceremony that fails after `success` closes the connection. This is
    **not SPAKE2** and is brute-forceable offline. With `pairing: "none"` the server answers the client's
    handshake with `auth-status authenticated`. If the server already trusts the client, it sends no
    `auth-capabilities`; a client that doesn't trust the server starts the ceremony anyway once it sees
    `success`.
 4. **Acceptance.** The server asks its user to grant the client to the receiver's origin (skipped if
    granted before), then answers 1111 `success` and the receiver fires `connection`. The client
-   accepts once it has `success` and has verified the server's key. Both add the peer to their known
+   accepts once it has `success` and has verified the server's key. After a refusal the client ends its
+   side of the stream and the server closes the connection once it has, or after 2 s, so the response
+   isn't lost. Both add the peer to their known
    peers and grants. No data channel or WebTransport stream may come before `success`: the server closes
    such streams, the client holds them until its 1111 arrives.
 5. **Data channels** each get their own stream, starting with `data-channel-open-request` (1101); the
@@ -206,7 +209,8 @@ accepts is the **server**.
    the binding's: **session-gone** (2^32) resets and stops a closed session's streams, and refuses a
    stream for an unknown session; script sees it without a stream error code. `data-transport-close`
    (1205: code, reason) and then the end of the control stream close a session; ending it without 1205
-   is code 0 with an empty reason; losing the connection is abrupt. `data-transport-drain` (1206)
+   is code 0 with an empty reason; losing the connection is abrupt. An agent that sent 1205 keeps the
+   connection until the peer ended the control stream, or 2 s. `data-transport-drain` (1206)
    resolves the peer's `draining`. A datagram is `varint(exchange-id) ‖ payload`. The binding's optional
    dedicated `q2q` connections are not implemented.
 
@@ -286,21 +290,17 @@ should offer). Each object binds to the configuration current when its `start()`
 
 #### Quirks
 
-Behavior that departs from the spec sits behind `configure({ quirks })`, each flag off by default, like
-go-lp2p's `ospc.InteropQuirks`:
-
-| Flag | Default | What it does | Spec rule it breaks |
-|---|---|---|---|
-| `exposeShorthandConnection` | `false` | Gives the transports of `lp2p.makeDiscoverable()` and `lp2p.connect()` a `connection` property: the `LP2PConnection` the shorthand made. | The explainer's shorthand has no way to reach the connection. Used to show what mixing with the full API runs into (below). |
-
-Some departures are not flags because a page can't avoid them: the TLS stand-in and toy PIN pairing,
-reliable-only datagrams on postMessage, and pooled-only WebTransport.
+Behavior that departs from the spec goes behind `configure({ quirks })`, each flag off by default, like
+go-lp2p's `ospc.InteropQuirks`. There are none at the moment: `exposeShorthandConnection` went away once
+the spec gave `LP2PQuicTransport` a `connection` attribute. Some departures are not flags because a
+page can't avoid them: the TLS stand-in and toy PIN pairing, reliable-only datagrams on postMessage,
+and pooled-only WebTransport.
 
 ## Behavior where the spec is silent
 
 | Topic | Shim behavior |
 |---|---|
-| Errors | `start()` of `LP2PRequest` rejects with `NotAllowedError` on every failure, as the spec requires: picker dismissed, peer unreachable, pairing failed or session refused. The message differs, for debugging. `LP2PReceiver.start()` rejects with `NotAllowedError` when advertising is denied and `InvalidStateError` after `stop()` (unless an earlier `start()` succeeded, see spec issue P1). |
+| Errors | `start()` of `LP2PRequest` rejects with `NotAllowedError` on every failure, as the spec requires: picker dismissed, peer unreachable, pairing failed or session refused. The message differs, for debugging. `LP2PReceiver.start()` rejects with `NotAllowedError` when advertising is denied and `InvalidStateError` after `stop()` (checked first, as P1 asked). |
 | `start()` twice | Returns the same promise while pending or after success. After a failure it starts over. |
 | `LP2PDataChannel.readyState` | Added (`connecting`/`open`/`closing`/`closed`, as on RTCDataChannel). Without it a page cannot know when `send()` is allowed. |
 | `binaryType` | Defaults to `"arraybuffer"`, as on RTCDataChannel. The receiver's `binaryType` decides whether binary data arrives as an ArrayBuffer or a Blob. The sender's encoding-id (blob or array-buffer) is informational. |
@@ -311,8 +311,8 @@ reliable-only datagrams on postMessage, and pooled-only WebTransport.
 | `LP2PConnection.close()` / `onclose` | As specified: closes every channel and transport on both sides; `close` fires once, after the transports failed and the listener closed. |
 | `LP2PReceiver.stop()` | As specified: stops advertising; delivered connections, their transports and listeners stay. |
 | Peer identity | The page is told nothing about the peer (spec issue #15). The browser UI shows the page's nickname from discovery, marked "(unverified)", and the device name once the session is authenticated. |
-| `new LP2PQuicTransport(connection)` | As specified: each construction opens its own session, so both sides constructing at once gives two sessions. Fails with a session `WebTransportError` if the peer lacks `quic-transport` or refuses. |
-| `LP2PQuicTransportListener(connection)` | As specified: one per connection (`InvalidStateError` otherwise), `close()` ends `incomingTransports` but keeps what is queued. Incoming sessions are refused with no listener, when its queue (8) is full, or with `requireUnreliable` on a reliable-only connection, and held until the connection is exposed (the task after `start()` resolves or `connection` fires). |
+| `new LP2PQuicTransport(connection)` | As specified: each construction opens its own session, so both sides constructing at once gives two sessions; `transport.connection` is the connection. Fails with a session `WebTransportError` if the peer lacks `quic-transport` or refuses. |
+| `LP2PQuicTransportListener(connection)` | As specified: one per connection (`InvalidStateError` otherwise), `close()` ends `incomingTransports` but keeps what is queued. Incoming sessions are refused with no listener, when its queue (8) is full, or with `requireUnreliable` on a reliable-only connection, and held until the connection is exposed (the task after `start()` resolves or `connection` fires). Incoming data channels are held the same way, and their messages until the `datachannel` event has run. |
 | Lifecycle | `transport.close()` leaves the connection open; the peer's `closed` gets code and reason. Closing the `LP2PConnection` fails its transports with a session `WebTransportError`. `close()` before `ready` rejects `ready` and `closed`. |
 | WebTransport members | Stream `abort()`/`cancel()` with a `WebTransportError` carry its `streamErrorCode`. `reliability` depends on the transport (above). `congestionControl`, `sendOrder`, `sendGroup`, `anticipatedConcurrentIncoming*` and the datagram max ages are stored but have no effect. `getStats()` counts the session's payload bytes only. `exportKeyingMaterial(label, context, length = 32)` derives per session from the handshake stand-in with the binding's label and WebTransport Exporter Context: both sides agree, other sessions differ, but it is not a TLS exporter. `draining` resolves on the peer's 1206 (no page can send one) or at close. Oversized datagrams are dropped silently. |
 | `instanceof WebTransport` | False. The browser's `WebTransport` can't be subclassed without a URL connection. `WebTransportError` is the shim's own (Chromium's constructor still takes a dictionary), chained to the browser's, so `instanceof WebTransportError` holds. |
@@ -328,38 +328,30 @@ global `lp2p`) follow the explainer, built only from what a page can use:
 // Peer A: an LP2PReceiver plus an LP2PQuicTransportListener on each connection, merged.
 for await (const transport of lp2p.makeDiscoverable({ nickname: "Peer A" })) { /* ready */ }
 
-// Peer B: an LP2PRequest plus new LP2PQuicTransport(connection), returned at once.
-const transport = lp2p.connect({ nickname: "Peer B" });
-await transport.ready;
+// Peer B: an LP2PRequest plus new LP2PQuicTransport(connection).
+const transport = await lp2p.connect({ nickname: "Peer B" });
 ```
 
 `makeDiscoverable()` takes the `LP2PReceiverOptions` and `LP2PQuicTransportListenerInit` members and
-returns a `ReadableStream` of ready `LP2PQuicTransport`s. It moves transports from each listener as fast
-as the page reads, so an unread stream fills the listeners' queues and further sessions are refused.
-Cancelling it stops the receiver and closes the listeners. `connect()` takes the `LP2PRequestOptions`
-and `LP2PQuicTransportInit` members and returns an `LP2PShorthandTransport`.
+returns a `ReadableStream` of ready `LP2PQuicTransport`s. It owns the listener of each connection it
+creates and moves transports from it as fast as the page reads, so an unread stream fills the queues
+and further sessions are refused. Cancelling it stops the receiver and closes the listeners.
+`connect()` takes the `LP2PRequestOptions` and `LP2PQuicTransportInit` members and resolves with a
+ready `LP2PQuicTransport`; it creates no listener. On both sides `transport.connection` is the
+connection, which stays the page's to use and close.
 
 How they coexist with the full API (`test/shorthand.test.ts`):
 
-- **Both directions work.** A `makeDiscoverable()` page takes transports from a page that uses
-  `LP2PRequest` and `new LP2PQuicTransport(conn)`, and an `LP2PReceiver` with a listener takes them from
-  `lp2p.connect()`.
-- **`connect()` can't return an `LP2PQuicTransport`.** Its constructor needs a connection, which exists
-  only once the user picked a peer. So it returns a forwarding object with the WebTransport members:
-  `instanceof LP2PQuicTransport` is false, `createSendGroup()` throws until a peer is picked, and
-  `close()` before then can't take the picker down (`LP2PRequest.start()` takes no signal), so the
-  connection is closed as soon as it exists.
-- **The shorthand's connections are invisible.** A page can't open data channels on them, can't close
-  them (the discoverable side keeps them until the peer closes; `connect()` closes its own with the
-  transport), and can't receive transports the peer opens towards a `connect()` page: it has no
-  listener, so they're refused.
-- **One listener per connection.** With `quirks.exposeShorthandConnection` a page can reach the
-  connection, and `new LP2PQuicTransportListener(connection)` on a `makeDiscoverable()` connection
-  throws `InvalidStateError`: the shorthand holds the listener. Without the quirk the clash can't happen.
-- **A page with `makeDiscoverable()` and its own `LP2PReceiver`** advertises twice, so peers' pickers
-  list two entries for one page. The spec delivers an incoming session to any advertising receiver that
-  allows its origin ("the user agent chooses one"), so a peer that picked the page's own receiver can
-  end up in the shorthand's stream, when only the shorthand's `allowedOrigins` matches.
+- **Both directions work**: `makeDiscoverable()` against `LP2PRequest` + `new LP2PQuicTransport(conn)`,
+  and an `LP2PReceiver` with a listener against `lp2p.connect()`.
+- **After `connect()`** the page can construct its own `LP2PQuicTransportListener` on
+  `transport.connection` and receive the transports the peer opens; until then they are refused.
+- **On a `makeDiscoverable()` connection**, `new LP2PQuicTransportListener(transport.connection)`
+  throws `InvalidStateError` (the shorthand holds the listener); further transports from that peer
+  arrive in the shorthand's stream. Data channels and `close()` work through `transport.connection`.
+- **A page with `makeDiscoverable()` and its own `LP2PReceiver`** advertises twice. A session goes to
+  the receiver whose advertisement the client picked when it allows the origin, else to another one
+  that does.
 
 ## LP2P spec issues found while building this
 
@@ -429,39 +421,31 @@ issue asked for; "PR 17" marks the ones that change resolved.
   same wire pattern (a header on a stream, then frames). A data channel is a WebTransport stream with a
   label, a protocol and message framing, which argues for converging the two.
 
-### New in PR 17
+### Raised on PR 17
 
-- **P1. `start()` after `stop()` returns the old promise.** `start()` checks "If
-  [[StartPromise]] is not null, return it" before "If [[State]] is "stopped", return a promise rejected
-  with an InvalidStateError", and `stop()` doesn't clear [[StartPromise]]. So after a successful
-  `start()` and `stop()`, `start()` resolves although nothing advertises; the `InvalidStateError` branch
-  is reachable only if `start()` was never called. Proposal: check the state first, or have `stop()`
-  set [[StartPromise]] to null.
-- **P2. `connect()` can't return an `LP2PQuicTransport`.** "`connect()` would return a transport right
-  away, like the `WebTransport` constructor", but `new LP2PQuicTransport(connection)` needs a connection,
-  which exists only after the picker. A page-level composition must return a look-alike (above), and its
-  `close()` can't take the picker down because `LP2PRequest.start()` takes no `AbortSignal`. Proposal:
-  either `connect()` returns `Promise<LP2PQuicTransport>` (the explainer's earlier form), or the spec
-  defines the shorthand natively and `LP2PRequest.start({signal})` gains an abort signal for both.
-- **P3. The shorthand hides the connection.** Pages using it can't open data channels, can't close the
-  connection on the discoverable side, and a `connect()` page refuses every transport the peer opens
-  (it has no listener). Proposal: give shorthand transports a readonly `connection` attribute and say
-  that `makeDiscoverable()` owns that connection's listener (so `new LP2PQuicTransportListener()` on it
-  throws `InvalidStateError`, which the shim shows behind `quirks.exposeShorthandConnection`), and have
-  `connect()` either listen too or say that it doesn't.
-- **P4. Which receiver gets a session.** "If there are several, the user agent chooses one, for example
-  by asking the user." With `makeDiscoverable()` and an `LP2PReceiver` on one page, or two receivers with
-  different nicknames, a peer that picked one nickname can land in the other receiver. Proposal: deliver
-  to the receiver whose advertisement the client picked when it allows the origin, and only fall back
-  (or refuse) otherwise; or say that a page has one advertisement and receivers are filters on it.
-- **P5. Streams that overtake `success`.** "Neither agent sends messages of the other extensions … before
-  the success lp2p-session-response was sent or received." The server may open a data channel or
-  WebTransport session right after sending `success`, on another stream that can reach the client first.
-  The shim's client holds such streams until its 1111 arrives. Proposal: say so, as the WebTransport
-  section already does for streams of a session that is not open yet.
-- **P6. Ceremony after `success`.** "The client starts authentication when it receives … a success
-  lp2p-session-response while it has not verified the server's agent certificate." Then the server's user
-  is shown a PIN for a session it already accepted. The spec doesn't say what the server does if that
-  ceremony fails (the shim closes the session). Proposal: say the server keeps answering authentication
-  after `success` and closes the connection if it fails, or have a server that trusts the client still
-  send auth-capabilities when the client asks.
+P1, P3, P4 and P5 are **resolved** by the spec's follow-up commit "Address implementation feedback",
+and the shim follows it. P2 is **resolved** by `connect()` returning a promise; its cancellation half
+remains (S2). P6 is **half resolved**: the server now still answers a ceremony after `success` and closes
+if it fails, but sending auth-capabilities with `success` doesn't work (S1).
+
+- **S1. auth-capabilities with `success` forces a ceremony on trusted peers.** The follow-up says "A
+  server that has not sent auth-capabilities yet sends it together with a `success`
+  lp2p-session-response", while "The client starts authentication when it receives auth-capabilities".
+  So a client that already verified the server still starts authentication, which in OSP is a PIN
+  ceremony, on every session. And the client can't tell the cue from the copy sent with `success`:
+  they travel on different streams, in either order. The shim (and go-lp2p) don't implement that
+  sentence; without auth-capabilities the client assumes equal ease of input, so the QUIC server
+  presents the PSK. Proposal: send the cue on the session stream, e.g. a provisional
+  `lp2p-session-response` with a result such as `authentication-required`, and let agents send
+  auth-capabilities at connection start as plain OSP does, so it is always there and never a cue.
+- **S2. `lp2p.connect()` and `LP2PRequest.start()` can't be cancelled.** Neither takes an
+  `AbortSignal`, so a page can't take the picker down or abandon a pending session. Proposal:
+  `start({signal})` and `connect({signal})`.
+- **S3. Connections that only carry data channels are invisible to `makeDiscoverable()`.** A peer using
+  `LP2PRequest` and only `createDataChannel()` gets a connection the discoverable page never sees: it
+  learns of connections only through transports. Proposal: say that the shorthand is for transports
+  only, or have it also surface connections (e.g. an `onconnection`).
+- **S4. Early data channels.** The spec holds incoming WebTransport sessions until the connection is
+  exposed, but says nothing for data channels and their first messages; a page that sets
+  `ondatachannel` in the `connection` handler can miss them. The shim holds them the same way.
+  Proposal: apply the same hold rule to incoming data channels.
