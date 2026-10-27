@@ -87,6 +87,10 @@ func newLP2PQuicTransport(c *LP2PConnection, s *ospc.WebTransportSession, init L
 	return t
 }
 
+// Connection returns the connection the transport is pooled on, as the
+// connection attribute.
+func (t *LP2PQuicTransport) Connection() *LP2PConnection { return t.conn }
+
 // Ready blocks until the transport is ready, as the ready promise. Transports
 // are returned ready, so it returns right away.
 func (t *LP2PQuicTransport) Ready() error { return nil }

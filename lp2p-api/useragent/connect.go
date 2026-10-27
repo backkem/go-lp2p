@@ -144,10 +144,13 @@ func (a *Advertisement) handshake(uc *ospc.UnauthenticatedConnection) {
 	var conn *Connection
 	var err error
 	if a.u.sessions() {
-		conn, err = a.sessionHandshake(ctx, uc, peer, log)
-	} else {
-		conn, err = a.legacyHandshake(ctx, uc, peer, log)
+		// Handed to the receiving advertisement's Accept by acceptSession.
+		if _, err := a.sessionHandshake(ctx, uc, peer, log); err != nil {
+			log.Info("incoming connection not accepted", "err", err)
+		}
+		return
 	}
+	conn, err = a.legacyHandshake(ctx, uc, peer, log)
 	if err != nil {
 		log.Info("incoming connection not accepted", "err", err)
 		return
@@ -162,15 +165,31 @@ func (a *Advertisement) handshake(uc *ospc.UnauthenticatedConnection) {
 
 // sessionHandshake runs index.bs "Incoming sessions": check the requesting
 // origin hint, authenticate unless the peer is trusted, ask the user to
-// grant the peer to the origin unless granted already, accept.
+// grant the peer to the origin unless granted already, accept. The session
+// goes to this advertisement, the one the client picked, if it allows the
+// origin, else to another advertisement of the user agent that does.
 func (a *Advertisement) sessionHandshake(ctx context.Context, uc *ospc.UnauthenticatedConnection, peer Peer, log logger) (*Connection, error) {
 	u := a.u
 	hint, _ := uc.RequestingOrigin()
+	target := a
 	if !a.allows(hint) {
+		target = u.advertisementAllowing(hint)
+	}
+	if target == nil {
 		// Before any trust ceremony or prompt.
 		log.Info("refusing session: requesting origin not allowed", "origin", hint)
 		return nil, errors.Join(ErrRefused, uc.RefuseSession())
 	}
+	if target != a {
+		log.Info("delivering session to another receiver that allows the origin", "origin", hint, "nickname", target.nickname)
+	}
+	return target.acceptSession(ctx, uc, peer, hint)
+}
+
+// acceptSession authenticates, prompts and accepts an incoming session for
+// this advertisement, and hands the connection to Accept.
+func (a *Advertisement) acceptSession(ctx context.Context, uc *ospc.UnauthenticatedConnection, peer Peer, hint string) (*Connection, error) {
+	u := a.u
 
 	if u.trust.trusted(peer.ID) {
 		if err := uc.TrustPeer(); err != nil {
@@ -210,7 +229,14 @@ func (a *Advertisement) sessionHandshake(ctx context.Context, uc *ospc.Unauthent
 	if err != nil {
 		return nil, err
 	}
-	return &Connection{Connection: conn, Peer: peer, RequestingOrigin: hint}, nil
+	c := &Connection{Connection: conn, Peer: peer, RequestingOrigin: hint}
+	select {
+	case a.conns <- c:
+		return nil, nil
+	case <-a.ctx.Done():
+		_ = conn.Close()
+		return nil, ErrClosed
+	}
 }
 
 // legacyHandshake is the flow without the session extension: ask the user,

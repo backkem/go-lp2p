@@ -440,6 +440,9 @@ func TestQuicTransport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if transport.Connection() != reqConn {
+		t.Error("transport.Connection() is not the connection it was opened on")
+	}
 	if transport.Reliability() != ReliabilitySupportsUnreliable {
 		t.Errorf("reliability %s", transport.Reliability())
 	}
@@ -614,6 +617,62 @@ func TestAllowedOrigins(t *testing.T) {
 	recv(t, conns, "connection from the partner origin")
 	if prompts != 1 || pins != 1 {
 		t.Errorf("receiver prompted %d times and showed %d PINs for an allowed origin, want 1 and 1", prompts, pins)
+	}
+}
+
+// TestSessionGoesToAllowingReceiver: the client picked a receiver that
+// doesn't allow its origin; another receiver of the same browser does, so
+// the session is delivered there.
+func TestSessionGoesToAllowingReceiver(t *testing.T) {
+	name := uniqueName(t, "Receiver")
+	rx, tx := pair(t, name)
+	// The PIN is shown by the receiving page, not the picked one, so the
+	// relay can't match on nicknames: the user reads whatever PIN is shown.
+	pins := make(chan string, 1)
+	rx.ui.Present = func(p ua.PINPresentation) { pins <- p.PIN }
+	tx.ui.Enter = func(ctx context.Context, p ua.PINPrompt) (string, error) {
+		select {
+		case pin := <-pins:
+			return pin, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	_, picked := startReceiver(t, rx, name) // same-origin only
+
+	partnerPage := NewWindow(rx.ua, "https://partner.test")
+	r, err := partnerPage.NewLP2PReceiver(LP2PReceiverOptions{
+		Nickname:       uniqueName(t, "Other"),
+		AllowedOrigins: []string{"https://other.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conns := make(chan *LP2PConnection, 1)
+	r.OnConnection(func(e LP2PConnectionEvent) { conns <- e.Connection })
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Stop)
+
+	other := NewWindow(tx.ua, "https://other.test")
+	req, err := other.NewLP2PRequest(LP2PRequestOptions{Nickname: "Requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := req.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	recv(t, conns, "connection on the receiver that allows the origin")
+	select {
+	case <-picked:
+		t.Error("the picked receiver got a connection it doesn't allow")
+	default:
+	}
+	if g := rx.ua.PeerGrants("https://partner.test"); len(g) != 1 {
+		t.Errorf("grants of the receiving origin: %v", g)
 	}
 }
 

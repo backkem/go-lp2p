@@ -230,6 +230,21 @@ func (u *UserAgent) track(a *Advertisement) error {
 	return nil
 }
 
+// advertisementAllowing returns an advertisement of the user agent that
+// allows the requesting origin hint, or nil. Advertisements map onto
+// advertising receivers, so this is the spec's "another LP2PReceiver" that
+// allows the origin; the choice among several is arbitrary.
+func (u *UserAgent) advertisementAllowing(hint string) *Advertisement {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for a := range u.adverts {
+		if a.ctx.Err() == nil && a.allows(hint) {
+			return a
+		}
+	}
+	return nil
+}
+
 func (u *UserAgent) untrack(a *Advertisement) {
 	u.mu.Lock()
 	delete(u.adverts, a)
