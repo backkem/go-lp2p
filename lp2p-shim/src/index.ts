@@ -32,10 +32,21 @@ export {
   type LP2PDataChannelEventInit,
 } from "./api/events.ts";
 
-export { configure, getUserAgent, type ShimConfig } from "./config.ts";
+export {
+  lp2p,
+  makeDiscoverable,
+  connect,
+  LP2PShorthandTransport,
+  type MakeDiscoverableOptions,
+  type ConnectOptions,
+} from "./api/shorthand.ts";
+
+export { configure, getConfig, getUserAgent, type ShimConfig, type ShimQuirks } from "./config.ts";
+export { LocalState, localStateFor, parseOrigin, type KnownPeer, type TrustAnchor, type ReceiverRegistration } from "./ua/localstate.ts";
+export { createIdentity, fingerprintOf, type Identity, type HandshakeResult } from "./protocol/identity.ts";
 export { install, interfaces, type InstallOptions } from "./install.ts";
 
-export { UserAgent, type UserAgentConfig, type Pairing, type GrantedSession } from "./ua/useragent.ts";
+export { UserAgent, type UserAgentConfig, type Pairing, type GrantedSession, type ReceiverHandle } from "./ua/useragent.ts";
 export {
   AutoUI,
   peerLabel,
@@ -72,10 +83,10 @@ export {
 } from "./transport/signaling.ts";
 export { Rendezvous, type RendezvousOptions } from "./transport/rendezvous.ts";
 
-export { Session, DataChannelEndpoint, ControlChannel, ProtocolError, type Role } from "./protocol/session.ts";
-export { WTSession, WTStream, StreamFrame, type StreamSink, type CloseInfo } from "./protocol/webtransport.ts";
+export { Session, DataChannelEndpoint, ControlChannel, ProtocolError, type Role, type SessionRequest } from "./protocol/session.ts";
+export { WTSession, WTStream, StreamFrame, SESSION_GONE, type StreamSink, type CloseInfo } from "./protocol/webtransport.ts";
 export * as messages from "./protocol/messages.ts";
 export { encodeCBOR, decodeCBOR, type CBORValue } from "./codec/cbor.ts";
 export { encodeVarint, decodeVarint } from "./codec/varint.ts";
 
-export const version = "0.1.0";
+export const version = "0.2.0";

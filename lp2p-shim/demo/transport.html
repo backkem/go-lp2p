@@ -39,10 +39,12 @@
 //   transport=postmessage (default) | webrtc     name=<nickname>
 //   auto=1 (no dialogs: allow all, pick the first peer, no PIN)
 //   role=receiver | requester (start right away)
-// The receiver takes sessions with LP2PQuicTransportListener and serves
+// The receiver takes sessions with lp2p.makeDiscoverable() and serves
 // them: it echoes bidirectional streams and datagrams, and answers each
 // unidirectional stream with a unidirectional stream holding its SHA-256.
-// The requester opens an LP2PQuicTransport on its LP2PRequest.
+// The requester opens one with lp2p.connect(). Both are the explainer's
+// shorthand over LP2PReceiver, LP2PQuicTransportListener, LP2PRequest and
+// new LP2PQuicTransport(connection).
 const params = new URLSearchParams(location.search);
 const transportName = params.get("transport") ?? "postmessage";
 const name = params.get("name") ?? `Device ${Math.floor(Math.random() * 900 + 100)}`;
@@ -131,24 +133,24 @@ async function serve(transport) {
 }
 
 $("listen").onclick = async () => {
-  const receiver = new LP2PReceiver({ nickname: name });
-  const listener = new LP2PQuicTransportListener(receiver);
+  // The explainer's shorthand: one stream of incoming transports, already ready.
+  const transports = lp2p.makeDiscoverable({ nickname: name });
+  $("listen").disabled = $("connect").disabled = true;
+  status("Discoverable. Waiting for transports…");
   try {
-    await listener.ready;
-    $("listen").disabled = $("connect").disabled = true;
-    status("Discoverable. Waiting for transports…");
+    for await (const transport of transports) serve(transport).catch((err) => log(`Error: ${err.message}`, "bad"));
   } catch (err) {
     status(`Could not advertise: ${err.name}: ${err.message}`);
-    return;
+    $("listen").disabled = $("connect").disabled = false;
   }
-  for await (const transport of listener.incomingTransports) serve(transport).catch((err) => log(`Error: ${err.message}`, "bad"));
 };
 
 // --------------------------------------------------------------- requester
 let transport = null;
 $("connect").onclick = async () => {
   status("Picking a device…");
-  transport = new LP2PQuicTransport(new LP2PRequest({ nickname: name }));
+  // The shorthand: a transport right away; ready once a peer is picked and the session is up.
+  transport = lp2p.connect({ nickname: name });
   try {
     await transport.ready;
   } catch (err) {

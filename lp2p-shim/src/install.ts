@@ -6,6 +6,7 @@ import { LP2PConnectionEvent, LP2PDataChannelEvent } from "./api/events.ts";
 import { LP2PReceiver } from "./api/receiver.ts";
 import { LP2PRequest } from "./api/request.ts";
 import { LP2PQuicTransport, LP2PQuicTransportListener } from "./api/quictransport.ts";
+import { lp2p } from "./api/shorthand.ts";
 
 export const interfaces = {
   LP2PReceiver,
@@ -16,6 +17,8 @@ export const interfaces = {
   LP2PDataChannelEvent,
   LP2PQuicTransport,
   LP2PQuicTransportListener,
+  // The explainer's shorthand namespace.
+  lp2p,
 } as const;
 
 export interface InstallOptions {

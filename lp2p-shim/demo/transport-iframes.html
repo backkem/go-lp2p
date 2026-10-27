@@ -9,8 +9,8 @@
   p { color: #555; max-width: 70ch; }
 </style>
 <h1>WebTransport between two “devices”</h1>
-<p>The left frame takes sessions with <code>LP2PQuicTransportListener</code> and echoes streams and datagrams. The right
-  frame opens an <code>LP2PQuicTransport</code> on an <code>LP2PRequest</code>: click <b>Connect to a device</b>, pick
+<p>The left frame takes sessions with <code>lp2p.makeDiscoverable()</code> and echoes streams and datagrams. The right
+  frame opens one with <code>lp2p.connect()</code>: click <b>Connect to a device</b>, pick
   the left one, allow it there and type the PIN. Then try the buttons. Both use the postMessage transport.</p>
 <div class="frames">
   <iframe id="a" src="transport.html?name=Echo%20server&role=receiver" title="Receiver"></iframe>

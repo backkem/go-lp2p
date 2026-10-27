@@ -177,8 +177,12 @@ export class UserAgent {
       const showPIN = this.pairing === "pin" ? this.pinPresenter(own, peer, ac.signal) : null;
       if (this.local.isAuthenticated(tls.peerFingerprint)) {
         // A key verified before is bound by the handshake: no ceremony. The
-        // client may still start one if it doesn't trust this side.
-        answerCeremony(control, parties, showPIN, ac.signal).catch(() => {});
+        // client may still start one if it doesn't trust this side; answer
+        // it for as long as the session lives.
+        const live = new AbortController();
+        session.whenClosed(() => live.abort(new DOMException("connection closed", "AbortError")));
+        const show = this.pairing === "pin" ? this.pinPresenter(own, peer, live.signal) : null;
+        answerCeremony(control, parties, show, live.signal).catch(() => {});
       } else {
         sendAuthCapabilities(control);
         await answerCeremony(control, parties, showPIN, ac.signal);
@@ -207,8 +211,9 @@ export class UserAgent {
       req.respond(Result.Success);
       session.onclose = null;
       // Delivered in a later task, as the spec queues the connection event.
+      // A session the client already closed is still delivered, and its
+      // connection then closes, as the spec's steps do.
       setTimeout(() => {
-        if (session.closed) return;
         if (!receiver.deliver(session)) session.close("receiver stopped");
       }, 0);
     } catch (err) {

@@ -104,7 +104,6 @@ await run("postMessage between two iframes, DOM UI and PIN pairing", async () =>
   await a.waitForFunction(() => document.body.dataset.status?.startsWith("Discoverable"), { timeout: TIMEOUT, polling: 100 });
   await b.click("#connect");
   await clickDialog(b, "Living room TV"); // picker
-  await clickDialog(a, "Allow"); // accept connection
   const pin = await dialogText(a, ".pin");
   if (!/^\d{3}-\d{3}-\d{3}$/.test(pin)) throw new Error(`unexpected PIN ${pin}`);
   await b.waitForFunction(() => document.querySelector("lp2p-shim-dialog")?.shadowRoot.querySelector("input"), { timeout: TIMEOUT, polling: 100 });
@@ -112,6 +111,7 @@ await run("postMessage between two iframes, DOM UI and PIN pairing", async () =>
     document.querySelector("lp2p-shim-dialog").shadowRoot.querySelector("input").value = pin;
   }, pin);
   await clickDialog(b, "Pair");
+  await clickDialog(a, "Allow"); // grant the peer, after the ceremony
   await Promise.all([connected(a), connected(b)]);
   await chat(b, a, "hello from the phone");
   await chat(a, b, "hello from the TV");
@@ -170,13 +170,13 @@ await run("WebRTC between isolated contexts, manual copy/paste signaling, PIN pa
   await paste(r, offer);
   const answer = await codeOf(r, announce);
   await paste(q, answer);
-  await clickDialog(r, "Allow"); // accept connection
   const pin = await dialogText(r, ".pin");
   await q.waitForFunction(() => document.querySelector("lp2p-shim-dialog")?.shadowRoot.querySelector("input"), { timeout: TIMEOUT, polling: 100 });
   await q.evaluate((pin) => {
     document.querySelector("lp2p-shim-dialog").shadowRoot.querySelector("input").value = pin;
   }, pin);
   await clickDialog(q, "Pair");
+  await clickDialog(r, "Allow"); // grant the peer, after the ceremony
   await Promise.all([connected(r), connected(q)]);
   await chat(q, r, "no server involved");
   await ctxA.close();
@@ -208,13 +208,13 @@ await run("WebTransport between two iframes, postMessage, DOM UI and PIN pairing
   await a.waitForFunction(() => document.body.dataset.status?.startsWith("Discoverable"), { timeout: TIMEOUT, polling: 100 });
   await b.click("#connect");
   await clickDialog(b, "Echo server"); // picker
-  await clickDialog(a, "Allow"); // accept connection
   const pin = await dialogText(a, ".pin");
   await b.waitForFunction(() => document.querySelector("lp2p-shim-dialog")?.shadowRoot.querySelector("input"), { timeout: TIMEOUT, polling: 100 });
   await b.evaluate((pin) => {
     document.querySelector("lp2p-shim-dialog").shadowRoot.querySelector("input").value = pin;
   }, pin);
   await clickDialog(b, "Pair");
+  await clickDialog(a, "Allow"); // grant the peer, after the ceremony
   await Promise.all([connected(a), connected(b)]);
   const reliability = await b.evaluate(() => document.body.dataset.status);
   if (!reliability.includes("reliable-only")) throw new Error(`unexpected status ${reliability}`);

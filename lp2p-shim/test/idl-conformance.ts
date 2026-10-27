@@ -1,5 +1,6 @@
 // Compile-time check that the shim's classes match the API surface typed
-// from the LP2P WebIDL (../../src/lp2p.d.ts at the repo root). Checked by
+// from the LP2P WebIDL (../../src/lp2p.d.ts at the repo root, as of the
+// spec's connection lifecycle change). Checked by
 // `npm run typecheck`; never run.
 
 import * as shim from "../src/index.ts";
@@ -42,8 +43,9 @@ export function constructors(c: shim.LP2PConnection, ch: shim.LP2PDataChannel): 
   new shim.LP2PDataChannelEvent("datachannel", { channel: ch });
   const dc: LP2PDataChannel = c.createDataChannel("x", { protocol: "", id: 2 });
   void dc;
-  new shim.LP2PQuicTransport(c, {});
-  new shim.LP2PQuicTransport(new shim.LP2PRequest(), {});
-  new shim.LP2PQuicTransport(new shim.LP2PReceiver());
-  new shim.LP2PQuicTransportListener(new shim.LP2PReceiver(), {});
+  new shim.LP2PReceiver({ nickname: "n", allowedOrigins: ["https://partner.example"] }).stop();
+  c.close();
+  new shim.LP2PQuicTransport(c, { requireUnreliable: true });
+  new shim.LP2PQuicTransport(c);
+  new shim.LP2PQuicTransportListener(c, { requireUnreliable: false }).close();
 }
