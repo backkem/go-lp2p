@@ -18,6 +18,7 @@ import {
   type ShimConfig,
 } from "../src/index.ts";
 import type { PostMessageTransport } from "../src/transport/postmessage.ts";
+import { sessionOf, slotsOf } from "../src/api/connection.ts";
 import { closeAll, once, pairedUIs, transportPair } from "./helpers.ts";
 
 interface Pages {
@@ -30,8 +31,8 @@ function pages(): Pages {
   const [ta, tb] = transportPair();
   const [ua, ub] = pairedUIs();
   return {
-    receiverPage: { transport: ta, ui: ua, pairing: "none", origin: "https://receiver.example" },
-    requesterPage: { transport: tb, ui: ub, pairing: "none", origin: "https://requester.example" },
+    receiverPage: { transport: ta, ui: ua, pairing: "none", origin: "https://app.example" },
+    requesterPage: { transport: tb, ui: ub, pairing: "none", origin: "https://app.example" },
     transports: [ta, tb],
   };
 }
@@ -54,6 +55,7 @@ async function transportPairOver(local: LP2PConnection, remote: LP2PConnection):
   const t = new LP2PQuicTransport(local);
   const { value: peer } = await reader.read();
   reader.releaseLock();
+  listener.close();
   assert.ok(peer instanceof LP2PQuicTransport);
   await Promise.all([t.ready, peer.ready]);
   return [t, peer];
@@ -82,26 +84,31 @@ async function first<T>(stream: ReadableStream<T>): Promise<T> {
   return value as T;
 }
 
-test("quic: the spec's request/listener example, with a bidirectional echo", async () => {
+test("quic: the spec's example - the requester opens, the receiver listens; bidirectional echo", async () => {
   const p = pages();
   try {
+    // Receiver
     configure(p.receiverPage);
     const receiver = new LP2PReceiver({ nickname: "example-receiver" });
-    const listener = new LP2PQuicTransportListener(receiver);
-    await listener.ready;
-    const echoed = (async () => {
-      for await (const transport of listener.incomingTransports as unknown as AsyncIterable<LP2PQuicTransport>) {
-        await transport.ready;
-        const stream = await first<LP2PBidirectionalStream>(transport.incomingBidirectionalStreams);
-        await stream.readable.pipeTo(stream.writable);
-        return transport;
-      }
-      throw new Error("no transport");
-    })();
+    const echoed = new Promise<LP2PQuicTransport>((resolve) => {
+      receiver.onconnection = async (e) => {
+        const listener = new LP2PQuicTransportListener(e.connection);
+        for await (const transport of listener.incomingTransports as unknown as AsyncIterable<LP2PQuicTransport>) {
+          // Incoming transports are already ready.
+          assert.equal(transport.reliability, "reliable-only");
+          const stream = await first<LP2PBidirectionalStream>(transport.incomingBidirectionalStreams);
+          await stream.readable.pipeTo(stream.writable);
+          resolve(transport);
+        }
+      };
+    });
+    await receiver.start();
 
+    // Requester
     configure(p.requesterPage);
     const request = new LP2PRequest({ nickname: "example-request" });
-    const transport = new LP2PQuicTransport(request);
+    const conn = await request.start();
+    const transport = new LP2PQuicTransport(conn);
     assert.equal(transport.reliability, "pending");
     await transport.ready;
     assert.equal(transport.reliability, "reliable-only");
@@ -128,7 +135,10 @@ test("quic: the spec's request/listener example, with a bidirectional echo", asy
     assert.deepEqual(await transport.closed, { closeCode: 7, reason: "done" });
     assert.deepEqual(await peer.closed, { closeCode: 7, reason: "done" });
     await peer.draining;
-    (await request.start()).close();
+    // Closing a transport leaves the connection open.
+    const ch = conn.createDataChannel("still open");
+    assert.equal(ch.readyState, "connecting");
+    conn.close();
     receiver.stop();
   } finally {
     closeAll(...p.transports);
@@ -263,29 +273,167 @@ test("quic: datagrams, maxDatagramSize and requireUnreliable", async () => {
   }
 });
 
-test("quic: the spec's connection examples, both sides constructing (glare)", async () => {
+test("quic: both sides constructing at once open two sessions; either side can open", async () => {
   const p = pages();
   try {
     const { local, remote } = await connect(p);
-    // Both pages do `new LP2PQuicTransport(conn)` at the same time; they get one session.
+    const la = new LP2PQuicTransportListener(local);
+    const lb = new LP2PQuicTransportListener(remote);
     const ta = new LP2PQuicTransport(local);
     const tb = new LP2PQuicTransport(remote);
+    const [pa, pb] = await Promise.all([first<LP2PQuicTransport>(lb.incomingTransports), first<LP2PQuicTransport>(la.incomingTransports)]);
     await Promise.all([ta.ready, tb.ready]);
-    const s = await ta.createBidirectionalStream();
-    const w = s.writable.getWriter();
-    await w.write(enc.encode("same session"));
-    await w.close();
-    const got = await first<LP2PBidirectionalStream>(tb.incomingBidirectionalStreams);
-    assert.equal(dec.decode(await readAll(got.readable)), "same session");
+    // ta pairs with pa (on the receiver), tb with pb (on the requester).
+    const dg = ta.datagrams.createWritable().getWriter();
+    await dg.write(enc.encode("one"));
+    assert.equal(dec.decode((await first(pa.datagrams.readable)) as Uint8Array), "one");
+    const dg2 = tb.datagrams.createWritable().getWriter();
+    await dg2.write(enc.encode("two"));
+    assert.equal(dec.decode((await first(pb.datagrams.readable)) as Uint8Array), "two");
+    local.close();
+  } finally {
+    closeAll(...p.transports);
+  }
+});
 
-    // One after the other: the later constructor joins the session the peer opened.
-    const tc = new LP2PQuicTransport(remote);
-    await new Promise((r) => setTimeout(r, 20));
-    const td = new LP2PQuicTransport(local);
-    await Promise.all([tc.ready, td.ready]);
-    const dg = td.datagrams.createWritable().getWriter();
-    await dg.write(enc.encode("joined"));
-    assert.equal(dec.decode((await first(tc.datagrams.readable)) as Uint8Array), "joined");
+test("quic: listener rules - one per connection, refusal without one or when full, held until exposed", async () => {
+  const p = pages();
+  try {
+    configure(p.receiverPage);
+    const receiver = new LP2PReceiver({ nickname: "R" });
+    // The requester opens a transport right away; the receiver's page only
+    // constructs its listener in the connection event: the session is held.
+    const gotTransport = new Promise<LP2PQuicTransport>((resolve) => {
+      receiver.onconnection = (e) => {
+        const l = new LP2PQuicTransportListener(e.connection);
+        assert.throws(() => new LP2PQuicTransportListener(e.connection), { name: "InvalidStateError" });
+        void first<LP2PQuicTransport>(l.incomingTransports).then(resolve);
+      };
+    });
+    await receiver.start();
+    configure(p.requesterPage);
+    const conn = await new LP2PRequest({ nickname: "Q" }).start();
+    const t = new LP2PQuicTransport(conn);
+    await Promise.all([t.ready, gotTransport]);
+
+    // On a second connection the requester has no listener: the receiver's session is refused.
+    const { local: local2, remote: rconn } = await (async () => {
+      configure(p.receiverPage);
+      const r2 = new LP2PReceiver({ nickname: "R2" });
+      const ev = once<LP2PConnectionEvent>(r2, "connection");
+      await r2.start();
+      configure({ ...p.requesterPage, ui: pairedUIs({}, { pick: (peers) => peers.find((x) => x.nickname === "R2") })[1] });
+      const local = await new LP2PRequest({ nickname: "Q2" }).start();
+      return { local, remote: (await ev).connection, r2 };
+    })();
+    const refused = new LP2PQuicTransport(rconn);
+    await assert.rejects(refused.ready, (e: { name: string; source?: string }) => e.name === "WebTransportError" && e.source === "session");
+
+    // A full queue refuses too: nobody reads this listener.
+    const unread = new LP2PQuicTransportListener(local2);
+    const opened: LP2PQuicTransport[] = [];
+    for (let i = 0; i < 12; i++) opened.push(new LP2PQuicTransport(rconn));
+    const results = await Promise.allSettled(opened.map((x) => x.ready));
+    const ok = results.filter((r) => r.status === "fulfilled").length;
+    assert.ok(ok >= 1 && ok < 12, `accepted ${ok} of 12`);
+
+    // close() ends the stream, keeps what was queued, and frees the slot.
+    unread.close();
+    const reader = unread.incomingTransports.getReader();
+    let queued = 0;
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+      queued++;
+    }
+    assert.equal(queued, ok);
+    const again = new LP2PQuicTransportListener(local2);
+    again.close();
+    local2.close();
+    conn.close();
+    receiver.stop();
+  } finally {
+    closeAll(...p.transports);
+  }
+});
+
+test("quic: close codes, FIN without close, drain, session-gone on open streams", async () => {
+  const p = pages();
+  try {
+    const { local, remote } = await connect(p);
+    const [a, b] = await transportPairOver(local, remote);
+    const s = await a.createBidirectionalStream();
+    const w = s.writable.getWriter();
+    await w.write(enc.encode("x"));
+    const got = await first<LP2PBidirectionalStream>(b.incomingBidirectionalStreams);
+
+    // No drain was asked for: draining is still pending.
+    let drained = false;
+    void a.draining.then(() => (drained = true));
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(drained, false);
+
+    // Closing with a code: streams of the session end with session-gone,
+    // reported without a stream error code.
+    b.close({ closeCode: 4242, reason: "é".repeat(600) }); // truncated to 1024 bytes
+    const info = await a.closed;
+    assert.equal(info.closeCode, 4242);
+    assert.equal(new TextEncoder().encode(info.reason as string).length, 1024);
+    await assert.rejects(w.closed, (e: { source?: string; streamErrorCode?: number | null }) => e.source === "session" && e.streamErrorCode === null);
+    await assert.rejects(got.writable.getWriter().closed, { name: "WebTransportError" });
+    local.close();
+  } finally {
+    closeAll(...p.transports);
+  }
+});
+
+test("quic: data-transport-drain resolves draining; FIN without close is code 0", async () => {
+  const p = pages();
+  try {
+    const { local, remote } = await connect(p);
+    const listener = new LP2PQuicTransportListener(remote);
+    const s = sessionOf(local);
+    // Drive the wire directly: a page cannot ask for a drain.
+    const ws = s.openTransport();
+    const opened = new Promise<void>((r) => (ws.onready = r));
+    const peer = await first<LP2PQuicTransport>(listener.incomingTransports);
+    await opened;
+    let drained = false;
+    void peer.draining.then(() => (drained = true));
+    ws.drain();
+    await peer.draining;
+    assert.equal(drained, true);
+    assert.equal(peer.reliability, "reliable-only"); // still usable
+    // End the control stream without data-transport-close.
+    (ws as unknown as { control: { close(): void } }).control.close();
+    assert.deepEqual(await peer.closed, { closeCode: 0, reason: "" });
+    local.close();
+  } finally {
+    closeAll(...p.transports);
+  }
+});
+
+test("quic: exportKeyingMaterial agrees on both sides and differs per session", async () => {
+  const p = pages();
+  try {
+    const { local, remote } = await connect(p);
+    const [a, b] = await transportPairOver(local, remote);
+    const [c, d] = await transportPairOver(local, remote);
+    const label = enc.encode("my-app proof");
+    const ka = new Uint8Array(await a.exportKeyingMaterial(label));
+    const kb = new Uint8Array(await b.exportKeyingMaterial(label));
+    const kc = new Uint8Array(await c.exportKeyingMaterial(label));
+    const kd = new Uint8Array(await d.exportKeyingMaterial(label));
+    assert.equal(ka.length, 32);
+    assert.deepEqual(ka, kb);
+    assert.deepEqual(kc, kd);
+    assert.notDeepEqual(ka, kc);
+    const ctx = new Uint8Array(await a.exportKeyingMaterial(label, enc.encode("ctx")));
+    assert.notDeepEqual(ctx, ka);
+    assert.equal((await a.exportKeyingMaterial(label, undefined, 64)).byteLength, 64);
+    await assert.rejects(a.exportKeyingMaterial(new Uint8Array(256)), TypeError);
+    a.close();
+    await assert.rejects(a.exportKeyingMaterial(label), { name: "InvalidStateError" });
     local.close();
   } finally {
     closeAll(...p.transports);
@@ -298,40 +446,49 @@ test("quic: lifecycle - closing the connection, closing while connecting, bad ar
     const { local, remote, receiver } = await connect(p);
     const [a, b] = await transportPairOver(local, remote);
     const s = await a.createBidirectionalStream();
+    const listener = new LP2PQuicTransportListener(local);
 
     // Data channels and transports share the connection.
     const ch = local.createDataChannel("side by side");
     await once<LP2PDataChannelEvent>(remote, "datachannel");
     assert.equal(ch.label, "side by side");
 
-    // Closing the LP2P connection closes its WebTransport sessions abruptly.
+    // Closing the LP2P connection fails its transports and closes its
+    // listener before the close event.
+    const seenAtClose: unknown[] = [];
+    const closeEvent = new Promise<void>((resolve) => {
+      local.onclose = () => {
+        // Observable synchronously in the event: the transport has failed
+        // (reliability is back to "pending") and the listener is gone.
+        seenAtClose.push(a.reliability, slotsOf(local).listener);
+        resolve();
+      };
+    });
+    const listenerDone = listener.incomingTransports.getReader().read();
     local.close();
+    await closeEvent;
+    assert.deepEqual(seenAtClose, ["pending", null]);
+    assert.equal((await listenerDone).done, true);
     for (const t of [a, b]) {
       await assert.rejects(t.closed, (err: { name: string; source?: string }) => err.name === "WebTransportError" && err.source === "session");
     }
     await assert.rejects(s.writable.getWriter().closed, { name: "WebTransportError" });
     await assert.rejects(a.createBidirectionalStream(), { name: "InvalidStateError" });
-    await assert.rejects(new LP2PQuicTransport(local).ready, { name: "WebTransportError" });
-
-    // A transport on a receiver uses its next connection.
-    configure(p.receiverPage);
-    const onNext = new LP2PQuicTransport(receiver);
-    configure(p.requesterPage);
-    const second = new LP2PRequest({ nickname: "Requester 2" });
-    const listener2 = new LP2PQuicTransportListener(second);
-    await listener2.ready;
-    const peer = await first<LP2PQuicTransport>(listener2.incomingTransports);
-    await Promise.all([onNext.ready, peer.ready]);
+    assert.throws(() => new LP2PQuicTransport(local), { name: "InvalidStateError" });
+    assert.throws(() => new LP2PQuicTransportListener(local), { name: "InvalidStateError" });
 
     // close() before ready.
-    const early = new LP2PQuicTransport(await second.start());
+    configure(p.requesterPage);
+    const conn = await new LP2PRequest({ nickname: "Requester 2" }).start();
+    const early = new LP2PQuicTransport(conn);
     early.close();
     await assert.rejects(early.ready, { name: "WebTransportError" });
 
     assert.throws(() => new LP2PQuicTransport({} as LP2PConnection), TypeError);
-    assert.throws(() => new LP2PQuicTransport(remote, { congestionControl: "fast" as "default" }), TypeError);
-    assert.throws(() => new LP2PQuicTransportListener({} as LP2PRequest), TypeError);
-    (await second.start()).close();
+    assert.throws(() => new (LP2PQuicTransport as unknown as new (x: unknown) => unknown)(new LP2PRequest()), TypeError);
+    assert.throws(() => new LP2PQuicTransport(conn, { congestionControl: "fast" as "default" }), TypeError);
+    assert.throws(() => new (LP2PQuicTransportListener as unknown as new (x: unknown) => unknown)(receiver), TypeError);
+    conn.close();
     receiver.stop();
   } finally {
     closeAll(...p.transports);

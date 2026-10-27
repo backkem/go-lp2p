@@ -7,11 +7,9 @@
 // up its internal slots any other way. Streams are WHATWG streams, as in
 // WebTransport: receive streams are byte streams.
 
-import type { Session } from "../protocol/session.ts";
+import { AgentCapability } from "../protocol/messages.ts";
 import type { CloseInfo, StreamSink, WTSession, WTStream } from "../protocol/webtransport.ts";
-import { LP2PConnection, sessionOf } from "./connection.ts";
-import { LP2PReceiver, watchSessions } from "./receiver.ts";
-import { LP2PRequest } from "./request.ts";
+import { LP2PConnection, slotsOf, type ConnectionSlots } from "./connection.ts";
 
 // ---------------------------------------------------------------- errors
 
@@ -72,106 +70,6 @@ function toBytes(chunk: unknown): Uint8Array {
 function handled<T>(p: Promise<T>): Promise<T> {
   p.catch(() => {});
   return p;
-}
-
-// ------------------------------------------------- claiming incoming sessions
-
-interface PendingOpen {
-  adopt(incoming: WTSession): void;
-}
-
-/**
- * Per LP2P session: decides who takes the peer's WebTransport sessions.
- * In order: during glare on the receiver side, a local transport still
- * waiting for its own session; then the listeners; else the session waits
- * unanswered for a listener or a local LP2PQuicTransport on the connection.
- */
-class Hub {
-  private readonly unclaimed: WTSession[] = [];
-  private readonly claimers: ((t: WTSession) => boolean)[] = [];
-  readonly pendingOpens = new Set<PendingOpen>();
-  readonly session: Session;
-
-  constructor(session: Session) {
-    this.session = session;
-    session.ontransport = (t) => this.incoming(t);
-  }
-
-  claimUnclaimed(): WTSession | null {
-    for (let t = this.unclaimed.shift(); t; t = this.unclaimed.shift()) {
-      if (t.state !== "pending") continue;
-      t.onclose = null;
-      return t;
-    }
-    return null;
-  }
-
-  addClaimer(fn: (t: WTSession) => boolean): () => void {
-    this.claimers.push(fn);
-    for (const t of [...this.unclaimed]) {
-      if (t.state === "pending" && fn(t)) this.unclaimed.splice(this.unclaimed.indexOf(t), 1);
-    }
-    return () => {
-      const i = this.claimers.indexOf(fn);
-      if (i >= 0) this.claimers.splice(i, 1);
-    };
-  }
-
-  private incoming(t: WTSession): void {
-    // Glare: both pages constructed a transport on the connection at once.
-    // The requester's session wins; the receiver's transport joins it.
-    if (this.session.role === "receiver") {
-      for (const p of this.pendingOpens) {
-        this.pendingOpens.delete(p);
-        p.adopt(t);
-        return;
-      }
-    }
-    for (const c of this.claimers) if (c(t)) return;
-    this.unclaimed.push(t);
-    t.onclose = () => {
-      const i = this.unclaimed.indexOf(t);
-      if (i >= 0) this.unclaimed.splice(i, 1);
-    };
-  }
-}
-
-const hubs = new WeakMap<Session, Hub>();
-function hubFor(session: Session): Hub {
-  let h = hubs.get(session);
-  if (!h) hubs.set(session, (h = new Hub(session)));
-  return h;
-}
-
-/** The session a transport or listener source stands for. */
-function sessionFor(source: LP2PConnection | LP2PRequest | LP2PReceiver, signal: AbortSignal): Promise<Session> {
-  if (source instanceof LP2PConnection) return Promise.resolve(sessionOf(source));
-  if (source instanceof LP2PRequest) return source.start().then(sessionOf);
-  // A receiver can have many connections; the shim takes the next one.
-  return new Promise<Session>((resolve, reject) => {
-    const stop = watchSessions(
-      source,
-      (s) => {
-        stop();
-        resolve(s);
-      },
-      false,
-    );
-    signal.addEventListener("abort", () => {
-      stop();
-      reject(signal.reason);
-    });
-    source.start().catch((err: unknown) => {
-      stop();
-      reject(err);
-    });
-  });
-}
-
-function checkSource(source: unknown, what: string, allowConnection: boolean): asserts source is LP2PConnection | LP2PRequest | LP2PReceiver {
-  if (source instanceof LP2PRequest || source instanceof LP2PReceiver) return;
-  if (allowConnection && source instanceof LP2PConnection) return;
-  throw new TypeError(`${what}: source must be an LP2PRequest or LP2PReceiver${allowConnection ? " or LP2PConnection" : ""}`);
 }
 
 // ------------------------------------------------------------------ streams
@@ -555,17 +453,18 @@ export class LP2PDatagramDuplexStream {
 // ---------------------------------------------------------------- transport
 
 export interface LP2PQuicTransportInit {
-  /** Fail (ready rejects) unless datagrams can be lost, i.e. the transport is not reliable-only. */
+  /** Fail unless datagrams can be lost, i.e. the session is not "reliable-only". */
   requireUnreliable?: boolean;
   /** Accepted and reflected; the shim has no congestion controller to choose. */
   congestionControl?: "default" | "throughput" | "low-latency";
   anticipatedConcurrentIncomingUnidirectionalStreams?: number | null;
   anticipatedConcurrentIncomingBidirectionalStreams?: number | null;
-  /** "bytes" makes datagrams.readable a byte stream. */
+  /** Extension (from WebTransportOptions): "bytes" makes datagrams.readable a byte stream. */
   datagramsReadableType?: "bytes";
 }
 
-export interface LP2PQuicTransportListenerInit {}
+/** The options of a listener apply to each transport it creates. */
+export interface LP2PQuicTransportListenerInit extends LP2PQuicTransportInit {}
 
 export interface WebTransportCloseInfo {
   closeCode?: number;
@@ -596,16 +495,23 @@ function enforceUnsignedShortOrNull(v: unknown, what: string): number | null {
   return n;
 }
 
+function bufferSource(v: unknown, what: string): Uint8Array {
+  if (v instanceof ArrayBuffer) return new Uint8Array(v);
+  if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  throw new TypeError(`${what} must be a BufferSource`);
+}
+
 const CONGESTION_CONTROL = ["default", "throughput", "low-latency"];
 const MAX_REASON_BYTES = 1024;
+const EXPORTER_LENGTH = 32;
 
-let adopting: { session: WTSession; init: LP2PQuicTransportInit } | null = null;
+let adopting: { session: WTSession; init: LP2PQuicTransportInit; connection: LP2PConnection } | null = null;
 
 /** Wraps an accepted incoming session. Internal. */
-function adoptTransport(session: WTSession, init: LP2PQuicTransportInit): LP2PQuicTransport {
-  adopting = { session, init };
+function adoptTransport(session: WTSession, init: LP2PQuicTransportInit, connection: LP2PConnection): LP2PQuicTransport {
+  adopting = { session, init, connection };
   try {
-    return new LP2PQuicTransport(null as unknown as LP2PConnection, init);
+    return new LP2PQuicTransport(connection, init);
   } finally {
     adopting = null;
   }
@@ -616,6 +522,7 @@ type State = "connecting" | "connected" | "closed" | "failed";
 export class LP2PQuicTransport {
   #state: State = "connecting";
   #session: WTSession | null = null;
+  #slots: ConnectionSlots;
   #reliability: "pending" | "reliable-only" | "supports-unreliable" = "pending";
   readonly #congestionControl: "default" | "throughput" | "low-latency";
   readonly #requireUnreliable: boolean;
@@ -634,27 +541,29 @@ export class LP2PQuicTransport {
   #incomingUniController!: ReadableStreamDefaultController<LP2PReceiveStream>;
   readonly #incomingBidi: ReadableStream<LP2PBidirectionalStream>;
   readonly #incomingUni: ReadableStream<LP2PReceiveStream>;
-  readonly #abort = new AbortController();
-  #unbind: (() => void) | null = null;
+  readonly #member = { failFromConnection: () => this.#fail(sessionError("the LP2P connection closed")) };
 
-  /** Always true: the postMessage transport gives reliable-only sessions. */
+  /** Always true: some shim transports only give reliable-only sessions. */
   static get supportsReliableOnly(): boolean {
     return true;
   }
 
   /**
-   * Opens a WebTransport session with the peer of source. An LP2PRequest or
-   * LP2PReceiver that is not started yet is started, as the spec says. For
-   * an LP2PReceiver, the session is opened on its next connection.
+   * Opens a new WebTransport session on connection. Each construction opens
+   * its own session; the peer receives it through its
+   * LP2PQuicTransportListener on the connection.
    */
-  constructor(source: LP2PConnection | LP2PRequest | LP2PReceiver, quicTransportDict: LP2PQuicTransportInit = {}) {
+  constructor(connection: LP2PConnection, options: LP2PQuicTransportInit = {}) {
     const a = adopting;
     adopting = null;
     if (!a) {
-      if (arguments.length < 1) throw new TypeError("LP2PQuicTransport: source is required");
-      checkSource(source, "LP2PQuicTransport", true);
+      if (arguments.length < 1) throw new TypeError("LP2PQuicTransport: connection is required");
+      if (!(connection instanceof LP2PConnection)) throw new TypeError("LP2PQuicTransport: connection must be an LP2PConnection");
     }
-    const init = quicTransportDict ?? {};
+    const slots = slotsOf(connection);
+    if (!a && slots.closed) throw new DOMException("the LP2PConnection is closed", "InvalidStateError");
+    this.#slots = slots;
+    const init = options ?? {};
     const cc = init.congestionControl ?? "default";
     if (!CONGESTION_CONTROL.includes(cc)) throw new TypeError(`invalid congestionControl "${String(cc)}"`);
     if (init.datagramsReadableType !== undefined && init.datagramsReadableType !== "bytes") {
@@ -696,67 +605,48 @@ export class LP2PQuicTransport {
       { highWaterMark: 0 },
     );
     transportInternals.set(this, { session: null, ready: this.#ready });
+    slots.transports.add(this.#member);
 
     if (a) {
       this.#attach(a.session);
       return;
     }
-    sessionFor(source, this.#abort.signal).then(
-      (session) => this.#bind(session),
-      (err: unknown) => this.#fail(err instanceof DOMException ? err : sessionError(String(err))),
-    );
-  }
-
-  /** Opens a session on the LP2P session, or joins one the peer opened that nobody took. */
-  #bind(session: Session): void {
-    if (this.#state !== "connecting") return;
-    if (session.closed) {
-      this.#fail(sessionError("the LP2P connection is closed"));
+    const session = slots.session;
+    // An unknown type key would close the whole connection: only open
+    // sessions with agents that list quic-transport.
+    if (!session.remoteInfo?.capabilities.includes(AgentCapability.QuicTransport)) {
+      queueMicrotask(() => this.#fail(sessionError("the peer does not support quic-transport")));
       return;
     }
-    const hub = hubFor(session);
-    const waiting = hub.claimUnclaimed();
-    if (waiting) {
-      waiting.accept();
-      this.#attach(waiting);
+    let out: WTSession;
+    try {
+      out = session.openTransport();
+    } catch (err) {
+      queueMicrotask(() => this.#fail(sessionError(String(err))));
       return;
     }
-    const out = session.openTransport();
-    const pending: PendingOpen = {
-      adopt: (incoming) => {
-        out.onclose = null;
-        out.close();
-        incoming.accept();
-        this.#attach(incoming);
-      },
-    };
-    hub.pendingOpens.add(pending);
-    this.#unbind = () => hub.pendingOpens.delete(pending);
-    out.onready = () => {
-      hub.pendingOpens.delete(pending);
-      this.#attach(out);
-    };
-    out.onclose = (_info, why) => {
-      hub.pendingOpens.delete(pending);
-      this.#fail(sessionError(why));
-    };
-    this.#session = out; // so close() while connecting can drop it
+    this.#session = out; // so close() while connecting can abandon it
+    out.onready = () => this.#attach(out);
+    out.onclose = (_info, why) => this.#fail(sessionError(why));
   }
 
   #attach(ws: WTSession): void {
     if (this.#state !== "connecting") {
+      ws.onclose = null;
       ws.close();
       return;
     }
     this.#session = ws;
     internalsOf(this).session = ws;
-    this.#reliability = ws.datagramsReliable || ws.maxDatagramSize === 0 ? "reliable-only" : "supports-unreliable";
-    if (this.#requireUnreliable && this.#reliability !== "supports-unreliable") {
-      this.#fail(new WebTransportError("requireUnreliable: this connection only delivers reliably", { source: "session" }));
+    const reliability = ws.datagramsReliable || ws.maxDatagramSize === 0 ? "reliable-only" : "supports-unreliable";
+    if (this.#requireUnreliable && reliability !== "supports-unreliable") {
+      this.#fail(new WebTransportError("requireUnreliable: this session is reliable-only", { source: "session" }));
       return;
     }
+    this.#reliability = reliability;
     this.#state = "connected";
     ws.onclose = (info, why) => this.#cleanup(info, why);
+    ws.ondrain = () => this.#resolveDraining();
     ws.onstream = (s) => this.#incoming(s);
     ws.ondatagram = (d) => this.#datagrams.receive(d);
     this.#resolveReady();
@@ -780,8 +670,7 @@ export class LP2PQuicTransport {
     const ws = this.#session;
     this.#state = "failed";
     this.#reliability = "pending";
-    this.#abort.abort(err);
-    this.#unbind?.();
+    this.#slots.transports.delete(this.#member);
     if (ws) {
       ws.onclose = null;
       ws.close();
@@ -801,6 +690,7 @@ export class LP2PQuicTransport {
       return;
     }
     this.#state = "closed";
+    this.#slots.transports.delete(this.#member);
     this.#resolveClosed({ closeCode: info.code, reason: info.reason });
     this.#incomingBidiController.close();
     this.#incomingUniController.close();
@@ -814,7 +704,7 @@ export class LP2PQuicTransport {
   get closed(): Promise<WebTransportCloseInfo> {
     return this.#closed;
   }
-  /** Resolves when the session closes: no peer page can ask for a drain (there is no GOAWAY). */
+  /** Resolves when the peer drains the session (data-transport-drain), or when it ends. */
   get draining(): Promise<undefined> {
     return this.#draining;
   }
@@ -858,9 +748,7 @@ export class LP2PQuicTransport {
     if (this.#state === "connecting") await this.#ready;
     const ws = this.#session;
     if (this.#state !== "connected" || !ws) throw new DOMException("transport is closed", "InvalidStateError");
-    const s = ws.openStream(unidirectional);
-    const halves = new StreamHalves(s);
-    return halves;
+    return new StreamHalves(ws.openStream(unidirectional));
   }
 
   async createBidirectionalStream(options: WebTransportSendStreamOptions = {}): Promise<LP2PBidirectionalStream> {
@@ -895,15 +783,30 @@ export class LP2PQuicTransport {
     });
   }
 
-  /** Not supported: the shim has no TLS session to export keying material from. */
-  exportKeyingMaterial(_label: BufferSource, _context: BufferSource, _outputLength: number): Promise<Uint8Array> {
-    return Promise.reject(new DOMException("exportKeyingMaterial is not supported by lp2p-shim", "NotSupportedError"));
+  /**
+   * Keying material of this session only, derived as the binding says (the
+   * connection's exporter with label "EXPORTER-WebTransport" and the
+   * WebTransport Exporter Context, with the exchange-id as session ID). In
+   * the shim the connection's exporter is the handshake stand-in of
+   * protocol/identity.ts, not TLS. Extension: outputLength, default 32.
+   */
+  async exportKeyingMaterial(label: BufferSource, context?: BufferSource, outputLength = EXPORTER_LENGTH): Promise<ArrayBuffer> {
+    const l = bufferSource(label, "label");
+    const c = context === undefined ? new Uint8Array(0) : bufferSource(context, "context");
+    if (l.length > 255 || c.length > 255) throw new TypeError("label and context are at most 255 bytes");
+    const n = Math.trunc(Number(outputLength));
+    if (!(n > 0 && n <= 255 * 32)) throw new RangeError("outputLength out of range");
+    if (this.#state === "connecting") await this.#ready;
+    const ws = this.#session;
+    if (this.#state !== "connected" || !ws) throw new DOMException("transport is closed", "InvalidStateError");
+    const out = await ws.exportKeyingMaterial(l, c, n);
+    return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) as ArrayBuffer;
   }
 
   close(closeInfo: WebTransportCloseInfo = {}): undefined {
     if (this.#state === "closed" || this.#state === "failed") return;
     if (this.#state === "connecting") {
-      this.#fail(sessionError("closed before the session was established"));
+      this.#fail(new WebTransportError("closed before the session was established", { source: "session" }));
       return;
     }
     const code = Math.min(Math.max(Math.trunc(Number(closeInfo?.closeCode ?? 0)) || 0, 0), 0xffffffff);
@@ -918,75 +821,74 @@ export class LP2PQuicTransport {
 
 // ----------------------------------------------------------------- listener
 
+/** How many incoming transports a listener queues before refusing more. */
+const LISTENER_HIGH_WATER_MARK = 8;
+
 export class LP2PQuicTransportListener {
-  readonly #ready: Promise<undefined>;
   readonly #incoming: ReadableStream<LP2PQuicTransport>;
+  #controller!: ReadableStreamDefaultController<LP2PQuicTransport>;
+  #closed = false;
+  #streamDone = false;
+  readonly #slots: ConnectionSlots;
 
   /**
-   * Hands out the WebTransport sessions peers open on source's connections:
-   * the one connection of an LP2PRequest, or every connection of an
-   * LP2PReceiver (current and future). Starts source if needed. Extension:
-   * source may also be an LP2PConnection.
+   * Receives the incoming WebTransport sessions of connection. There is at
+   * most one listener per connection at a time; with none, or with a full
+   * queue, incoming sessions are refused.
    */
-  constructor(
-    source: LP2PRequest | LP2PReceiver | LP2PConnection,
-    quicTransportListenerDict: LP2PQuicTransportListenerInit = {},
-  ) {
-    if (arguments.length < 1) throw new TypeError("LP2PQuicTransportListener: source is required");
-    checkSource(source, "LP2PQuicTransportListener", true);
-    void quicTransportListenerDict;
-    const stops: (() => void)[] = [];
-    let controller!: ReadableStreamDefaultController<LP2PQuicTransport>;
-    let done = false;
-    const finish = (err?: unknown): void => {
-      if (done) return;
-      done = true;
-      for (const stop of stops.splice(0)) stop();
-      if (err === undefined) controller.close();
-      else controller.error(err);
-    };
+  constructor(connection: LP2PConnection, options: LP2PQuicTransportListenerInit = {}) {
+    if (arguments.length < 1) throw new TypeError("LP2PQuicTransportListener: connection is required");
+    if (!(connection instanceof LP2PConnection)) {
+      throw new TypeError("LP2PQuicTransportListener: connection must be an LP2PConnection");
+    }
+    const slots = slotsOf(connection);
+    if (slots.closed) throw new DOMException("the LP2PConnection is closed", "InvalidStateError");
+    if (slots.listener) throw new DOMException("the LP2PConnection already has a listener", "InvalidStateError");
+    const init: LP2PQuicTransportListenerInit = { ...(options ?? {}) };
+    // Validates the options as the transports will.
+    if (init.congestionControl !== undefined && !CONGESTION_CONTROL.includes(init.congestionControl)) {
+      throw new TypeError(`invalid congestionControl "${String(init.congestionControl)}"`);
+    }
+    this.#slots = slots;
     this.#incoming = new ReadableStream<LP2PQuicTransport>(
       {
-        start: (c) => void (controller = c),
+        start: (c) => void (this.#controller = c),
         cancel: () => {
-          done = true;
-          for (const stop of stops.splice(0)) stop();
+          this.#streamDone = true;
+          this.close();
         },
       },
-      { highWaterMark: 0 },
+      { highWaterMark: LISTENER_HIGH_WATER_MARK },
     );
-    const claim = (t: WTSession): boolean => {
-      if (done) return false;
-      t.accept();
-      controller.enqueue(adoptTransport(t, {}));
-      return true;
+    slots.listener = {
+      closeFromConnection: () => this.close(),
+      incoming: (t) => {
+        if (this.#closed || (this.#controller.desiredSize ?? 0) <= 0) return false;
+        if (init.requireUnreliable && (t.datagramsReliable || t.maxDatagramSize === 0)) return false;
+        t.accept();
+        this.#controller.enqueue(adoptTransport(t, init, connection));
+        return true;
+      },
     };
-    const watch = (s: Session, last: boolean): void => {
-      if (done) return;
-      stops.push(hubFor(s).addClaimer(claim));
-      // A single connection's listener ends with it.
-      if (last) s.whenClosed(() => finish());
-    };
-
-    let started: Promise<unknown>;
-    if (source instanceof LP2PConnection) {
-      watch(sessionOf(source), true);
-      started = Promise.resolve();
-    } else if (source instanceof LP2PRequest) {
-      started = source.start().then((conn) => watch(sessionOf(conn), true));
-    } else {
-      stops.push(watchSessions(source, (s) => watch(s, false), true));
-      started = source.start();
-    }
-    this.#ready = handled(started.then(() => undefined));
-    this.#ready.catch((err: unknown) => finish(err));
-  }
-
-  get ready(): Promise<undefined> {
-    return this.#ready;
   }
 
   get incomingTransports(): ReadableStream<LP2PQuicTransport> {
     return this.#incoming;
+  }
+
+  /** Stops listening. Transports already queued can still be read; a new listener can then be constructed. */
+  close(): undefined {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#slots.listener = null;
+    if (!this.#streamDone) {
+      this.#streamDone = true;
+      try {
+        this.#controller.close();
+      } catch {
+        // already closed or errored
+      }
+    }
+    return;
   }
 }

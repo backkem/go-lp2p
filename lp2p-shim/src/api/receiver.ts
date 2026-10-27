@@ -3,79 +3,102 @@
 import { getUserAgent } from "../config.ts";
 import type { Closer } from "../transport/types.ts";
 import type { Session } from "../protocol/session.ts";
+import { parseOrigin } from "../ua/localstate.ts";
+import type { ReceiverHandle } from "../ua/useragent.ts";
 import { adoptConnection } from "./connection.ts";
 import { LP2PConnectionEvent, getHandler, setHandler } from "./events.ts";
 
 export interface LP2PReceiverOptions {
   nickname?: string;
+  /** URLs whose origins, besides the receiver's own, may request sessions. */
+  allowedOrigins?: string[];
 }
 
-interface ReceiverInternals {
-  /** Open sessions of the connections this receiver handed out. */
-  sessions: Set<Session>;
-  watchers: Set<(s: Session) => void>;
-}
-const internals = new WeakMap<LP2PReceiver, ReceiverInternals>();
-
-/**
- * Calls fn for each connection the receiver gets from now on and, with
- * existing, for those it has. Returns a function that stops watching. Internal.
- */
-export function watchSessions(receiver: LP2PReceiver, fn: (s: Session) => void, existing: boolean): () => void {
-  const i = internals.get(receiver);
-  if (!i) throw new TypeError("not an LP2PReceiver");
-  if (existing) for (const s of i.sessions) fn(s);
-  i.watchers.add(fn);
-  return () => i.watchers.delete(fn);
-}
+type State = "initial" | "advertising" | "stopped";
 
 export class LP2PReceiver extends EventTarget {
   readonly #nickname: string;
-  #started: Promise<undefined> | null = null;
+  readonly #allowedOrigins: string[];
+  #state: State = "initial";
+  #startPromise: Promise<undefined> | null = null;
+  #rejectStart: ((e: unknown) => void) | null = null;
   #advertisement: Closer | null = null;
-  #stopped = false;
 
   constructor(options: LP2PReceiverOptions = {}) {
     super();
-    this.#nickname = options.nickname === undefined ? "" : String(options.nickname);
-    internals.set(this, { sessions: new Set(), watchers: new Set() });
+    this.#nickname = options?.nickname === undefined ? "" : String(options.nickname);
+    this.#allowedOrigins = [];
+    for (const entry of options?.allowedOrigins ?? []) {
+      const origin = parseOrigin(String(entry));
+      if (origin === null) throw new TypeError(`allowedOrigins: "${String(entry)}" is not a valid URL`);
+      // An opaque origin ("null") is kept but never matches, see #allows.
+      this.#allowedOrigins.push(origin);
+    }
   }
 
   /**
    * Asks the user for permission to advertise and starts advertising.
-   * Resolves once advertising; rejects with NotAllowedError if denied.
-   * Calling it again returns the same promise (the spec does not say).
+   * Resolves once advertising; rejects with NotAllowedError if denied, and
+   * InvalidStateError after stop(). Calling it again returns the same
+   * promise while pending or after success.
    */
   start(): Promise<undefined> {
-    if (this.#started) return this.#started;
-    this.#started = getUserAgent()
-      .advertise(this.#nickname, ({ session }) => {
-        if (this.#stopped) {
-          session.close("receiver stopped");
-          return;
-        }
-        const connection = adoptConnection(session);
-        const i = internals.get(this) as ReceiverInternals;
-        i.sessions.add(session);
-        session.whenClosed(() => i.sessions.delete(session));
-        this.dispatchEvent(new LP2PConnectionEvent("connection", { connection }));
-        for (const fn of [...i.watchers]) fn(session);
-      })
-      .then((ad) => {
-        this.#advertisement = ad;
-        if (this.#stopped) ad.close();
-        return undefined;
-      });
-    this.#started.catch(() => {
-      this.#started = null; // allow another attempt
+    if (this.#startPromise) return this.#startPromise;
+    if (this.#state === "stopped") {
+      return Promise.reject(new DOMException("the receiver was stopped", "InvalidStateError"));
+    }
+    const ua = getUserAgent();
+    if (ua.origin === "null") return Promise.reject(new DOMException("opaque origin", "NotAllowedError"));
+    const handle: ReceiverHandle = {
+      origin: ua.origin,
+      nickname: this.#nickname,
+      allows: (o) => this.#allows(o, ua.origin),
+      deliver: (s) => this.#deliver(s),
+    };
+    const promise = new Promise<undefined>((resolve, reject) => {
+      this.#rejectStart = reject;
+      ua.advertise(handle).then(
+        (ad) => {
+          if (this.#state === "stopped") {
+            ad.close();
+            return;
+          }
+          this.#advertisement = ad;
+          this.#state = "advertising";
+          this.#rejectStart = null;
+          resolve(undefined);
+        },
+        () => {
+          if (this.#startPromise === promise) this.#startPromise = null;
+          this.#rejectStart = null;
+          reject(new DOMException("The user did not allow advertising.", "NotAllowedError"));
+        },
+      );
     });
-    return this.#started;
+    this.#startPromise = promise;
+    return promise;
   }
 
-  /** Extension: not in the LP2P IDL. Stops advertising; existing connections stay open. */
+  /** Stops advertising. Connections already delivered stay open. The receiver can't be started again. */
   stop(): void {
-    this.#stopped = true;
+    if (this.#state === "stopped") return;
+    this.#state = "stopped";
+    this.#rejectStart?.(new DOMException("stopped", "AbortError"));
+    this.#rejectStart = null;
     this.#advertisement?.close();
+    this.#advertisement = null;
+  }
+
+  #allows(origin: string, own: string): boolean {
+    if (origin === "null") return false;
+    return origin === own || this.#allowedOrigins.includes(origin);
+  }
+
+  #deliver(session: Session): boolean {
+    if (this.#state !== "advertising") return false;
+    const connection = adoptConnection(session);
+    this.dispatchEvent(new LP2PConnectionEvent("connection", { connection }));
+    return true;
   }
 
   get onconnection(): ((this: EventTarget, ev: LP2PConnectionEvent) => unknown) | null {

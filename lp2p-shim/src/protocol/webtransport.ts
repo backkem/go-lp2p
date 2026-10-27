@@ -1,36 +1,33 @@
-// WebTransport sessions on the wire, pooled on the LP2P session's
-// connection. The API objects (../api/quictransport.ts) drive these.
+// WebTransport sessions on the wire, as the spec's OSP binding carries them
+// on the QUIC connection of the LP2P session ("WebTransport extension").
+// The API objects (../api/quictransport.ts) drive these.
 //
-// The LP2P spec's binding ("WebTransport extension") dials a separate QUIC
-// connection with ALPN "q2q" per session, on which QUIC streams and
-// datagrams are the WebTransport streams and datagrams. The shim cannot do
-// that: "q2q" has no wire format, a requester is not advertising and so
-// cannot be dialed by the receiver, and a fresh connection would need
-// pairing again (or a binding to the session the spec doesn't define). So,
-// like go-lp2p's pooled WebTransport, a session shares the connection:
-//
-// - Session stream: a transport stream whose first message is
+// - Control stream: a bidirectional stream whose first message is
 //   data-transport-start-request (1201: request-id, exchange-id). The peer
-//   answers with data-transport-start-response (1202) once its page takes
-//   the session. Either side ends the session with data-transport-close
-//   (1205: code, reason) and closes the stream; closing the stream without
-//   1205 is an abrupt close. The exchange-id is even when the requester
-//   opens the session and odd when the receiver does.
-// - WebTransport stream: a transport stream whose first message is
-//   data-transport-stream-request (1203: request-id, exchange-id,
-//   unidirectional). The peer answers with data-transport-stream-response
-//   (1204) on it; the opener does not wait for that. After the header, each
-//   message is one stream frame: a tag byte, then DATA bytes, FIN, RESET
-//   (varint code) or STOP_SENDING (varint code). Over QUIC these are the
-//   stream's own bytes, FIN bit, RESET_STREAM and STOP_SENDING; the shim's
-//   transport streams are message streams with only a full close, so it
-//   frames them. The transport stream closes once both directions are done.
+//   answers data-transport-start-response (1202) once its user agent
+//   accepts or refuses the session; a refusal ends the stream. Either side
+//   closes the session with data-transport-close (1205: code, reason) and
+//   then ends the stream; ending it without 1205 closes with code 0 and an
+//   empty reason. data-transport-drain (1206) asks the peer to wind down.
+//   The client uses even exchange-ids, the server odd ones. Sessions are
+//   always pooled; the binding's dedicated "q2q" connections (optional in
+//   the spec) are not implemented.
+// - WebTransport stream: a stream of the same direction whose first message
+//   is data-transport-stream (1203: exchange-id). No response; the stream's
+//   data follows. The direction comes from the transport stream itself, as
+//   from a QUIC stream ID. After the header each message is one frame: a tag
+//   byte, then DATA bytes, FIN, RESET (varint code) or STOP_SENDING (varint
+//   code), standing in for QUIC's own stream bytes, FIN bit, RESET_STREAM
+//   and STOP_SENDING, which the shim's message streams don't have. Codes
+//   from 2^32 are the binding's: session-gone (2^32) when the session is
+//   closed or unknown.
 // - Datagram: a connection datagram holding varint(exchange-id) and the
-//   payload, like HTTP/3 datagrams (RFC 9297) carry a quarter stream ID.
+//   payload, like the binding's QUIC DATAGRAM frames.
 
 import { decodeVarint, encodeVarint } from "../codec/varint.ts";
 import type { TransportStream } from "../transport/types.ts";
 import { Result, TypeKey, decodeMessage, encodeMessage, type Message } from "./messages.ts";
+import { webTransportExporterContext } from "./identity.ts";
 
 /** Stream frame tags after the 1203 header. */
 export const StreamFrame = {
@@ -40,13 +37,18 @@ export const StreamFrame = {
   StopSending: 3,
 } as const;
 
+/** QUIC stream error code: the stream's session is closed or unknown. Codes from 2^32 are reserved. */
+export const SESSION_GONE = 2 ** 32;
+/** How long a stream for a session that is not open yet is held. */
+const HOLD_MS = 2000;
+
 /** What happens on a WebTransport stream, in order. */
 export interface StreamSink {
   data(chunk: Uint8Array): void;
   fin(): void;
   reset(code: number): void;
   stopSending(code: number): void;
-  /** The stream ended without FIN or RESET: the peer refused it, or the session or connection went away. */
+  /** The stream ended without a stream error code: its session went away, or the connection did. */
   abort(reason: string): void;
 }
 
@@ -68,20 +70,16 @@ export class WTStream {
 
   private sendDone: boolean;
   private recvDone: boolean;
-  private awaitingResponse: boolean;
   private sink: StreamSink | null = null;
   private readonly held: ((s: StreamSink) => void)[] = [];
   private readonly stream: TransportStream;
-  private readonly requestId: number;
 
-  constructor(stream: TransportStream, unidirectional: boolean, outgoing: boolean, requestId: number) {
+  constructor(stream: TransportStream, unidirectional: boolean, outgoing: boolean) {
     this.stream = stream;
     this.unidirectional = unidirectional;
     this.outgoing = outgoing;
-    this.requestId = requestId;
     this.sendDone = unidirectional && !outgoing;
     this.recvDone = unidirectional && outgoing;
-    this.awaitingResponse = outgoing;
     stream.onmessage = (b) => this.receive(b);
     stream.onclose = () => this.closedUnderneath();
   }
@@ -90,15 +88,6 @@ export class WTStream {
   attach(sink: StreamSink): void {
     this.sink = sink;
     for (const ev of this.held.splice(0)) ev(sink);
-  }
-
-  /** Acceptor only: answers the 1203. */
-  respond(result: number): void {
-    this.stream.send(encodeMessage({ type: TypeKey.DataTransportStreamResponse, requestId: this.requestId, result }));
-    if (result !== Result.Success) {
-      this.sendDone = this.recvDone = true;
-      this.stream.close();
-    }
   }
 
   get sending(): boolean {
@@ -132,11 +121,28 @@ export class WTStream {
     this.maybeClose();
   }
 
-  /** The session ended: drop the stream, telling the sink why. */
-  abort(reason: string): void {
-    if (this.sendDone && this.recvDone) return;
+  /**
+   * Refuses a stream nobody takes: STOP_SENDING and, for a bidirectional
+   * stream, RESET_STREAM, with code (session-gone).
+   */
+  refuse(code: number): void {
+    if (!this.stream.closed) {
+      this.stream.send(frame(StreamFrame.StopSending, encodeVarint(code)));
+      if (!this.unidirectional) this.stream.send(frame(StreamFrame.Reset, encodeVarint(code)));
+      this.stream.close();
+    }
     this.sendDone = this.recvDone = true;
-    this.stream.close();
+  }
+
+  /** The session closed: reset and stop the stream with session-gone, and tell the sink. */
+  sessionGone(reason: string): void {
+    if (this.sendDone && this.recvDone) return;
+    if (!this.stream.closed) {
+      if (!this.recvDone) this.stream.send(frame(StreamFrame.StopSending, encodeVarint(SESSION_GONE)));
+      if (!this.sendDone) this.stream.send(frame(StreamFrame.Reset, encodeVarint(SESSION_GONE)));
+      this.stream.close();
+    }
+    this.sendDone = this.recvDone = true;
     this.emit((s) => s.abort(reason));
     this.onfinished?.();
   }
@@ -147,19 +153,6 @@ export class WTStream {
   }
 
   private receive(b: Uint8Array): void {
-    if (this.awaitingResponse) {
-      this.awaitingResponse = false;
-      let m: Message | null = null;
-      try {
-        m = decodeMessage(b);
-      } catch {
-        // handled below
-      }
-      if (m?.type !== TypeKey.DataTransportStreamResponse || m.requestId !== this.requestId || m.result !== Result.Success) {
-        this.abort("the peer refused the stream");
-      }
-      return;
-    }
     const tag = b[0];
     switch (tag) {
       case StreamFrame.Data:
@@ -177,14 +170,22 @@ export class WTStream {
         if (this.recvDone) return;
         this.recvDone = true;
         const [code] = decodeVarint(b, 1);
-        this.emit((s) => s.reset(code));
+        // Codes from 2^32 are the binding's: reported without a stream error code.
+        if (code >= SESSION_GONE) this.emit((s) => s.abort("the session is gone"));
+        else this.emit((s) => s.reset(code));
         this.maybeClose();
         break;
       }
       case StreamFrame.StopSending: {
         if (this.sendDone) return;
         const [code] = decodeVarint(b, 1);
-        this.emit((s) => s.stopSending(code));
+        if (code >= SESSION_GONE) {
+          this.sendDone = true;
+          this.emit((s) => s.abort("the session is gone"));
+          this.maybeClose();
+        } else {
+          this.emit((s) => s.stopSending(code));
+        }
         break;
       }
     }
@@ -213,15 +214,22 @@ export interface CloseInfo {
 export interface WTHost {
   readonly maxDatagramSize: number;
   readonly datagramsReliable: boolean;
-  openStream(): TransportStream;
+  /** True once the underlying connection is closed. */
+  readonly connectionClosed: boolean;
+  openStream(unidirectional: boolean): TransportStream;
   sendDatagram(d: Uint8Array): void;
   requestId(): number;
   forgetTransport(exchangeId: number): void;
+  exportKeyingMaterial(label: string, context: Uint8Array, length: number): Promise<Uint8Array>;
 }
 
+/**
+ * "connecting": opened here, waiting for 1202. "pending": opened by the
+ * peer, waiting for this user agent to accept or refuse.
+ */
 export type WTState = "connecting" | "pending" | "open" | "closed";
 
-/** One WebTransport session: a session stream that began with 1201. */
+/** One WebTransport session: a control stream that began with 1201. */
 export class WTSession {
   readonly exchangeId: number;
   readonly outgoing: boolean;
@@ -232,7 +240,9 @@ export class WTSession {
   datagramsReceived = 0;
   /** Outgoing: the peer accepted. */
   onready: (() => void) | null = null;
-  /** Called once: info is null for an abrupt close (the stream or the connection went away). */
+  /** The peer sent data-transport-drain. */
+  ondrain: (() => void) | null = null;
+  /** Called once: info is null for an abrupt close (refused, or the connection went away). */
   onclose: ((info: CloseInfo | null, why: string) => void) | null = null;
 
   private readonly host: WTHost;
@@ -240,10 +250,14 @@ export class WTSession {
   private readonly requestIdValue: number;
   private readonly streams = new Set<WTStream>();
   private readonly heldStreams: WTStream[] = [];
+  /** Incoming streams that arrived while this side was still waiting for 1202. */
+  private readonly early: WTStream[] = [];
+  private earlyTimer: ReturnType<typeof setTimeout> | null = null;
   private streamHandler: ((s: WTStream) => void) | null = null;
   private readonly heldDatagrams: Uint8Array[] = [];
   private datagramHandler: ((d: Uint8Array) => void) | null = null;
   private readonly prefix: Uint8Array;
+  private peerClose: CloseInfo | null = null;
 
   constructor(host: WTHost, exchangeId: number, control: TransportStream, outgoing: boolean, requestId: number) {
     this.host = host;
@@ -254,7 +268,7 @@ export class WTSession {
     this.state = outgoing ? "connecting" : "pending";
     this.prefix = encodeVarint(exchangeId);
     control.onmessage = (b) => this.receiveControl(b);
-    control.onclose = () => this.teardown(null, "session stream closed");
+    control.onclose = () => this.controlEnded();
     if (outgoing) {
       control.send(encodeMessage({ type: TypeKey.DataTransportStartRequest, requestId, exchangeId }));
     }
@@ -280,37 +294,49 @@ export class WTSession {
     while (fn && this.heldDatagrams.length > 0) fn(this.heldDatagrams.shift() as Uint8Array);
   }
 
-  /** Incoming, pending: the local page took the session. */
+  /** Incoming, pending: this user agent accepts the session. */
   accept(): void {
     if (this.state !== "pending") return;
     this.state = "open";
     this.control.send(
       encodeMessage({ type: TypeKey.DataTransportStartResponse, requestId: this.requestIdValue, result: Result.Success }),
     );
-    for (const s of this.streams) s.respond(Result.Success);
+  }
+
+  /** Incoming, pending: refuses the session (permanent-error, then FIN). */
+  refuse(): void {
+    if (this.state !== "pending") return;
+    this.control.send(
+      encodeMessage({ type: TypeKey.DataTransportStartResponse, requestId: this.requestIdValue, result: Result.PermanentError }),
+    );
+    this.teardown(null, "refused");
   }
 
   openStream(unidirectional: boolean): WTStream {
     if (this.state !== "open") throw new DOMException("session is not open", "InvalidStateError");
-    const t = this.host.openStream();
-    const requestId = this.host.requestId();
-    t.send(
-      encodeMessage({ type: TypeKey.DataTransportStreamRequest, requestId, exchangeId: this.exchangeId, unidirectional }),
-    );
-    const s = new WTStream(t, unidirectional, true, requestId);
+    const t = this.host.openStream(unidirectional);
+    t.send(encodeMessage({ type: TypeKey.DataTransportStream, exchangeId: this.exchangeId }));
+    const s = new WTStream(t, unidirectional, true);
     this.track(s);
     return s;
   }
 
   /** From the session layer: the peer opened a stream for this session. */
   addIncomingStream(s: WTStream): void {
-    if (this.state === "closed") {
-      s.respond(Result.PermanentError);
+    if (this.state === "connecting") {
+      // The accepting agent may open streams right after its 1202, which
+      // can overtake it: hold them for a short time.
+      this.early.push(s);
+      this.earlyTimer ??= setTimeout(() => {
+        for (const e of this.early.splice(0)) e.refuse(SESSION_GONE);
+      }, HOLD_MS);
+      return;
+    }
+    if (this.state !== "open") {
+      s.refuse(SESSION_GONE);
       return;
     }
     this.track(s);
-    // Answered at once if open; a pending session answers on accept().
-    if (this.state === "open" || this.state === "connecting") s.respond(Result.Success);
     if (this.streamHandler) this.streamHandler(s);
     else this.heldStreams.push(s);
   }
@@ -338,18 +364,33 @@ export class WTSession {
     if (this.heldDatagrams.length > 64) this.heldDatagrams.shift();
   }
 
+  /** Sends data-transport-drain: asks the peer to finish and close. */
+  drain(): void {
+    if (this.state === "open") this.control.send(encodeMessage({ type: TypeKey.DataTransportDrain }));
+  }
+
+  /** Keying material that only this session yields (spec "export keying material"). */
+  exportKeyingMaterial(label: Uint8Array, context: Uint8Array, length: number): Promise<Uint8Array> {
+    return this.host.exportKeyingMaterial(
+      "EXPORTER-WebTransport",
+      webTransportExporterContext(this.exchangeId, label, context),
+      length,
+    );
+  }
+
   /**
-   * Closes the session. When open, tells the peer code and reason (1205);
-   * otherwise (connecting, or pending and refused) just drops it.
+   * Closes the session. When open, tells the peer code and reason (1205)
+   * and ends the control stream; when connecting, abandons it; when
+   * pending, refuses it.
    */
   close(code = 0, reason = ""): void {
     if (this.state === "closed") return;
+    if (this.state === "pending") {
+      this.refuse();
+      return;
+    }
     if (this.state === "open") {
       this.control.send(encodeMessage({ type: TypeKey.DataTransportClose, code, reason }));
-    } else if (this.state === "pending") {
-      this.control.send(
-        encodeMessage({ type: TypeKey.DataTransportStartResponse, requestId: this.requestIdValue, result: Result.PermanentError }),
-      );
     }
     this.teardown({ code, reason }, "closed locally");
   }
@@ -388,18 +429,37 @@ export class WTSession {
       }
       this.state = "open";
       this.onready?.();
-    } else if (m.type === TypeKey.DataTransportClose) {
-      this.teardown({ code: m.code, reason: m.reason }, "closed by the peer");
+      if (this.earlyTimer) clearTimeout(this.earlyTimer);
+      for (const s of this.early.splice(0)) this.addIncomingStream(s);
+    } else if (m.type === TypeKey.DataTransportClose && this.state === "open") {
+      this.peerClose = { code: m.code, reason: m.reason };
+      this.teardown(this.peerClose, "closed by the peer");
+    } else if (m.type === TypeKey.DataTransportDrain && this.state === "open") {
+      this.ondrain?.();
     }
+  }
+
+  /** The control stream ended: FIN without 1205 is a clean close with code 0; a lost connection is abrupt. */
+  private controlEnded(): void {
+    if (this.state === "closed") return;
+    if (this.state === "open" && !this.host.connectionClosed) {
+      this.teardown({ code: 0, reason: "" }, "closed by the peer");
+      return;
+    }
+    const why =
+      this.state === "connecting" ? "the peer refused the session" : this.state === "pending" ? "the peer abandoned the session" : "connection closed";
+    this.teardown(null, why);
   }
 
   private teardown(info: CloseInfo | null, why: string): void {
     if (this.state === "closed") return;
     this.state = "closed";
+    if (this.earlyTimer) clearTimeout(this.earlyTimer);
+    for (const s of this.early.splice(0)) s.refuse(SESSION_GONE);
     this.control.close();
-    for (const s of [...this.streams]) s.abort(why);
+    for (const s of [...this.streams]) s.sessionGone(why);
     this.streams.clear();
-    this.heldStreams.length = 0;
+    for (const s of this.heldStreams.splice(0)) s.refuse(SESSION_GONE);
     this.heldDatagrams.length = 0;
     this.host.forgetTransport(this.exchangeId);
     this.onclose?.(info, why);

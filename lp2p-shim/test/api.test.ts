@@ -30,8 +30,8 @@ function pages(opts: { receiver?: AutoUIOptions; requester?: AutoUIOptions; pair
   const [ua, ub] = pairedUIs(opts.receiver, opts.requester);
   const pairing = opts.pairing ?? "pin";
   return {
-    receiverPage: { transport: ta, ui: ua, pairing, origin: "https://receiver.example" },
-    requesterPage: { transport: tb, ui: ub, pairing, origin: "https://requester.example" },
+    receiverPage: { transport: ta, ui: ua, pairing, origin: "https://app.example" },
+    requesterPage: { transport: tb, ui: ub, pairing, origin: "https://app.example" },
     transports: [ta, tb],
   };
 }
@@ -205,7 +205,8 @@ test("api: permission, picker and pairing failures reject like go-lp2p", async (
     receiver.onconnection = () => (fired = true);
     await receiver.start();
     configure(p.requesterPage);
-    await assert.rejects(new LP2PRequest().start(), { name: "NotAllowedError", message: /declined/ });
+    // The spec makes every failure the same NotAllowedError.
+    await assert.rejects(new LP2PRequest().start(), { name: "NotAllowedError", message: /refused/ });
     assert.equal(fired, false);
     closeAll(...p.transports);
   }

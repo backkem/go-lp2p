@@ -2,47 +2,68 @@
 // connection. It knows the message formats and the order they come in, but
 // nothing about users, permissions or the web API.
 //
+// Roles: the client is the side that established the connection (the
+// requester), the server the side that accepted it (the receiver). As in the
+// spec's OSP binding, one connection carries one LP2P session.
+//
 // Streams:
-// - The requester (the side that connected) opens the first stream as the
-//   control stream. It carries agent-info and the authentication messages.
-// - Every other stream is a data channel. Its first message is a
-//   data-channel-open-request (1101); the peer answers with a
-//   data-channel-open-response (1102) on the same stream, after which both
-//   sides send data-frames (24). Closing the stream closes the channel. This
-//   is how go-lp2p maps LP2P data channels onto QUIC streams.
-// - Streams that begin with 1201 or 1203 are WebTransport session and
-//   stream streams, and connection datagrams belong to WebTransport
-//   sessions; see webtransport.ts.
+// - The client opens the first stream as the control stream. It carries the
+//   shim's TLS stand-in (identity.ts), agent-info and the authentication
+//   messages. The server recognizes it by its first message.
+// - The client opens a second stream for lp2p-session-request (1110), with
+//   the requesting origin, right after the handshake. The server answers
+//   lp2p-session-response (1111) on it once it accepts or refuses.
+// - Every other stream is a data channel or WebTransport. Data channels
+//   start with data-channel-open-request (1101); the peer answers
+//   data-channel-open-response (1102) on the same stream, then both sides
+//   send data-frames (24). Closing the stream closes the channel. Streams
+//   that begin with 1201 or 1203 belong to WebTransport sessions, and
+//   connection datagrams too; see webtransport.ts. None of them may come
+//   before the session is accepted: the server closes them, the client
+//   holds them until the 1111 arrives (it may come later, on another stream).
 
 import type { TransportConnection, TransportStream } from "../transport/types.ts";
 import { decodeVarint } from "../codec/varint.ts";
 import { DataEncoding, Result, TypeKey, decodeMessage, encodeMessage, type AgentInfo, type Message } from "./messages.ts";
-import { WTSession, WTStream, type WTHost } from "./webtransport.ts";
+import { exportKeyingMaterial, type HandshakeResult } from "./identity.ts";
+import { SESSION_GONE, WTSession, WTStream, type WTHost } from "./webtransport.ts";
 
-export type Role = "requester" | "receiver";
+export type Role = "client" | "server";
 
 export class ProtocolError extends Error {
   override name = "ProtocolError";
 }
 
-/** The control stream, with a queue of messages the caller has not consumed yet. */
+const CONTROL_TYPES: readonly number[] = [
+  TypeKey.ShimHello,
+  TypeKey.AgentInfoRequest,
+  TypeKey.AgentInfoResponse,
+  TypeKey.AuthCapabilities,
+  TypeKey.AuthSpake2Handshake,
+];
+
+type Waiter = { types: readonly number[]; resolve: (m: Message) => void; reject: (e: Error) => void };
+
+/** The control stream, with a queue of messages no caller has taken yet. */
 export class ControlChannel {
   private readonly queue: Message[] = [];
-  private waiter: { types: readonly number[]; resolve: (m: Message) => void; reject: (e: Error) => void } | null = null;
+  private readonly waiters: Waiter[] = [];
   private closedWith: Error | null = null;
   private info: AgentInfo | null = null;
   private readonly unanswered: number[] = [];
 
   private readonly stream: TransportStream;
 
-  constructor(stream: TransportStream) {
+  /** first is a message already read from the stream, handled before any that follow. */
+  constructor(stream: TransportStream, first?: Uint8Array) {
     this.stream = stream;
+    if (first) this.feed(first);
     stream.onmessage = (b) => this.feed(b);
     stream.onclose = () => this.fail(new ProtocolError("control stream closed"));
   }
 
   send(m: Message): void {
-    this.stream.send(encodeMessage(m));
+    if (!this.stream.closed) this.stream.send(encodeMessage(m));
   }
 
   /** What to answer agent-info-request with. Requests that came earlier are answered now. */
@@ -53,22 +74,18 @@ export class ControlChannel {
     }
   }
 
-  /** Resolves with the next message of one of types; earlier messages of other types are dropped. */
+  /**
+   * Resolves with the oldest message of one of types, now or when it
+   * arrives. Messages of other types stay queued for other callers.
+   */
   next<T extends Message["type"]>(types: readonly T[], signal?: AbortSignal): Promise<Extract<Message, { type: T }>> {
     type R = Extract<Message, { type: T }>;
-    while (this.queue.length > 0) {
-      const m = this.queue.shift() as Message;
-      if ((types as readonly number[]).includes(m.type)) return Promise.resolve(m as R);
-    }
+    const i = this.queue.findIndex((m) => (types as readonly number[]).includes(m.type));
+    if (i >= 0) return Promise.resolve(this.queue.splice(i, 1)[0] as R);
     if (this.closedWith) return Promise.reject(this.closedWith);
-    if (this.waiter) return Promise.reject(new Error("ControlChannel.next: already waiting"));
+    if (signal?.aborted) return Promise.reject(signal.reason);
     return new Promise<R>((resolve, reject) => {
-      const onAbort = (): void => {
-        this.waiter = null;
-        reject(signal?.reason);
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.waiter = {
+      const w: Waiter = {
         types,
         resolve: (m) => {
           signal?.removeEventListener("abort", onAbort);
@@ -79,6 +96,13 @@ export class ControlChannel {
           reject(e);
         },
       };
+      const onAbort = (): void => {
+        const j = this.waiters.indexOf(w);
+        if (j >= 0) this.waiters.splice(j, 1);
+        reject(signal?.reason);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      this.waiters.push(w);
     });
   }
 
@@ -99,22 +123,24 @@ export class ControlChannel {
       else this.unanswered.push(m.requestId);
       return;
     }
-    if (this.waiter && this.waiter.types.includes(m.type)) {
-      const w = this.waiter;
-      this.waiter = null;
-      w.resolve(m);
-    } else {
-      this.queue.push(m);
-    }
+    const i = this.waiters.findIndex((w) => w.types.includes(m.type));
+    if (i >= 0) (this.waiters.splice(i, 1)[0] as Waiter).resolve(m);
+    else this.queue.push(m);
   }
 
   private fail(err: Error): void {
     if (this.closedWith) return;
     this.closedWith = err;
-    const w = this.waiter;
-    this.waiter = null;
-    w?.reject(err);
+    for (const w of this.waiters.splice(0)) w.reject(err);
   }
+}
+
+/** The session stream, server side: the client's lp2p-session-request and how to answer it. */
+export interface SessionRequest {
+  /** The requesting origin hint, as sent. */
+  requestingOrigin: string;
+  /** Sends lp2p-session-response and ends the stream. */
+  respond(result: number): void;
 }
 
 export type ChannelState = "connecting" | "open" | "closed";
@@ -210,10 +236,12 @@ export class DataChannelEndpoint {
 export class Session implements WTHost {
   readonly role: Role;
   remoteInfo: AgentInfo | null = null;
+  /** Set by the handshake: the peer's proven identity and the exporter secret. */
+  tls: HandshakeResult | null = null;
   private control: ControlChannel | null = null;
   private readonly controlWaiters: ((c: ControlChannel) => void)[] = [];
   private readonly usedIds = new Set<number>();
-  private readonly channelIdParity: number;
+  private readonly parity: number;
   private nextRequestId = 1;
   private readonly incoming: DataChannelEndpoint[] = [];
   private channelHandler: ((ep: DataChannelEndpoint) => void) | null = null;
@@ -224,20 +252,28 @@ export class Session implements WTHost {
   private nextExchangeId: number;
   private readonly incomingTransports: WTSession[] = [];
   private transportHandler: ((t: WTSession) => void) | null = null;
+  private sessionRequestHandler: ((r: SessionRequest) => void) | null = null;
+  private heldSessionRequest: SessionRequest | null = null;
+  private sawSessionRequest = false;
+  private isAccepted = false;
+  /** Client: streams the server opened before its 1111 arrived. */
+  private readonly early: [TransportStream, Uint8Array][] = [];
 
   readonly connection: TransportConnection;
 
   constructor(connection: TransportConnection, role: Role) {
     this.connection = connection;
     this.role = role;
-    // The requester (QUIC client) allocates even IDs, the receiver odd ones.
-    this.channelIdParity = role === "requester" ? 0 : 1;
-    this.nextExchangeId = this.channelIdParity;
-    if (role === "requester") this.setControl(new ControlChannel(connection.openStream()));
+    // The client allocates even IDs, the server odd ones: data channel IDs
+    // and exchange-ids alike.
+    this.parity = role === "client" ? 0 : 1;
+    this.nextExchangeId = this.parity;
+    if (role === "client") this.setControl(new ControlChannel(connection.openStream()));
     connection.onstream = (s) => this.classify(s);
     connection.ondatagram = (d) => this.receiveDatagram(d);
     connection.onclose = (reason) => {
       this.closeReason = reason;
+      this.early.length = 0;
       this.closeHandler?.(reason);
       for (const fn of this.closeListeners.splice(0)) fn(reason);
     };
@@ -245,6 +281,11 @@ export class Session implements WTHost {
 
   get closed(): boolean {
     return this.closeReason !== null;
+  }
+
+  /** True once the server sent, or the client received, a success lp2p-session-response. */
+  get accepted(): boolean {
+    return this.isAccepted;
   }
 
   set onclose(fn: ((reason: string) => void) | null) {
@@ -270,6 +311,16 @@ export class Session implements WTHost {
     while (fn && this.incomingTransports.length > 0) fn(this.incomingTransports.shift() as WTSession);
   }
 
+  /** Server: the client's lp2p-session-request. One that arrives while this is null is held. */
+  set onsessionrequest(fn: ((r: SessionRequest) => void) | null) {
+    this.sessionRequestHandler = fn;
+    const held = this.heldSessionRequest;
+    if (fn && held) {
+      this.heldSessionRequest = null;
+      fn(held);
+    }
+  }
+
   requestId(): number {
     return this.nextRequestId++;
   }
@@ -282,8 +333,12 @@ export class Session implements WTHost {
     return this.connection.datagramsReliable;
   }
 
-  openStream(): TransportStream {
-    return this.connection.openStream();
+  get connectionClosed(): boolean {
+    return this.closed || this.connection.closed;
+  }
+
+  openStream(unidirectional: boolean): TransportStream {
+    return this.connection.openStream({ unidirectional });
   }
 
   sendDatagram(d: Uint8Array): void {
@@ -296,9 +351,16 @@ export class Session implements WTHost {
     if (i >= 0) this.incomingTransports.splice(i, 1);
   }
 
-  /** Opens a WebTransport session (1201). It is "connecting" until the peer's page takes it. */
+  /** Keying material for one WebTransport session (exporter of the connection's handshake). */
+  exportKeyingMaterial(label: string, context: Uint8Array, length: number): Promise<Uint8Array> {
+    if (!this.tls) return Promise.reject(new DOMException("no handshake", "InvalidStateError"));
+    return exportKeyingMaterial(this.tls, label, context, length);
+  }
+
+  /** Opens a WebTransport session (1201). It is "connecting" until the peer's user agent accepts it. */
   openTransport(): WTSession {
     if (this.closed) throw new DOMException("session is closed", "InvalidStateError");
+    if (!this.isAccepted) throw new DOMException("session is not accepted yet", "InvalidStateError");
     const id = this.nextExchangeId;
     this.nextExchangeId += 2;
     const t = new WTSession(this, id, this.connection.openStream(), true, this.requestId());
@@ -314,10 +376,11 @@ export class Session implements WTHost {
     } catch {
       return;
     }
+    // Datagrams for a session that is not open are dropped.
     this.transports.get(id)?.receiveDatagram(d.subarray(n));
   }
 
-  /** The control stream, once the requester has opened it. */
+  /** The control stream, once the client has opened it. */
   controlChannel(signal?: AbortSignal): Promise<ControlChannel> {
     if (this.control) return Promise.resolve(this.control);
     return new Promise((resolve, reject) => {
@@ -327,7 +390,7 @@ export class Session implements WTHost {
   }
 
   /** Exchanges agent-info: answers the peer's request and asks for the peer's. */
-  async handshake(local: AgentInfo, signal?: AbortSignal): Promise<AgentInfo> {
+  async exchangeInfo(local: AgentInfo, signal?: AbortSignal): Promise<AgentInfo> {
     const control = await this.controlChannel(signal);
     control.localInfo = local;
     control.send({ type: TypeKey.AgentInfoRequest, requestId: this.requestId() });
@@ -337,19 +400,46 @@ export class Session implements WTHost {
   }
 
   /**
+   * Client: sends lp2p-session-request with origin on a new stream. The
+   * promise resolves with the server's result, or rejects if the stream or
+   * the connection closes first.
+   */
+  requestSession(origin: string): Promise<number> {
+    const stream = this.connection.openStream();
+    const requestId = this.requestId();
+    stream.send(encodeMessage({ type: TypeKey.SessionRequest, requestId, requestingOrigin: origin }));
+    return new Promise<number>((resolve, reject) => {
+      stream.onmessage = (b) => {
+        let m: Message;
+        try {
+          m = decodeMessage(b);
+        } catch {
+          return;
+        }
+        if (m.type !== TypeKey.SessionResponse || m.requestId !== requestId) return;
+        if (m.result === Result.Success) this.markAccepted();
+        resolve(m.result);
+        stream.onclose = null;
+        stream.close(); // both agents end their side of the stream
+      };
+      stream.onclose = () => reject(new ProtocolError("session stream closed without a response"));
+    });
+  }
+
+  /**
    * Allocates the lowest free channel ID of the local parity, or validates
    * and reserves a requested one, which must be free and of that parity.
    */
   reserveChannelId(requested?: number): number {
     if (requested !== undefined) {
-      if (requested % 2 !== this.channelIdParity) {
+      if (requested % 2 !== this.parity) {
         throw new DOMException(`data channel id ${requested} has the peer's parity`, "OperationError");
       }
       if (this.usedIds.has(requested)) throw new DOMException(`data channel id ${requested} is in use`, "OperationError");
       this.usedIds.add(requested);
       return requested;
     }
-    let id = this.channelIdParity;
+    let id = this.parity;
     while (this.usedIds.has(id)) id += 2;
     if (id > 65534) throw new DOMException("out of data channel ids", "OperationError");
     this.usedIds.add(id);
@@ -386,38 +476,87 @@ export class Session implements WTHost {
     for (const w of this.controlWaiters.splice(0)) w(c);
   }
 
-  /** Looks at a new stream's first message to tell the control stream from data channels. */
+  private markAccepted(): void {
+    if (this.isAccepted) return;
+    this.isAccepted = true;
+    for (const [stream, first] of this.early.splice(0)) this.route(stream, first);
+  }
+
+  /** Looks at a new stream's first message to tell what it is. */
   private classify(stream: TransportStream): void {
     stream.onmessage = (b) => {
-      let m: Message;
-      try {
-        m = decodeMessage(b);
-      } catch {
-        stream.close();
-        return;
-      }
-      if (m.type === TypeKey.DataChannelOpenRequest) {
-        this.acceptDataChannel(stream, m);
-      } else if (m.type === TypeKey.DataTransportStartRequest) {
-        this.acceptTransport(stream, m.requestId, m.exchangeId);
-      } else if (m.type === TypeKey.DataTransportStreamRequest) {
-        const ws = new WTStream(stream, m.unidirectional, false, m.requestId);
-        const t = this.transports.get(m.exchangeId);
-        if (t) t.addIncomingStream(ws);
-        else ws.respond(Result.PermanentError);
-      } else if (!this.control && this.role === "receiver") {
-        const c = new ControlChannel(stream);
-        this.setControl(c);
-        c.feed(b);
-      } else {
-        stream.close();
-      }
+      stream.onmessage = null;
+      this.route(stream, b);
     };
   }
 
+  private route(stream: TransportStream, b: Uint8Array): void {
+    let m: Message;
+    try {
+      m = decodeMessage(b);
+    } catch {
+      stream.close();
+      return;
+    }
+    if (this.role === "server" && !this.control && CONTROL_TYPES.includes(m.type)) {
+      this.setControl(new ControlChannel(stream, b));
+      return;
+    }
+    if (m.type === TypeKey.SessionRequest && this.role === "server") {
+      this.receiveSessionRequest(stream, m.requestId, m.requestingOrigin);
+      return;
+    }
+    const extension =
+      m.type === TypeKey.DataChannelOpenRequest ||
+      m.type === TypeKey.DataTransportStartRequest ||
+      m.type === TypeKey.DataTransportStream;
+    if (!extension) {
+      stream.close();
+      return;
+    }
+    if (!this.isAccepted) {
+      // No extension messages before the success lp2p-session-response.
+      if (this.role === "client") this.early.push([stream, b]);
+      else stream.close();
+      return;
+    }
+    if (m.type === TypeKey.DataChannelOpenRequest) {
+      this.acceptDataChannel(stream, m);
+    } else if (m.type === TypeKey.DataTransportStartRequest) {
+      this.acceptTransport(stream, m.requestId, m.exchangeId);
+    } else if (m.type === TypeKey.DataTransportStream) {
+      const ws = new WTStream(stream, stream.unidirectional, false);
+      const t = this.transports.get(m.exchangeId);
+      if (t) t.addIncomingStream(ws);
+      else ws.refuse(SESSION_GONE);
+    }
+  }
+
+  private receiveSessionRequest(stream: TransportStream, requestId: number, requestingOrigin: string): void {
+    if (this.sawSessionRequest) {
+      // Only one per connection: a second one closes it.
+      this.close("second lp2p-session-request");
+      return;
+    }
+    this.sawSessionRequest = true;
+    let answered = false;
+    const req: SessionRequest = {
+      requestingOrigin,
+      respond: (result) => {
+        if (answered || stream.closed) return;
+        answered = true;
+        stream.send(encodeMessage({ type: TypeKey.SessionResponse, requestId, result }));
+        if (result === Result.Success) this.markAccepted();
+        stream.close();
+      },
+    };
+    if (this.sessionRequestHandler) this.sessionRequestHandler(req);
+    else this.heldSessionRequest = req;
+  }
+
   private acceptTransport(stream: TransportStream, requestId: number, exchangeId: number): void {
-    // The peer allocates exchange-ids of its own parity.
-    if (this.transports.has(exchangeId) || exchangeId % 2 === this.channelIdParity) {
+    // The peer allocates exchange-ids of its own parity, and never reuses one.
+    if (this.transports.has(exchangeId) || exchangeId % 2 === this.parity) {
       stream.send(encodeMessage({ type: TypeKey.DataTransportStartResponse, requestId, result: Result.PermanentError }));
       stream.close();
       return;
