@@ -19,7 +19,7 @@
 import { BaseConnection, BaseStream, randomId } from "./base.ts";
 import { Rendezvous, type RendezvousOptions } from "./rendezvous.ts";
 import { BroadcastChannelSignaler, type SignalMessage, type Signaler } from "./signaling.ts";
-import type { Advertisement, Closer, DiscoveryEvent, Transport, TransportConnection, TransportStream } from "./types.ts";
+import type { Advertisement, Closer, DiscoveryEvent, StreamOptions, Transport, TransportConnection, TransportStream } from "./types.ts";
 
 export interface WebRTCTransportOptions extends RendezvousOptions {
   /** Defaults to a BroadcastChannelSignaler on channelName. */
@@ -47,6 +47,8 @@ function createDatagramChannel(pc: RTCPeerConnection): RTCDataChannel {
   return dc;
 }
 const DISCONNECT_GRACE_MS = 5000;
+const STREAM_LABEL = "lp2p-shim/stream";
+const UNI_LABEL = "lp2p-shim/uni";
 
 class ChannelStream extends BaseStream {
   private readonly pending: Uint8Array[] = [];
@@ -60,7 +62,7 @@ class ChannelStream extends BaseStream {
     conn: RTCConnection,
     received: ArrayBuffer[] = [],
   ) {
-    super(id);
+    super(id, dc.label === UNI_LABEL);
     this.dc = dc;
     this.conn = conn;
     dc.binaryType = "arraybuffer";
@@ -128,9 +130,11 @@ class RTCConnection extends BaseConnection {
     };
   }
 
-  openStream(): TransportStream {
+  openStream(options: StreamOptions = {}): TransportStream {
     if (this.closed) throw new DOMException("connection is closed", "InvalidStateError");
-    const s = this.wrap(this.pc.createDataChannel(`lp2p-shim/stream`, { ordered: true }));
+    // The label carries the direction, as a QUIC stream ID does.
+    const label = options.unidirectional ? UNI_LABEL : STREAM_LABEL;
+    const s = this.wrap(this.pc.createDataChannel(label, { ordered: true }));
     this.streams.set(s.id, s);
     return s;
   }

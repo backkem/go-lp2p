@@ -16,7 +16,15 @@
 import { BaseConnection, BaseStream, randomId } from "./base.ts";
 import { Rendezvous, type RendezvousOptions } from "./rendezvous.ts";
 import { BroadcastChannelSignaler, type SignalMessage, type Signaler } from "./signaling.ts";
-import type { Advertisement, Closer, DiscoveryEvent, Transport, TransportConnection, TransportStream } from "./types.ts";
+import type {
+  Advertisement,
+  Closer,
+  DiscoveryEvent,
+  StreamOptions,
+  Transport,
+  TransportConnection,
+  TransportStream,
+} from "./types.ts";
 
 export interface PostMessageTransportOptions extends RendezvousOptions {
   /** Defaults to a BroadcastChannelSignaler on channelName. */
@@ -36,7 +44,7 @@ interface Port {
 
 type Frame =
   | { k: "accept" }
-  | { k: "open"; s: number }
+  | { k: "open"; s: number; u?: true }
   | { k: "msg"; s: number; d: Uint8Array }
   | { k: "close"; s: number }
   | { k: "dgram"; d: Uint8Array }
@@ -45,8 +53,8 @@ type Frame =
 class PortStream extends BaseStream {
   private readonly conn: PortConnection;
 
-  constructor(id: number, conn: PortConnection) {
-    super(id);
+  constructor(id: number, conn: PortConnection, unidirectional = false) {
+    super(id, unidirectional);
     this.conn = conn;
   }
 
@@ -90,12 +98,13 @@ class PortConnection extends BaseConnection {
     this.post({ k: "dgram", d });
   }
 
-  openStream(): TransportStream {
+  openStream(options: StreamOptions = {}): TransportStream {
     if (this.closed) throw new DOMException("connection is closed", "InvalidStateError");
-    const s = new PortStream(this.nextStreamId, this);
+    const uni = Boolean(options.unidirectional);
+    const s = new PortStream(this.nextStreamId, this, uni);
     this.nextStreamId += 2;
     this.streams.set(s.id, s);
-    this.post({ k: "open", s: s.id });
+    this.post(uni ? { k: "open", s: s.id, u: true } : { k: "open", s: s.id });
     return s;
   }
 
@@ -115,7 +124,7 @@ class PortConnection extends BaseConnection {
   private onFrame(f: Frame): void {
     switch (f.k) {
       case "open":
-        this.accept(new PortStream(f.s, this));
+        this.accept(new PortStream(f.s, this, f.u === true));
         break;
       case "msg": {
         const s = this.streams.get(f.s);

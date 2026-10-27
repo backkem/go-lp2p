@@ -69,9 +69,11 @@ export interface TransportConnection {
 
   /**
    * Opens a stream. It is usable at once; messages sent before the peer has
-   * seen the stream are queued.
+   * seen the stream are queued. A unidirectional stream is one the opener
+   * only sends on, like a QUIC unidirectional stream: the peer learns its
+   * direction from the stream itself, not from a message on it.
    */
-  openStream(): TransportStream;
+  openStream(options?: StreamOptions): TransportStream;
 
   /**
    * Called for every stream the peer opens. Streams that arrive while this
@@ -101,9 +103,16 @@ export interface TransportConnection {
   ondatagram: ((datagram: Uint8Array) => void) | null;
 }
 
+export interface StreamOptions {
+  /** Only the opener sends. Default false. */
+  unidirectional?: boolean;
+}
+
 export interface TransportStream {
   /** Unique within its connection. */
   readonly id: number;
+  /** True for a stream only its opener sends on. The transport doesn't enforce it. */
+  readonly unidirectional: boolean;
   readonly closed: boolean;
 
   /** Sends one message. Messages arrive whole, reliably and in order. */

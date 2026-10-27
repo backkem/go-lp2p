@@ -1,7 +1,7 @@
 // Shared plumbing for transport implementations: holding messages and
 // streams until a handler is set, and idempotent closing.
 
-import type { TransportConnection, TransportStream } from "./types.ts";
+import type { StreamOptions, TransportConnection, TransportStream } from "./types.ts";
 
 /** A held queue of items for a nullable callback. */
 class Inbox<T> {
@@ -40,9 +40,11 @@ export abstract class BaseStream implements TransportStream {
   private isClosed = false;
 
   readonly id: number;
+  readonly unidirectional: boolean;
 
-  constructor(id: number) {
+  constructor(id: number, unidirectional = false) {
     this.id = id;
+    this.unidirectional = unidirectional;
   }
 
   get closed(): boolean {
@@ -165,7 +167,7 @@ export abstract class BaseConnection implements TransportConnection {
     while (fn && this.heldDatagrams.length > 0) fn(this.heldDatagrams.shift() as Uint8Array);
   }
 
-  abstract openStream(): TransportStream;
+  abstract openStream(options?: StreamOptions): TransportStream;
   protected abstract doClose(reason: string): void;
 
   sendDatagram(datagram: Uint8Array): void {

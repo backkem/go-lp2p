@@ -105,3 +105,51 @@ test("messages: round trip and tolerance of OSP optional fields", () => {
   assert.throws(() => decodeMessage(unhex("444da0"))); // missing fields
   assert.throws(() => decodeMessage(unhex("3fa0"))); // unknown type key 63
 });
+
+test("messages: LP2P session and WebTransport messages match the CDDL (PR 17 Appendix A)", () => {
+  const binding = new Uint8Array(32).fill(0xaa);
+  // Each vector is varint(type key) then the CBOR map, derived by hand from the CDDL.
+  const vectors: [Message, string][] = [
+    // lp2p-session-request = { request, 1: text } (type key 1110)
+    [
+      { type: TypeKey.SessionRequest, requestId: 1, requestingOrigin: "https://a.example" },
+      "4456" + "a2" + "0001" + "01" + "71" + Buffer.from("https://a.example").toString("hex"),
+    ],
+    // lp2p-session-response = { response, 1: &result } (1111), success = 1
+    [{ type: TypeKey.SessionResponse, requestId: 1, result: 1 }, "4457" + "a2" + "0001" + "0101"],
+    // data-transport-start-request = { request, 1: exchange-id, ? 2: bytes .size 32 } (1201)
+    [{ type: TypeKey.DataTransportStartRequest, requestId: 2, exchangeId: 4 }, "44b1" + "a2" + "0002" + "0104"],
+    [
+      { type: TypeKey.DataTransportStartRequest, requestId: 2, exchangeId: 2 ** 40, sessionBinding: binding },
+      "44b1" + "a3" + "0002" + "01" + "1b0000010000000000" + "02" + "5820" + "aa".repeat(32),
+    ],
+    // data-transport-start-response = { response, 1: &result } (1202), permanent-error = 102
+    [{ type: TypeKey.DataTransportStartResponse, requestId: 2, result: 102 }, "44b2" + "a2" + "0002" + "011866"],
+    // data-transport-stream = { 1: exchange-id } (1203): no request-id
+    [{ type: TypeKey.DataTransportStream, exchangeId: 4 }, "44b3" + "a1" + "0104"],
+    // data-transport-close = { 0: uint .size 4, 1: text .size (0..1024) } (1205)
+    [{ type: TypeKey.DataTransportClose, code: 7, reason: "bye" }, "44b5" + "a2" + "0007" + "0163627965"],
+    [{ type: TypeKey.DataTransportClose, code: 0xffffffff, reason: "" }, "44b5" + "a2" + "001affffffff" + "0160"],
+    // data-transport-drain = {} (1206)
+    [{ type: TypeKey.DataTransportDrain }, "44b6" + "a0"],
+  ];
+  for (const [m, wire] of vectors) {
+    assert.equal(hex(encodeMessage(m)), wire, `encode ${m.type}`);
+    assert.deepEqual(decodeMessage(unhex(wire)), m, `decode ${m.type}`);
+  }
+
+  // 1204 is reserved: no message, so an unknown type key.
+  assert.throws(() => decodeMessage(unhex("44b4" + "a1" + "0104")), /unknown type key 1204/);
+  // exchange-id = uint .lt 2^62
+  assert.throws(() => decodeMessage(unhex("44b3" + "a1" + "01" + "1b4000000000000000")));
+  // close-code is uint .size 4
+  assert.throws(() => decodeMessage(unhex("44b5" + "a2" + "00" + "1b0000000100000000" + "0160")), /close-code/);
+  assert.throws(() => encodeMessage({ type: TypeKey.DataTransportClose, code: 2 ** 32, reason: "" }), /close-code/);
+  // reason is at most 1024 bytes of UTF-8
+  const long = "é".repeat(513); // 1026 bytes
+  assert.throws(() => encodeMessage({ type: TypeKey.DataTransportClose, code: 0, reason: long }), /1024/);
+  const wireLong = "44b5a20000017904" + "02" + Buffer.from("x".repeat(1026)).toString("hex");
+  assert.throws(() => decodeMessage(unhex(wireLong)), /1024/);
+  // session-binding is exactly 32 bytes
+  assert.throws(() => decodeMessage(unhex("44b1" + "a3" + "0002" + "0104" + "02" + "5401" + "00".repeat(19))), /32 bytes/);
+});
