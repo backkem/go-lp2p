@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"time"
 
 	lp2p "github.com/backkem/go-lp2p/lp2p-api"
@@ -57,35 +56,22 @@ func NewUserBrowser(name string, script *ua.Scripted) *Browser {
 	return newBrowser(name, ua.NewCLI(os.Stdin, os.Stderr))
 }
 
+// Origin is the origin of the page open in every browser: the same web app
+// runs on all devices. By default a receiver only accepts sessions
+// requested by its own origin.
+const Origin = "https://lp2p.example"
+
 func newBrowser(name string, ui ua.UI) *Browser {
-	origin := name
-	if i := strings.Index(origin, " #"); i >= 0 {
-		origin = origin[:i] // drop the Unique suffix
-	}
 	u, err := ua.New(ua.Config{Name: name, UI: ui, PairingTimeout: 2 * time.Second})
 	if err != nil {
 		log.Fatal(err)
 	}
-	return &Browser{Name: name, UA: u, Window: lp2p.NewWindow(u, "https://"+slug(origin)+".example")}
+	return &Browser{Name: name, UA: u, Window: lp2p.NewWindow(u, Origin)}
 }
 
 // Close the browser.
 func (b *Browser) Close() { _ = b.UA.Close() }
 
-func slug(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			out = append(out, r)
-		case r >= 'A' && r <= 'Z':
-			out = append(out, r+'a'-'A')
-		default:
-			out = append(out, '-')
-		}
-	}
-	return string(out)
-}
 
 // Pair returns a script for each side of a pairing in which the simulated
 // user correctly reads the PIN from one screen and types it on the other.

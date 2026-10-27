@@ -2,6 +2,7 @@ package lp2p
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	ua "github.com/backkem/go-lp2p/lp2p-api/useragent"
@@ -11,29 +12,50 @@ import (
 type LP2PReceiverOptions struct {
 	// Nickname the device is advertised under.
 	Nickname string
+	// AllowedOrigins are URLs whose origins, in addition to the page's own
+	// origin, the receiver accepts sessions requested by. By default only
+	// same-origin sessions are delivered. An entry that doesn't parse makes
+	// the constructor fail with a TypeError; one with an opaque origin,
+	// such as a data: URL, never matches.
+	AllowedOrigins []string
 }
 
+type receiverState int
+
+const (
+	receiverInitial receiverState = iota
+	receiverAdvertising
+	receiverStopped
+)
+
 // LP2PReceiver makes the device discoverable and receives connections from
-// peers.
+// peers. It is used once: after Stop it cannot be started again.
 type LP2PReceiver struct {
-	window  *Window
-	options LP2PReceiverOptions
+	window         *Window
+	options        LP2PReceiverOptions
+	allowedOrigins []string
 
 	onConnection eventSlot[LP2PConnectionEvent]
 
 	startMu sync.Mutex // held while starting
 	mu      sync.Mutex
+	state   receiverState
 	advert  *ua.Advertisement
-	closed  bool
 	cancel  context.CancelFunc
-	// listener receives transports on the connections this receiver
-	// accepts.
-	listener *LP2PQuicTransportListener
 }
 
-// NewLP2PReceiver creates an LP2PReceiver in this window.
+// NewLP2PReceiver creates an LP2PReceiver in this window. It fails with a
+// TypeError if an entry of AllowedOrigins doesn't parse as a URL.
 func (w *Window) NewLP2PReceiver(options LP2PReceiverOptions) (*LP2PReceiver, error) {
-	return &LP2PReceiver{window: w, options: options}, nil
+	r := &LP2PReceiver{window: w, options: options}
+	for _, entry := range options.AllowedOrigins {
+		origin, err := ua.OriginOf(entry)
+		if err != nil {
+			return nil, newDOMException(TypeError, fmt.Sprintf("allowedOrigins: %q is not a URL", entry), err)
+		}
+		r.allowedOrigins = append(r.allowedOrigins, origin)
+	}
+	return r, nil
 }
 
 // OnConnection sets the onconnection event handler.
@@ -43,35 +65,42 @@ func (r *LP2PReceiver) OnConnection(cb func(LP2PConnectionEvent)) { r.onConnecti
 // advertises the device and receives connections. It blocks until the user
 // decided. Calling Start on a started receiver does nothing.
 //
-// It fails with a NotAllowedError DOMException if the user denies.
+// It fails with a NotAllowedError DOMException if the user denies or
+// advertising fails, an InvalidStateError after Stop, and an AbortError if
+// Stop is called while the user decides.
 func (r *LP2PReceiver) Start() error {
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 
 	r.mu.Lock()
-	started, closed := r.advert != nil, r.closed
+	state := r.state
 	r.mu.Unlock()
-	if closed {
-		return errClosed("LP2PReceiver")
-	}
-	if started {
+	switch state {
+	case receiverStopped:
+		return newDOMException(InvalidStateError, "LP2PReceiver is stopped", nil)
+	case receiverAdvertising:
 		return nil
 	}
 
 	u := r.window.UserAgent
-	advert, err := u.Advertise(context.Background(), r.window.Origin, r.options.Nickname)
+	advert, err := u.Advertise(context.Background(), ua.AdvertiseOptions{
+		Origin:         r.window.Origin,
+		Nickname:       r.options.Nickname,
+		AllowedOrigins: r.allowedOrigins,
+	})
 	if err != nil {
-		return toDOMException(err)
+		return newDOMException(NotAllowedError, "advertising not allowed: "+err.Error(), err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
-	if r.closed { // closed while the user was deciding
+	if r.state == receiverStopped { // stopped while the user was deciding
 		r.mu.Unlock()
 		cancel()
 		_ = advert.Close()
-		return errClosed("LP2PReceiver")
+		return newDOMException(AbortError, "LP2PReceiver stopped while starting", nil)
 	}
+	r.state = receiverAdvertising
 	r.advert, r.cancel = advert, cancel
 	r.mu.Unlock()
 
@@ -85,43 +114,29 @@ func (r *LP2PReceiver) acceptConnections(ctx context.Context, advert *ua.Adverti
 		if err != nil {
 			return
 		}
-		c := newLP2PConnection(conn, r.transportListener)
+		c := newLP2PConnection(conn)
 		r.onConnection.fire(LP2PConnectionEvent{Connection: c})
+		c.expose()
 	}
 }
 
-// Close stops advertising and receiving connections. Connections already
-// received stay open. Go-only: the proposal has no way to stop a receiver
-// yet.
-func (r *LP2PReceiver) Close() error {
+// Stop stops advertising and receiving connections. Connections already
+// delivered stay open. A stopped receiver cannot be started again.
+func (r *LP2PReceiver) Stop() {
 	r.mu.Lock()
-	if r.closed {
+	if r.state == receiverStopped {
 		r.mu.Unlock()
-		return nil
+		return
 	}
-	r.closed = true
+	r.state = receiverStopped
 	advert, cancel := r.advert, r.cancel
+	r.advert, r.cancel = nil, nil
 	r.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
 	if advert != nil {
-		return advert.Close()
+		_ = advert.Close()
 	}
-	return nil
-}
-
-func (r *LP2PReceiver) transportListener() *LP2PQuicTransportListener {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.listener
-}
-
-func (r *LP2PReceiver) registerLP2PQuicTransportListener(l *LP2PQuicTransportListener) error {
-	r.mu.Lock()
-	r.listener = l
-	r.mu.Unlock()
-	// Listening for transports implies receiving connections.
-	return r.Start()
 }

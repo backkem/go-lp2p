@@ -12,10 +12,11 @@ import (
 // NameStatus says how far a peer's display name can be trusted.
 type NameStatus = ospc.DisplayNameStatus
 
-// Dialer opens an unauthenticated OSP connection to a peer. An
-// *ospc.DiscoveredAgent is a Dialer.
+// Dialer opens an unauthenticated OSP connection to a peer, plain or with
+// the LP2P session extension. An *ospc.DiscoveredAgent is a Dialer.
 type Dialer interface {
 	Dial(ctx context.Context, transport ospc.AgentTransport, local *ospc.Agent) (*ospc.UnauthenticatedConnection, error)
+	DialSession(ctx context.Context, transport ospc.AgentTransport, local *ospc.Agent, origin string) (*ospc.UnauthenticatedConnection, error)
 }
 
 // Peer is a remote device as the user agent knows it.

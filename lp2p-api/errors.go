@@ -6,6 +6,7 @@ import (
 
 	ua "github.com/backkem/go-lp2p/lp2p-api/useragent"
 	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
+	"github.com/backkem/go-lp2p/webtransport-api"
 )
 
 // DOMException names used by this package.
@@ -17,6 +18,9 @@ const (
 	NetworkError      = "NetworkError"
 	TimeoutError      = "TimeoutError"
 	OperationError    = "OperationError"
+	// WebTransportError is the DOMException of a failed LP2PQuicTransport.
+	// Its source is always "session".
+	WebTransportError = "WebTransportError"
 	// TypeError stands for a JavaScript TypeError.
 	TypeError = "TypeError"
 )
@@ -57,6 +61,14 @@ func toDOMException(err error) error {
 		return newDOMException(NotAllowedError, "the user denied permission", err)
 	case errors.Is(err, ua.ErrAuthenticationFailed):
 		return newDOMException(NotAllowedError, "pairing with the peer failed", err)
+	case errors.Is(err, ua.ErrRefused):
+		return newDOMException(NotAllowedError, "the peer refused the session", err)
+	case errors.Is(err, ospc.ErrWebTransportRefused), errors.Is(err, ospc.ErrWebTransportUnsupported), errors.Is(err, ospc.ErrWebTransportClosed):
+		return newDOMException(WebTransportError, err.Error(), err)
+	case errors.Is(err, webtransport.ErrTransportClosed):
+		return newDOMException(InvalidStateError, err.Error(), err)
+	case errors.Is(err, webtransport.ErrNotSupported):
+		return newDOMException(NotSupportedError, err.Error(), err)
 	case errors.Is(err, ua.ErrCanceled), errors.Is(err, context.Canceled):
 		return newDOMException(AbortError, "the user canceled the request", err)
 	case errors.Is(err, context.DeadlineExceeded):

@@ -2,6 +2,7 @@ package lp2p
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -48,8 +49,13 @@ func newBrowserTimeout(t *testing.T, name string, ui *ua.Scripted, handshake tim
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = u.Close() })
-	return &browser{ui: ui, ua: u, window: NewWindow(u, "https://"+name+".test")}
+	return &browser{ui: ui, ua: u, window: NewWindow(u, testOrigin)}
 }
+
+// testOrigin is the origin of the page on every browser: the same web app
+// runs on both devices, and by default only same-origin sessions are
+// delivered.
+const testOrigin = "https://app.test"
 
 // pair returns a receiving and a requesting browser that pair with each
 // other through a PIN relay; the requester picks receiverName.
@@ -74,7 +80,7 @@ func startReceiver(t *testing.T, b *browser, nickname string) (*LP2PReceiver, <-
 	if err := r.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = r.Close() })
+	t.Cleanup(r.Stop)
 	return r, conns
 }
 
@@ -306,8 +312,13 @@ func TestPickerDismissed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Every failure of start() is a NotAllowedError; the reason is only
+	// available to Go callers.
 	_, err = req.Start()
-	wantDOMException(t, err, AbortError)
+	de := wantDOMException(t, err, NotAllowedError)
+	if !errors.Is(de, ua.ErrCanceled) {
+		t.Errorf("%v doesn't wrap ua.ErrCanceled", de)
+	}
 }
 
 func TestWrongPIN(t *testing.T) {
@@ -348,13 +359,12 @@ func TestIncomingConnectionDenied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The requester isn't told. Usually its user gives up waiting for a
-	// PIN (AbortError); if the refusal lands while ospc is still dialing,
-	// the dial only ends with the handshake timeout (TimeoutError).
+	// The receiver pairs first, then asks its user, who declines: the
+	// session is refused and the requester is told.
 	_, err = req.Start()
-	var de *DOMException
-	if !errors.As(err, &de) || (de.Name != AbortError && de.Name != TimeoutError) {
-		t.Fatalf("got %v, want an AbortError or TimeoutError", err)
+	de := wantDOMException(t, err, NotAllowedError)
+	if !errors.Is(de, ua.ErrRefused) {
+		t.Errorf("%v doesn't wrap ua.ErrRefused", de)
 	}
 	select {
 	case <-conns:
@@ -366,25 +376,43 @@ func TestIncomingConnectionDenied(t *testing.T) {
 func TestQuicTransport(t *testing.T) {
 	name := uniqueName(t, "Receiver")
 	rx, tx := pair(t, name)
-	r, err := rx.window.NewLP2PReceiver(LP2PReceiverOptions{Nickname: name})
+	_, conns := startReceiver(t, rx, name)
+	reqConn := connect(t, tx, "Requester")
+	rxConn := recv(t, conns, "connection")
+
+	// At most one listener per connection; after Close a new one.
+	listener, err := NewLP2PQuicTransportListener(rxConn, LP2PQuicTransportListenerInit{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = r.Close() })
-	listener, err := NewLP2PQuicTransportListener(r, LP2PQuicTransportListenerInit{}) // starts r
+	_, err = NewLP2PQuicTransportListener(rxConn, LP2PQuicTransportListenerInit{})
+	wantDOMException(t, err, InvalidStateError)
+	listener.Close()
+	listener, err = NewLP2PQuicTransportListener(rxConn, LP2PQuicTransportListenerInit{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Receiver: echo the first stream of the first transport.
+	// Receiver: echo the first stream of the first transport, then report
+	// how the transport was closed.
+	type closed struct {
+		info webtransport.WebTransportCloseInfo
+		err  error
+	}
 	echoed := make(chan error, 1)
+	peerClosed := make(chan closed, 1)
 	go func() {
 		echoed <- func() error {
 			res, err := listener.IncomingTransports.GetReader(nil).(streams.ReadableStreamDefaultReader[*LP2PQuicTransport]).Read()
 			if err != nil || res.Done {
 				return fmt.Errorf("incoming transport: %v", err)
 			}
-			sres, err := res.Val.IncomingBidirectionalStreams.GetReader(nil).(streams.ReadableStreamDefaultReader[webtransport.WebTransportBidirectionalStream]).Read()
+			transport := res.Val
+			go func() {
+				info, err := transport.Closed()
+				peerClosed <- closed{info, err}
+			}()
+			sres, err := transport.IncomingBidirectionalStreams.GetReader(nil).(streams.ReadableStreamDefaultReader[webtransport.WebTransportBidirectionalStream]).Read()
 			if err != nil || sres.Done {
 				return fmt.Errorf("incoming stream: %v", err)
 			}
@@ -392,19 +420,29 @@ func TestQuicTransport(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			return sres.Val.Writable.GetWriter().Write([]byte("echo: " + msg + "\n"))
+			if err := sres.Val.Writable.GetWriter().Write([]byte("echo: " + msg + "\n")); err != nil {
+				return err
+			}
+			// Datagrams and the exporter work on the receiver's side too.
+			d, err := transport.Datagrams.Readable.GetReader(nil).(streams.ReadableStreamDefaultReader[[]byte]).Read()
+			if err != nil || d.Done || string(d.Val) != "dgram" {
+				return fmt.Errorf("datagram: %q, done=%v, %v", d.Val, d.Done, err)
+			}
+			km, err := transport.ExportKeyingMaterial("label", []byte("ctx"), 16)
+			if err != nil {
+				return err
+			}
+			return transport.Datagrams.Writable.GetWriter().Write(km)
 		}()
 	}()
 
-	req, err := tx.window.NewLP2PRequest(LP2PRequestOptions{Nickname: "Requester"})
+	transport, err := NewLP2PQuicTransport(reqConn, LP2PQuicTransportInit{RequireUnreliable: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport, err := NewLP2PQuicTransport(req, LP2PQuicTransportInit{AllowPooling: true})
-	if err != nil {
-		t.Fatal(err)
+	if transport.Reliability() != ReliabilitySupportsUnreliable {
+		t.Errorf("reliability %s", transport.Reliability())
 	}
-	defer transport.Close(webtransport.WebTransportCloseInfo{})
 	s, err := transport.CreateBidirectionalStream()
 	if err != nil {
 		t.Fatal(err)
@@ -419,15 +457,261 @@ func TestQuicTransport(t *testing.T) {
 	if got != "echo: hello" {
 		t.Errorf("got %q", got)
 	}
+	// Datagrams may be lost; send a few.
+	for i := 0; i < 5; i++ {
+		if err := transport.Datagrams.Writable.GetWriter().Write([]byte("dgram")); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := recv(t, echoed, "echo"); err != nil {
 		t.Fatal(err)
 	}
+	km, err := transport.ExportKeyingMaterial("label", []byte("ctx"), 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := transport.Datagrams.Readable.GetReader(nil).(streams.ReadableStreamDefaultReader[[]byte]).Read()
+	if err != nil || d.Done || !bytes.Equal(d.Val, km) {
+		t.Errorf("keying material differs: got %x, want %x (%v)", d.Val, km, err)
+	}
 
+	// Close reaches the peer with code and reason.
+	info := webtransport.WebTransportCloseInfo{CloseCode: 7, Reason: "done"}
+	if err := transport.Close(info); err != nil {
+		t.Fatal(err)
+	}
+	if c := recv(t, peerClosed, "peer closed"); c.err != nil || c.info != info {
+		t.Errorf("peer closed with %+v, %v; want %+v", c.info, c.err, info)
+	}
+	if got, err := transport.Closed(); err != nil || got != info {
+		t.Errorf("closed with %+v, %v", got, err)
+	}
+
+	// Without a listener, the peer's transports are refused.
 	listener.Close()
 	res, err := listener.IncomingTransports.GetReader(nil).(streams.ReadableStreamDefaultReader[*LP2PQuicTransport]).Read()
 	if err != nil || !res.Done {
 		t.Errorf("read after Close: done=%v err=%v, want done", res.Done, err)
 	}
+	time.Sleep(2 * listenerGrace)
+	_, err = NewLP2PQuicTransport(reqConn, LP2PQuicTransportInit{})
+	wantDOMException(t, err, WebTransportError)
+
+	// Closing the connection fails its transports and closes its listener
+	// before onclose.
+	listener, err = NewLP2PQuicTransportListener(rxConn, LP2PQuicTransportListenerInit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewLP2PQuicTransportListener(reqConn, LP2PQuicTransportListenerInit{}); err != nil {
+		t.Fatal(err)
+	}
+	transport, err = NewLP2PQuicTransport(rxConn, LP2PQuicTransportInit{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedAt := make(chan struct{})
+	rxConn.OnClose(func(OnCloseEvent) {
+		if _, err := transport.Closed(); err == nil {
+			t.Error("transport not failed before onclose")
+		}
+		if _, err := NewLP2PQuicTransportListener(rxConn, LP2PQuicTransportListenerInit{}); err == nil {
+			t.Error("listener constructed on a closed connection")
+		}
+		close(closedAt)
+	})
+	_ = rxConn.Close()
+	recv(t, closedAt, "onclose")
+	if _, err := transport.Closed(); err == nil {
+		t.Error("transport survived the connection close")
+	} else {
+		wantDOMException(t, err, WebTransportError)
+	}
+	if res, err := listener.IncomingTransports.GetReader(nil).(streams.ReadableStreamDefaultReader[*LP2PQuicTransport]).Read(); err != nil || !res.Done {
+		t.Errorf("listener not closed with the connection: done=%v err=%v", res.Done, err)
+	}
+	_, err = NewLP2PQuicTransport(rxConn, LP2PQuicTransportInit{})
+	wantDOMException(t, err, InvalidStateError)
+}
+
+func TestTransportGlare(t *testing.T) {
+	name := uniqueName(t, "Receiver")
+	rx, tx := pair(t, name)
+	_, conns := startReceiver(t, rx, name)
+	reqConn := connect(t, tx, "Requester")
+	rxConn := recv(t, conns, "connection")
+	for _, c := range []*LP2PConnection{reqConn, rxConn} {
+		if _, err := NewLP2PQuicTransportListener(c, LP2PQuicTransportListenerInit{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Both sides open a transport: there are two sessions.
+	for _, c := range []*LP2PConnection{reqConn, rxConn} {
+		if _, err := NewLP2PQuicTransport(c, LP2PQuicTransportInit{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestAllowedOrigins(t *testing.T) {
+	name := uniqueName(t, "Receiver")
+	rx, tx := pair(t, name)
+
+	_, err := rx.window.NewLP2PReceiver(LP2PReceiverOptions{Nickname: name, AllowedOrigins: []string{"://bad"}})
+	wantDOMException(t, err, TypeError)
+
+	prompts := 0
+	rx.ui.Permission = func(req ua.PermissionRequest) bool {
+		if req.Permission == ua.PermissionAcceptConnection {
+			prompts++
+		}
+		return true
+	}
+	pins := 0
+	present := rx.ui.Present
+	rx.ui.Present = func(p ua.PINPresentation) { pins++; present(p) }
+	r, err := rx.window.NewLP2PReceiver(LP2PReceiverOptions{
+		Nickname:       name,
+		AllowedOrigins: []string{"HTTPS://Partner.test:443/path", "data:text/plain,opaque"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conns := make(chan *LP2PConnection, 4)
+	r.OnConnection(func(e LP2PConnectionEvent) { conns <- e.Connection })
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Stop)
+
+	// The requester's origin isn't allowed: refused on the hint, before any
+	// PIN or prompt on the receiver.
+	other := NewWindow(tx.ua, "https://other.test")
+	req, err := other.NewLP2PRequest(LP2PRequestOptions{Nickname: "Requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = req.Start()
+	de := wantDOMException(t, err, NotAllowedError)
+	if !errors.Is(de, ua.ErrRefused) {
+		t.Errorf("%v doesn't wrap ua.ErrRefused", de)
+	}
+	if prompts != 0 || pins != 0 {
+		t.Errorf("receiver prompted %d times and showed %d PINs for a refused origin", prompts, pins)
+	}
+
+	// A page of an allowed origin on the same browser gets through.
+	partner := NewWindow(tx.ua, "https://partner.test")
+	req, err = partner.NewLP2PRequest(LP2PRequestOptions{Nickname: "Partner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := req.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	recv(t, conns, "connection from the partner origin")
+	if prompts != 1 || pins != 1 {
+		t.Errorf("receiver prompted %d times and showed %d PINs for an allowed origin, want 1 and 1", prompts, pins)
+	}
+}
+
+func TestTrustedPeerSkipsPairing(t *testing.T) {
+	name := uniqueName(t, "Receiver")
+	rx, tx := pair(t, name)
+	var pins, prompts int
+	present := rx.ui.Present
+	rx.ui.Present = func(p ua.PINPresentation) { pins++; present(p) }
+	rx.ui.Permission = func(req ua.PermissionRequest) bool {
+		if req.Permission == ua.PermissionAcceptConnection {
+			prompts++
+		}
+		return true
+	}
+	_, conns := startReceiver(t, rx, name)
+
+	// First session: PIN ceremony and grant prompt.
+	c1 := connect(t, tx, "Requester")
+	recv(t, conns, "first connection")
+	if pins != 1 || prompts != 1 {
+		t.Fatalf("first session: %d PINs, %d prompts; want 1 and 1", pins, prompts)
+	}
+	if !rx.ua.Trusted(tx.ua.PeerID()) || !tx.ua.Trusted(rx.ua.PeerID()) {
+		t.Error("peers don't trust each other after pairing")
+	}
+	if g := rx.ua.PeerGrants(rx.window.Origin); len(g) != 1 || g[0] != tx.ua.PeerID() {
+		t.Errorf("receiver grants %v", g)
+	}
+	_ = c1.Close()
+
+	// Second session: both trust each other and the origin has its grant,
+	// so neither a PIN nor a prompt.
+	connect(t, tx, "Requester")
+	recv(t, conns, "second connection")
+	if pins != 1 || prompts != 1 {
+		t.Errorf("second session: %d PINs, %d prompts; want no more", pins, prompts)
+	}
+
+	// Removing the anchor on the receiver makes it ask for a PIN again.
+	rx.ua.RemoveTrustAnchor(tx.ua.PeerID())
+	connect(t, tx, "Requester")
+	recv(t, conns, "third connection")
+	if pins != 2 || prompts != 2 {
+		t.Errorf("after removing the anchor: %d PINs, %d prompts; want 2 and 2", pins, prompts)
+	}
+}
+
+func TestReceiverStop(t *testing.T) {
+	name := uniqueName(t, "Receiver")
+	rx, tx := pair(t, name)
+	r, conns := startReceiver(t, rx, name)
+	c := connect(t, tx, "Requester")
+	rxConn := recv(t, conns, "connection")
+
+	r.Stop()
+	wantDOMException(t, r.Start(), InvalidStateError)
+	r.Stop() // idempotent
+
+	// Delivered connections stay open.
+	dc, err := c.CreateDataChannel("after-stop", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan *LP2PDataChannel, 1)
+	rxConn.OnDataChannel(func(e LP2PDataChannelEvent) { got <- e.Channel })
+	if err := dc.SendText("still here"); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, got, "data channel after stop")
+}
+
+func TestLegacySessionFlag(t *testing.T) {
+	name := uniqueName(t, "Receiver")
+	relay := ua.NewPINRelay()
+	mk := func(n string, pick func(context.Context, *ua.Picker) (ua.Peer, error)) *browser {
+		ui := &ua.Scripted{Name: n, Present: relay.Present, Enter: relay.Enter, Pick: pick}
+		u, err := ua.New(ua.Config{Name: n, UI: ui, HandshakeTimeout: 10 * time.Second, DisableSessionExtension: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = u.Close() })
+		return &browser{ui: ui, ua: u, window: NewWindow(u, testOrigin)}
+	}
+	rx, tx := mk("rx", nil), mk("tx", ua.PickByName(name))
+	_, conns := startReceiver(t, rx, name)
+	c := connect(t, tx, "Requester")
+	rxConn := recv(t, conns, "connection")
+	got := make(chan *LP2PDataChannel, 1)
+	rxConn.OnDataChannel(func(e LP2PDataChannelEvent) { got <- e.Channel })
+	dc, err := c.CreateDataChannel("legacy", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dc.SendText("hi"); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, got, "data channel")
 }
 
 // readLine reads up to a newline. The streams shim returns fixed-size
@@ -448,13 +732,6 @@ func readLine(rs streams.ReadableStream[[]byte]) (string, error) {
 			return string(buf[:i]), nil
 		}
 	}
-}
-
-func TestDedicatedTransportNotSupported(t *testing.T) {
-	_, err := NewLP2PQuicTransport(&LP2PConnection{}, LP2PQuicTransportInit{})
-	wantDOMException(t, err, NotSupportedError)
-	_, err = NewLP2PQuicTransport("nope", LP2PQuicTransportInit{AllowPooling: true})
-	wantDOMException(t, err, NotSupportedError)
 }
 
 func TestEventSlotBuffersInOrder(t *testing.T) {

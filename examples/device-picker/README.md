@@ -22,21 +22,21 @@ Device names carry a random suffix per run, so the example picks its own
 device even if other Open Screen agents on the network use the same name.
 
 ```
-[Phone] https://phone.example ("Phone") shows the device picker
+[Phone] https://lp2p.example ("Phone") shows the device picker
 Picker shows: []
-[Kitchen speaker #d51c] https://kitchen-speaker.example wants to be discoverable as "Kitchen speaker #d51c": allowed
-[Living room TV #0718] https://living-room-tv.example wants to be discoverable as "Living room TV #0718": allowed
-Picker shows: [Kitchen speaker #d51c (unverified)]
-[Office display #0107] https://office-display.example wants to be discoverable as "Office display #0107": allowed
-Picker shows: [Kitchen speaker #d51c (unverified), Living room TV #0718 (unverified)]
-Picker shows: [Kitchen speaker #d51c (unverified), Living room TV #0718 (unverified), Office display #0107 (unverified)]
-[Phone] user picked Living room TV #0718 (unverified)
-[Phone] asks for the PIN shown on Living room TV #0718 (unverified)
-[Living room TV #0718] https://living-room-tv.example ("Living room TV #0718") wants to accept a connection from Phone (unverified): allowed
-[Living room TV #0718] shows PIN 1669-8296 to pair with Phone (unverified)
-[Phone] user enters PIN 1669-8296
-Living room TV #0718: got a connection
-Phone: "Hello from Living room TV #0718"
+[Kitchen speaker #8bd6] https://lp2p.example wants to be discoverable as "Kitchen speaker #8bd6": allowed
+Picker shows: [Kitchen speaker #8bd6 (unverified)]
+[Living room TV #21b3] https://lp2p.example wants to be discoverable as "Living room TV #21b3": allowed
+[Office display #2b12] https://lp2p.example wants to be discoverable as "Office display #2b12": allowed
+Picker shows: [Kitchen speaker #8bd6 (unverified), Living room TV #21b3 (unverified)]
+Picker shows: [Kitchen speaker #8bd6 (unverified), Living room TV #21b3 (unverified), Office display #2b12 (unverified)]
+[Phone] user picked Living room TV #21b3 (unverified)
+[Living room TV #21b3] shows PIN 065-447 to pair with Phone (unverified)
+[Phone] asks for the PIN shown on Living room TV #21b3 (unverified)
+[Phone] user enters PIN 065-447
+[Living room TV #21b3] https://lp2p.example ("Living room TV #21b3") wants to accept a connection from Phone (verified) on behalf of https://lp2p.example: allowed
+Living room TV #21b3: got a connection
+Phone: "Hello from Living room TV #21b3"
 ```
 
 Names are "unverified" before pairing because anyone can advertise any name.

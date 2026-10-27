@@ -1,96 +1,117 @@
 package lp2p
 
 import (
-	"context"
-	"fmt"
 	"sync"
 
-	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 	"github.com/backkem/go-lp2p/streams-api"
-	"github.com/backkem/go-lp2p/webtransport-api"
 )
 
 // LP2PQuicTransportListenerInit configures an LP2PQuicTransportListener.
-type LP2PQuicTransportListenerInit struct{}
+// Its options apply to each transport the listener creates.
+type LP2PQuicTransportListenerInit struct {
+	LP2PQuicTransportInit
+}
 
-// LP2PQuicTransportListener receives the transports peers open.
+// incomingTransportsHighWaterMark is how many incoming transports a
+// listener queues while the page isn't reading; further ones are refused.
+const incomingTransportsHighWaterMark = 16
+
+// LP2PQuicTransportListener receives the transports a peer opens on an
+// LP2PConnection. There is at most one per connection at a time.
 type LP2PQuicTransportListener struct {
-	// IncomingTransports yields every transport a peer opens. Reading it
-	// reports done once the listener is closed.
+	// IncomingTransports yields every transport the peer opens, already
+	// ready. Reading it reports done once the listener is closed, after
+	// the transports queued before.
 	IncomingTransports streams.ReadableStream[*LP2PQuicTransport]
+
+	conn *LP2PConnection
+	init LP2PQuicTransportListenerInit
 
 	queue chan *LP2PQuicTransport
 	done  chan struct{}
 	once  sync.Once
+
+	mu       sync.Mutex
+	reserved int // Transports accepted but not enqueued yet.
 }
 
-// transportSource is implemented by the objects a listener can listen on.
-type transportSource interface {
-	registerLP2PQuicTransportListener(listener *LP2PQuicTransportListener) error
-}
-
-var (
-	_ transportSource = (*LP2PReceiver)(nil)
-	_ transportSource = (*LP2PRequest)(nil)
-	_ transportSource = (*LP2PConnection)(nil)
-)
-
-// NewLP2PQuicTransportListener listens for transports opened by peers on the
-// connections of source: an *LP2PReceiver (which is started if needed), an
-// *LP2PRequest or a single *LP2PConnection. A newer listener on the same
-// source replaces the older one.
-func NewLP2PQuicTransportListener(source any, init LP2PQuicTransportListenerInit) (*LP2PQuicTransportListener, error) {
-	src, ok := source.(transportSource)
-	if !ok {
-		return nil, newDOMException(NotSupportedError,
-			fmt.Sprintf("can't listen for transports on %T", source), nil)
-	}
+// NewLP2PQuicTransportListener listens for transports the peer opens on the
+// connection. It fails with an InvalidStateError if the connection is
+// closed or already has a listener; after Close, a new one can be
+// constructed.
+func NewLP2PQuicTransportListener(connection *LP2PConnection, init LP2PQuicTransportListenerInit) (*LP2PQuicTransportListener, error) {
 	l := &LP2PQuicTransportListener{
-		queue: make(chan *LP2PQuicTransport),
+		conn:  connection,
+		init:  init,
+		queue: make(chan *LP2PQuicTransport, incomingTransportsHighWaterMark),
 		done:  make(chan struct{}),
 	}
 	l.IncomingTransports = streams.NewValueReadableStream[*LP2PQuicTransport](transportReader{l})
-	if err := src.registerLP2PQuicTransportListener(l); err != nil {
-		l.Close()
+	if err := connection.setListener(l); err != nil {
 		return nil, err
 	}
 	return l, nil
 }
 
-// Ready blocks until the listener is ready, as the ready promise. Listeners
-// are returned ready, so it returns right away.
-func (l *LP2PQuicTransportListener) Ready() error { return nil }
-
-// Close stops listening: IncomingTransports reports done and transports
-// opened by peers from now on are refused. Go-only.
-func (l *LP2PQuicTransportListener) Close() error {
-	l.once.Do(func() { close(l.done) })
-	return nil
+// Close stops listening: the connection's listener slot is freed,
+// IncomingTransports reports done once the queued transports are read, and
+// transports the peer opens from now on are refused.
+func (l *LP2PQuicTransportListener) Close() {
+	l.once.Do(func() {
+		l.conn.clearListener(l)
+		close(l.done)
+	})
 }
 
-// deliver hands an incoming transport to the reader. It reports false if the
-// listener is closed or ctx is done before anyone read it.
-func (l *LP2PQuicTransportListener) deliver(ctx context.Context, pt *ospc.WebTransportSession) bool {
-	t, err := newLP2PQuicTransport(webtransport.NewSessionAdaptor(sessionAdaptor{pt}), LP2PQuicTransportInit{AllowPooling: true})
-	if err != nil {
+// reserve claims room in the queue for a transport about to be accepted. It
+// reports false if the listener is closed or full.
+func (l *LP2PQuicTransportListener) reserve() bool {
+	select {
+	case <-l.done:
+		return false
+	default:
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.queue)+l.reserved >= cap(l.queue) {
 		return false
 	}
-	select {
-	case l.queue <- t:
-		return true
-	case <-l.done:
-	case <-ctx.Done():
-	}
-	return false
+	l.reserved++
+	return true
+}
+
+func (l *LP2PQuicTransportListener) release() {
+	l.mu.Lock()
+	l.reserved--
+	l.mu.Unlock()
+}
+
+// enqueue queues a reserved transport.
+func (l *LP2PQuicTransportListener) enqueue(t *LP2PQuicTransport) {
+	l.mu.Lock()
+	l.reserved--
+	l.mu.Unlock()
+	l.queue <- t // Room was reserved.
 }
 
 type transportReader struct{ l *LP2PQuicTransportListener }
 
 func (r transportReader) Read() (*LP2PQuicTransport, error) {
+	// Transports queued before Close can still be read.
+	select {
+	case t := <-r.l.queue:
+		return t, nil
+	default:
+	}
 	select {
 	case t := <-r.l.queue:
 		return t, nil
 	case <-r.l.done:
-		return nil, streams.ErrValueReaderDone
+		select {
+		case t := <-r.l.queue:
+			return t, nil
+		default:
+			return nil, streams.ErrValueReaderDone
+		}
 	}
 }

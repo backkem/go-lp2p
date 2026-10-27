@@ -18,17 +18,17 @@ Device names carry a random suffix per run, so the example picks its own
 device even if other Open Screen agents on the network use the same name.
 
 ```
-[Receiver device] https://receiver-device.example wants to be discoverable as "Chat receiver #71c2": allowed
-[Requester device] https://requester-device.example ("Chat requester") shows the device picker
-[Requester device] user picked Chat receiver #71c2 (unverified)
-[Requester device] asks for the PIN shown on Chat receiver #71c2 (unverified)
-[Receiver device] https://receiver-device.example ("Chat receiver #71c2") wants to accept a connection from Chat requester (unverified): allowed
-[Receiver device] shows PIN 1076-4280 to pair with Chat requester (unverified)
-[Requester device] user enters PIN 1076-4280
+[Receiver device] https://lp2p.example wants to be discoverable as "Chat receiver #2eb2": allowed
+[Requester device] https://lp2p.example ("Chat requester") shows the device picker
+[Requester device] user picked Chat receiver #2eb2 (unverified)
+[Receiver device] shows PIN 485-246 to pair with Chat requester (unverified)
+[Requester device] asks for the PIN shown on Chat receiver #2eb2 (unverified)
+[Requester device] user enters PIN 485-246
+[Receiver device] https://lp2p.example ("Chat receiver #2eb2") wants to accept a connection from Chat requester (verified) on behalf of https://lp2p.example: allowed
 Receiver: got a connection
 Requester: got a connection
-Requester: channel open
 Receiver: got data channel "chat"
+Requester: channel open
 Receiver: got "Hello receiver!"
 Receiver: got "How are you?"
 Receiver: got "Gotta go."

@@ -16,9 +16,8 @@ type LP2PRequest struct {
 	window  *Window
 	options LP2PRequestOptions
 
-	mu sync.Mutex
-	// listener receives transports on the connections this request makes.
-	listener *LP2PQuicTransportListener
+	mu      sync.Mutex
+	pending bool
 }
 
 // NewLP2PRequest creates an LP2PRequest in this window. The user agent
@@ -32,29 +31,33 @@ func (w *Window) NewLP2PRequest(options LP2PRequestOptions) (*LP2PRequest, error
 }
 
 // Start shows the device picker and connects to the peer the user picks,
-// pairing with it if needed. It blocks until connected or failed. Every
-// call makes a new connection.
+// pairing with it if needed. It blocks until the peer accepted the session
+// or something failed. After a failure, Start can be called again.
 //
-// It fails with an AbortError DOMException if the user dismisses the picker
-// and a NotAllowedError if pairing fails.
+// Every failure is a NotAllowedError DOMException, so that a page can't
+// tell whether the user dismissed the picker, pairing failed or the peer
+// refused the session; the user agent's reason is available with errors.Is
+// (ua.ErrCanceled, ua.ErrAuthenticationFailed, ua.ErrRefused, ...).
 func (r *LP2PRequest) Start() (*LP2PConnection, error) {
+	r.mu.Lock()
+	if r.pending {
+		r.mu.Unlock()
+		return nil, newDOMException(InvalidStateError, "LP2PRequest.Start is pending", nil)
+	}
+	r.pending = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.pending = false
+		r.mu.Unlock()
+	}()
+
 	u := r.window.UserAgent
 	conn, err := u.Connect(context.Background(), r.window.Origin, r.options.Nickname)
 	if err != nil {
-		return nil, toDOMException(err)
+		return nil, newDOMException(NotAllowedError, "connection not allowed: "+err.Error(), err)
 	}
-	return newLP2PConnection(conn, r.transportListener), nil
-}
-
-func (r *LP2PRequest) transportListener() *LP2PQuicTransportListener {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.listener
-}
-
-func (r *LP2PRequest) registerLP2PQuicTransportListener(l *LP2PQuicTransportListener) error {
-	r.mu.Lock()
-	r.listener = l
-	r.mu.Unlock()
-	return nil
+	c := newLP2PConnection(conn)
+	c.expose()
+	return c, nil
 }

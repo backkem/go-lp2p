@@ -51,6 +51,10 @@ var webTransportHoldTimeout = 2 * time.Second
 // session; further ones are dropped until ReceiveDatagram catches up.
 const webTransportDatagramQueue = 64
 
+// webTransportCloseGrace is how long Close waits for the peer to end its
+// side of the control stream before returning.
+const webTransportCloseGrace = 2 * time.Second
+
 var (
 	// ErrWebTransportUnsupported is returned by OpenWebTransport when the
 	// peer doesn't list quic-transport in its agent-info: the extension's
@@ -473,6 +477,7 @@ type WebTransportSession struct {
 	datagrams  chan []byte
 	draining   chan struct{}
 	done       chan struct{}
+	peerEnded  chan struct{} // Closed once the peer's side of the control stream ended.
 
 	mu        sync.Mutex
 	closed    bool
@@ -492,6 +497,7 @@ func newWebTransportSession(c *baseConnection, id uint64, control ApplicationStr
 		datagrams:  make(chan []byte, webTransportDatagramQueue),
 		draining:   make(chan struct{}),
 		done:       make(chan struct{}),
+		peerEnded:  make(chan struct{}),
 		streams:    make(map[*WebTransportStream]struct{}),
 	}
 }
@@ -504,6 +510,7 @@ func (s *WebTransportSession) start() {
 }
 
 func (s *WebTransportSession) readControl() {
+	defer close(s.peerEnded)
 	for {
 		msg, err := readMessage(s.control)
 		if err == io.EOF {
@@ -571,7 +578,9 @@ func (s *WebTransportSession) Drain() error {
 
 // Close closes the session with info: it sends data-transport-close, ends
 // the control stream and resets all streams of the session with
-// session-gone. The reason must be at most 1024 bytes.
+// session-gone. The reason must be at most 1024 bytes. It returns once the
+// peer ended its side of the control stream, so that closing the connection
+// right after doesn't discard the close, or after a short wait.
 func (s *WebTransportSession) Close(info WebTransportCloseInfo) error {
 	s.mu.Lock()
 	if s.closed {
@@ -589,6 +598,13 @@ func (s *WebTransportSession) Close(info WebTransportCloseInfo) error {
 		err = cerr
 	}
 	s.teardown()
+	if err == nil {
+		select {
+		case <-s.peerEnded:
+		case <-time.After(webTransportCloseGrace):
+		case <-s.conn.ctx.Done():
+		}
+	}
 	return err
 }
 

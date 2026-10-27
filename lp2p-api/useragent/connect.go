@@ -9,12 +9,26 @@ import (
 	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
+// AdvertiseOptions configures an Advertisement.
+type AdvertiseOptions struct {
+	// Origin of the page advertising, serialized (see OriginOf).
+	Origin string
+	// Nickname the page advertises under.
+	Nickname string
+	// AllowedOrigins are serialized origins that, in addition to Origin,
+	// may request a session with this advertisement. Opaque origins never
+	// match. Only checked with the session extension; see
+	// Config.DisableSessionExtension.
+	AllowedOrigins []string
+}
+
 // Advertisement makes a page discoverable and hands it connections the user
 // granted. Create one with UserAgent.Advertise.
 type Advertisement struct {
 	u        *UserAgent
 	origin   string
 	nickname string
+	allowed  []string
 	listener *ospc.Listener
 	conns    chan *Connection
 
@@ -29,15 +43,18 @@ type Connection struct {
 	*ospc.Connection
 	// Peer is the remote peer, with its name verified where possible.
 	Peer Peer
+	// RequestingOrigin is the origin on whose behalf the connection was
+	// requested, serialized. Empty without the session extension.
+	RequestingOrigin string
 }
 
-// Advertise asks the user to let origin advertise under nickname and, if
-// granted, starts advertising and accepting connections.
-func (u *UserAgent) Advertise(ctx context.Context, origin, nickname string) (*Advertisement, error) {
+// Advertise asks the user to let the page advertise under the nickname and,
+// if granted, starts advertising and accepting connections.
+func (u *UserAgent) Advertise(ctx context.Context, opts AdvertiseOptions) (*Advertisement, error) {
 	ok, err := u.cfg.UI.RequestPermission(ctx, PermissionRequest{
 		Permission: PermissionAdvertise,
-		Origin:     origin,
-		Nickname:   nickname,
+		Origin:     opts.Origin,
+		Nickname:   opts.Nickname,
 	})
 	if err != nil {
 		return nil, err
@@ -46,7 +63,7 @@ func (u *UserAgent) Advertise(ctx context.Context, origin, nickname string) (*Ad
 		return nil, ErrPermissionDenied
 	}
 
-	agent, err := newAgent(nickname)
+	agent, err := u.newAgent(opts.Nickname)
 	if err != nil {
 		return nil, err
 	}
@@ -58,8 +75,9 @@ func (u *UserAgent) Advertise(ctx context.Context, origin, nickname string) (*Ad
 	actx, cancel := context.WithCancel(u.ctx)
 	a := &Advertisement{
 		u:        u,
-		origin:   origin,
-		nickname: nickname,
+		origin:   opts.Origin,
+		nickname: opts.Nickname,
+		allowed:  append([]string(nil), opts.AllowedOrigins...),
 		listener: l,
 		conns:    make(chan *Connection),
 		ctx:      actx,
@@ -96,6 +114,25 @@ func (a *Advertisement) run() {
 	}
 }
 
+// allows reports whether the advertisement allows a requesting origin hint,
+// as received on the wire: the page's own origin and its allowed origins
+// do; an opaque or unparsable one never does.
+func (a *Advertisement) allows(hint string) bool {
+	origin, err := OriginOf(hint)
+	if err != nil {
+		return false
+	}
+	if SameOrigin(origin, a.origin) {
+		return true
+	}
+	for _, allowed := range a.allowed {
+		if SameOrigin(origin, allowed) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Advertisement) handshake(uc *ospc.UnauthenticatedConnection) {
 	ctx, cancel := a.u.handshakeContext(a.ctx)
 	defer cancel()
@@ -104,20 +141,15 @@ func (a *Advertisement) handshake(uc *ospc.UnauthenticatedConnection) {
 	peer := remotePeer(uc.RemoteAgent())
 	log := a.u.log.With("nickname", a.nickname, "peer", peer.DisplayName)
 
-	ok, err := a.u.cfg.UI.RequestPermission(ctx, PermissionRequest{
-		Permission: PermissionAcceptConnection,
-		Origin:     a.origin,
-		Nickname:   a.nickname,
-		Peer:       peer,
-	})
-	if err != nil || !ok {
-		log.Info("incoming connection not granted", "err", err)
-		return
+	var conn *Connection
+	var err error
+	if a.u.sessions() {
+		conn, err = a.sessionHandshake(ctx, uc, peer, log)
+	} else {
+		conn, err = a.legacyHandshake(ctx, uc, peer, log)
 	}
-
-	conn, err := a.u.authenticate(ctx, uc, a.origin, a.nickname, peer)
 	if err != nil {
-		log.Info("incoming connection failed to authenticate", "err", err)
+		log.Info("incoming connection not accepted", "err", err)
 		return
 	}
 
@@ -126,6 +158,87 @@ func (a *Advertisement) handshake(uc *ospc.UnauthenticatedConnection) {
 	case <-a.ctx.Done():
 		_ = conn.Close()
 	}
+}
+
+// sessionHandshake runs index.bs "Incoming sessions": check the requesting
+// origin hint, authenticate unless the peer is trusted, ask the user to
+// grant the peer to the origin unless granted already, accept.
+func (a *Advertisement) sessionHandshake(ctx context.Context, uc *ospc.UnauthenticatedConnection, peer Peer, log logger) (*Connection, error) {
+	u := a.u
+	hint, _ := uc.RequestingOrigin()
+	if !a.allows(hint) {
+		// Before any trust ceremony or prompt.
+		log.Info("refusing session: requesting origin not allowed", "origin", hint)
+		return nil, errors.Join(ErrRefused, uc.RefuseSession())
+	}
+
+	if u.trust.trusted(peer.ID) {
+		if err := uc.TrustPeer(); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := uc.RequestAuthentication(); err != nil {
+			return nil, err
+		}
+		if _, err := u.pair(ctx, uc, a.origin, a.nickname, peer); err != nil {
+			return nil, err
+		}
+		u.trust.addAnchor(peer.ID)
+	}
+	peer = verifiedPeer(uc.RemoteAgent(), peer)
+	u.trust.addKnown(peer)
+
+	if !u.trust.granted(a.origin, peer.ID) {
+		ok, err := u.cfg.UI.RequestPermission(ctx, PermissionRequest{
+			Permission:       PermissionAcceptConnection,
+			Origin:           a.origin,
+			Nickname:         a.nickname,
+			Peer:             peer,
+			RequestingOrigin: hint,
+		})
+		if err != nil {
+			_ = uc.RefuseSession()
+			return nil, err
+		}
+		if !ok {
+			return nil, errors.Join(ErrPermissionDenied, uc.RefuseSession())
+		}
+		u.trust.grant(a.origin, peer.ID)
+	}
+
+	conn, err := uc.CompleteSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &Connection{Connection: conn, Peer: peer, RequestingOrigin: hint}, nil
+}
+
+// legacyHandshake is the flow without the session extension: ask the user,
+// then pair with a PIN on every connection.
+func (a *Advertisement) legacyHandshake(ctx context.Context, uc *ospc.UnauthenticatedConnection, peer Peer, log logger) (*Connection, error) {
+	u := a.u
+	ok, err := u.cfg.UI.RequestPermission(ctx, PermissionRequest{
+		Permission: PermissionAcceptConnection,
+		Origin:     a.origin,
+		Nickname:   a.nickname,
+		Peer:       peer,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrPermissionDenied
+	}
+
+	conn, err := u.pair(ctx, uc, a.origin, a.nickname, peer)
+	if err != nil {
+		return nil, err
+	}
+	peer = verifiedPeer(conn.RemoteAgent(), peer)
+	u.trust.addAnchor(peer.ID)
+	u.trust.addKnown(peer)
+	u.trust.grant(a.origin, peer.ID)
+	return &Connection{Connection: conn, Peer: peer}, nil
 }
 
 // Accept returns the next connection the user granted.
@@ -154,7 +267,7 @@ func (a *Advertisement) Close() error {
 }
 
 // Connect shows the device picker for origin and connects to the peer the
-// user picks, pairing with a PIN.
+// user picks, pairing with a PIN unless both sides trust each other.
 func (u *UserAgent) Connect(ctx context.Context, origin, nickname string) (*Connection, error) {
 	if err := u.StartDiscovery(); err != nil {
 		return nil, err
@@ -184,31 +297,87 @@ func (u *UserAgent) Connect(ctx context.Context, origin, nickname string) (*Conn
 	hctx, cancel := u.handshakeContext(ctx)
 	defer cancel()
 
-	agent, err := newAgent(nickname)
+	agent, err := u.newAgent(nickname)
 	if err != nil {
 		return nil, err
 	}
-	uc, err := peer.Dialer.Dial(hctx, ospc.AgentTransportQUIC, agent)
+	if !u.sessions() {
+		uc, err := peer.Dialer.Dial(hctx, ospc.AgentTransportQUIC, agent)
+		if err != nil {
+			return nil, fmt.Errorf("dial %q: %w", peer.DisplayName, err)
+		}
+		defer uc.Close() // no-op once authenticated
+		conn, err := u.pair(hctx, uc, origin, nickname, peer)
+		if err != nil {
+			return nil, err
+		}
+		peer = verifiedPeer(conn.RemoteAgent(), peer)
+		u.trust.addAnchor(peer.ID)
+		u.trust.addKnown(peer)
+		u.trust.grant(origin, peer.ID)
+		return &Connection{Connection: conn, Peer: peer}, nil
+	}
+
+	uc, err := peer.Dialer.DialSession(hctx, ospc.AgentTransportQUIC, agent, origin)
 	if err != nil {
 		return nil, fmt.Errorf("dial %q: %w", peer.DisplayName, err)
 	}
 	defer uc.Close() // no-op once authenticated
 
-	return u.authenticate(hctx, uc, origin, nickname, peer)
+	// Wait for the server to check the requesting origin: it either asks
+	// for authentication or accepts a trusted client right away.
+	cue, err := uc.AwaitSession(hctx)
+	if err != nil {
+		return nil, sessionError(err)
+	}
+	id := string(uc.RemoteAgent().PeerID)
+	if cue == ospc.SessionCueAuthenticate || !u.trust.trusted(id) {
+		if _, err := u.pair(hctx, uc, origin, nickname, peer); err != nil {
+			return nil, err
+		}
+		u.trust.addAnchor(id)
+	} else if err := uc.TrustPeer(); err != nil {
+		return nil, err
+	}
+	conn, err := uc.CompleteSession(hctx)
+	if err != nil {
+		return nil, sessionError(err)
+	}
+	peer = verifiedPeer(conn.RemoteAgent(), peer)
+	u.trust.addKnown(peer)
+	u.trust.grant(origin, peer.ID)
+	return &Connection{Connection: conn, Peer: peer, RequestingOrigin: origin}, nil
 }
 
-// newAgent creates the local OSP agent of a connection.
-func newAgent(nickname string) (*ospc.Agent, error) {
+// sessionError maps a refusal by the peer onto ErrRefused.
+func sessionError(err error) error {
+	if errors.Is(err, ospc.ErrSessionRefused) {
+		return fmt.Errorf("%w: %v", ErrRefused, err)
+	}
+	return err
+}
+
+// sessions reports whether the LP2P session extension is in use.
+func (u *UserAgent) sessions() bool { return !u.cfg.DisableSessionExtension }
+
+// newAgent creates the local OSP agent of a connection. All agents of the
+// user agent share its certificate, so its peer ID is stable; the display
+// name carries the page's nickname, as OSP has no field for it yet.
+func (u *UserAgent) newAgent(nickname string) (*ospc.Agent, error) {
 	conf := ospc.NewAgentConfig(nickname)
+	conf.Certificate = u.identity.Certificate
+	conf.PeerID = u.identity.PeerID
+	conf.SessionExtension = u.sessions()
 	// Non-spec opt-in: SPAKE2 over P-256 rather than the spec's edwards25519,
 	// which isn't implemented (see ospc.InteropQuirks.Spake2SuiteP256).
 	conf.InteropQuirks.Spake2SuiteP256 = true
 	return ospc.NewAgent(conf)
 }
 
-// authenticate pairs with the peer: one side shows a PIN, the other enters
-// it. Which side does what is negotiated by OSP.
-func (u *UserAgent) authenticate(ctx context.Context, uc *ospc.UnauthenticatedConnection, origin, nickname string, peer Peer) (*Connection, error) {
+// pair runs the trust ceremony: one side shows a PIN, the other enters it.
+// Which side does what is negotiated by OSP. With the session extension
+// only the client starts SPAKE2.
+func (u *UserAgent) pair(ctx context.Context, uc *ospc.UnauthenticatedConnection, origin, nickname string, peer Peer) (*ospc.Connection, error) {
 	var psk []byte
 	if uc.GetAuthenticationRole() == ospc.AuthenticationRolePresenter {
 		raw, err := uc.GeneratePSK()
@@ -246,7 +415,7 @@ func (u *UserAgent) authenticate(ctx context.Context, uc *ospc.UnauthenticatedCo
 		}
 		return nil, fmt.Errorf("%w: %v", ErrAuthenticationFailed, err)
 	}
-	return &Connection{Connection: conn, Peer: verifiedPeer(conn.RemoteAgent(), peer)}, nil
+	return conn, nil
 }
 
 func remotePeer(a *ospc.Agent) Peer {

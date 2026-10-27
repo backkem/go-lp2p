@@ -114,7 +114,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("%s: %v", name, err)
 		}
-		defer r.Close()
+		defer r.Stop()
 	}
 
 	if err := demo.Await(errc, "the phone"); err != nil {

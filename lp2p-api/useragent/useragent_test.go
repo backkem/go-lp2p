@@ -242,7 +242,7 @@ func TestCloseUnblocksPicker(t *testing.T) {
 func TestAdvertiseDenied(t *testing.T) {
 	var out bytes.Buffer
 	u, _ := newTestUA(t, &Scripted{Name: "B", Out: &out, Permission: Deny(PermissionAdvertise)})
-	_, err := u.Advertise(context.Background(), "https://o.test", "Me")
+	_, err := u.Advertise(context.Background(), AdvertiseOptions{Origin: "https://o.test", Nickname: "Me"})
 	if !errors.Is(err, ErrPermissionDenied) {
 		t.Errorf("got %v, want ErrPermissionDenied", err)
 	}

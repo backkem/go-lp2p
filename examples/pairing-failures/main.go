@@ -1,7 +1,8 @@
 // Command pairing-failures shows how the API reports what can go wrong
 // before a connection exists: the user refuses, dismisses the picker, or
-// types the wrong PIN. Pages see a DOMException; the user agent's reason is
-// available with errors.Is.
+// types the wrong PIN. Pages see a DOMException, a NotAllowedError for
+// every failure of start(); the user agent's reason is available with
+// errors.Is.
 package main
 
 import (
@@ -32,6 +33,8 @@ func report(scenario string, err error) {
 		reason = "user canceled"
 	case errors.Is(err, ua.ErrAuthenticationFailed):
 		reason = "pairing failed"
+	case errors.Is(err, ua.ErrRefused):
+		reason = "refused by the peer"
 	}
 	log.Printf("%s: page gets %s (%s)", scenario, de.Name, reason)
 }
@@ -90,13 +93,13 @@ func main() {
 		})
 		report("3. request.start(), wrong PIN", connect(phone))
 		phone.Close()
-		r.Close()
+		r.Stop()
 		tv.Close()
 	}
 
-	// 4. The receiving user refuses the incoming connection. The phone
-	// isn't told (ospc has no close signal before pairing); its user gives
-	// up waiting for a PIN.
+	// 4. The receiving user refuses the incoming connection, after pairing:
+	// the projector refuses the session and the phone is told. Like every
+	// other failure of start(), the page only sees a NotAllowedError.
 	{
 		relay := ua.NewPINRelay()
 		name := demo.Unique("Projector")
@@ -107,11 +110,11 @@ func main() {
 		r := startReceiver(projector, name)
 		phone := demo.NewBrowser("Unwelcome phone", &ua.Scripted{
 			Pick:  ua.PickByName(name),
-			Enter: relay.EnterWithin(2 * time.Second),
+			Enter: relay.Enter,
 		})
 		report("4. request.start(), connection refused by the receiver", connect(phone))
 		phone.Close()
-		r.Close()
+		r.Stop()
 		projector.Close()
 	}
 }

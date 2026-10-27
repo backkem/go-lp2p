@@ -57,7 +57,11 @@ func (s *Scripted) RequestPermission(ctx context.Context, req PermissionRequest)
 	case PermissionAdvertise:
 		s.say("%s wants to be discoverable as %q: %s", req.Origin, req.Nickname, answer)
 	case PermissionAcceptConnection:
-		s.say("%s (%q) wants to accept a connection from %s: %s", req.Origin, req.Nickname, req.Peer.Label(), answer)
+		from := req.Peer.Label()
+		if req.RequestingOrigin != "" {
+			from += " on behalf of " + req.RequestingOrigin
+		}
+		s.say("%s (%q) wants to accept a connection from %s: %s", req.Origin, req.Nickname, from, answer)
 	default:
 		s.say("%s asks for %s: %s", req.Origin, req.Permission, answer)
 	}

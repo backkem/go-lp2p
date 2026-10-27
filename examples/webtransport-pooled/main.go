@@ -1,6 +1,7 @@
 // Command webtransport-pooled streams a 4 MiB payload over an
-// LP2PQuicTransport pooled on the OSP connection, and checks it arrived
-// intact with SHA-256.
+// LP2PQuicTransport pooled on the OSP connection, checks it arrived intact
+// with SHA-256, and closes the transport with a close code the receiver
+// sees.
 package main
 
 import (
@@ -38,33 +39,47 @@ const payloadSize = 4 << 20
 // receiver even if other agents on the network advertise a similar name.
 var receiverName = demo.Unique("Upload target")
 
-// receiverPage accepts transports and verifies what is streamed to it.
-func receiverPage(w *Window) error {
+// receiverPage accepts transports on each connection and verifies what is
+// streamed to it.
+func receiverPage(w *Window, done chan<- struct{}) error {
 	receiver, err := w.NewLP2PReceiver(LP2PReceiverOptions{Nickname: receiverName})
 	if err != nil {
 		return err
 	}
-	// Listening for transports starts the receiver.
-	listener, err := NewLP2PQuicTransportListener(receiver, LP2PQuicTransportListenerInit{})
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		transports := listener.IncomingTransports.GetReader(nil).(ReadableStreamDefaultReader[*LP2PQuicTransport])
-		for {
-			res, err := transports.Read()
-			if err != nil || res.Done {
-				return
-			}
-			go handleTransport(res.Val)
+	receiver.OnConnection(func(e LP2PConnectionEvent) {
+		// Listen for the peer's transports on this connection.
+		listener, err := NewLP2PQuicTransportListener(e.Connection, LP2PQuicTransportListenerInit{})
+		if err != nil {
+			log.Printf("Receiver: %v", err)
+			return
 		}
-	}()
-	return nil
+		go func() {
+			transports := listener.IncomingTransports.GetReader(nil).(ReadableStreamDefaultReader[*LP2PQuicTransport])
+			for {
+				res, err := transports.Read()
+				if err != nil || res.Done {
+					return
+				}
+				go handleTransport(res.Val, done)
+			}
+		}()
+	})
+	// Blocks until the user allowed the page to be discoverable.
+	return receiver.Start()
 }
 
-func handleTransport(t *LP2PQuicTransport) {
+func handleTransport(t *LP2PQuicTransport, done chan<- struct{}) {
 	log.Println("Receiver: got a transport")
+	go func() {
+		// The closed promise: how the requester ended the transport.
+		info, err := t.Closed()
+		if err != nil {
+			log.Printf("Receiver: transport failed: %v", err)
+		} else {
+			log.Printf("Receiver: transport closed by the peer with code %d: %q", info.CloseCode, info.Reason)
+		}
+		close(done)
+	}()
 	incoming := t.IncomingBidirectionalStreams.GetReader(nil).(ReadableStreamDefaultReader[WebTransportBidirectionalStream])
 	for {
 		res, err := incoming.Read()
@@ -110,13 +125,19 @@ func requesterPage(w *Window) error {
 	if err != nil {
 		return err
 	}
-	// Opening a transport on a request lets the user pick a peer and
-	// connects to it; closing the transport closes that connection.
-	transport, err := NewLP2PQuicTransport(request, LP2PQuicTransportInit{AllowPooling: true})
+	// Blocks while the user picks a device and pairs with it.
+	conn, err := request.Start()
 	if err != nil {
 		return err
 	}
-	defer transport.Close(WebTransportCloseInfo{})
+	defer conn.Close()
+
+	// A transport pooled on the connection; it is ready when constructed.
+	transport, err := NewLP2PQuicTransport(conn, LP2PQuicTransportInit{})
+	if err != nil {
+		return err
+	}
+	defer transport.Close(WebTransportCloseInfo{CloseCode: 0, Reason: "upload done"})
 
 	payload := make([]byte, payloadSize)
 	rand.Read(payload)
@@ -174,10 +195,12 @@ func main() {
 	defer receiverDevice.Close()
 	defer requesterDevice.Close()
 
-	if err := receiverPage(receiverDevice.Window); err != nil {
+	closed := make(chan struct{})
+	if err := receiverPage(receiverDevice.Window, closed); err != nil {
 		log.Fatalf("Receiver: %v", err)
 	}
 	if err := requesterPage(requesterDevice.Window); err != nil {
 		log.Fatalf("Requester: %v", err)
 	}
+	demo.Await(closed, "the receiver to see the transport close")
 }

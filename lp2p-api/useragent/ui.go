@@ -57,9 +57,14 @@ type PermissionRequest struct {
 	Origin string
 	// Nickname the page uses for itself.
 	Nickname string
-	// Peer is the remote peer, for PermissionAcceptConnection. Its name is
-	// not verified yet at this point.
+	// Peer is the remote peer, for PermissionAcceptConnection. With the
+	// session extension it is authenticated by then, and its name verified
+	// where possible; without, its name is not verified yet.
 	Peer Peer
+	// RequestingOrigin is the origin on whose behalf the peer requests the
+	// session, for PermissionAcceptConnection with the session extension.
+	// It is asserted by the peer's user agent, not proven.
+	RequestingOrigin string
 }
 
 // PINPresentation is a PIN to show to the user.

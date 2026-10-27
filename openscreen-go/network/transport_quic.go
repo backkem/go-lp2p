@@ -136,7 +136,7 @@ func (l *quicNetworkListener) acceptRaw(ctx context.Context) (quic.Connection, e
 	return conn, nil
 }
 
-// track keeps the UDP socket open while conn is alive.
+// track keeps the listener and its UDP socket open while conn is alive.
 func (l *quicNetworkListener) track(conn quic.Connection) {
 	l.mu.Lock()
 	l.active++
@@ -147,33 +147,51 @@ func (l *quicNetworkListener) track(conn quic.Connection) {
 
 		l.mu.Lock()
 		l.active--
-		closeTransport := l.closed && l.active == 0
+		closeNow := l.closed && l.active == 0
 		l.mu.Unlock()
-		if closeTransport {
-			_ = l.transport.Close()
+		if closeNow {
+			l.closeQuic()
 		}
 	}()
+}
+
+// closeQuic closes the QUIC listener and the UDP socket.
+func (l *quicNetworkListener) closeQuic() {
+	_ = l.listener.Close()
+	_ = l.transport.Close()
 }
 
 func (l *quicNetworkListener) wrap(conn quic.Connection) NetworkConnection {
 	return newQuicNetworkConnection(conn, l.keepAlive, l.log)
 }
 
-// Close stops listening. Accepted connections are not closed, they share the
-// UDP socket, which is closed once the last of them is closed.
+// Close stops listening. Accepted connections are not closed: closing the
+// quic-go listener would shut down its connections, so it is closed, with
+// the UDP socket they share, once the last of them is closed. Until then,
+// connections that still complete a handshake are closed right away.
 func (l *quicNetworkListener) Close() error {
-	err := l.listener.Close()
-
 	l.mu.Lock()
-	l.closed = true
-	closeTransport := l.active == 0
-	l.mu.Unlock()
-	if closeTransport {
-		if tErr := l.transport.Close(); err == nil {
-			err = tErr
-		}
+	if l.closed {
+		l.mu.Unlock()
+		return nil
 	}
-	return err
+	l.closed = true
+	closeNow := l.active == 0
+	l.mu.Unlock()
+	if closeNow {
+		l.closeQuic()
+		return nil
+	}
+	go func() {
+		for {
+			conn, err := l.listener.Accept(context.Background())
+			if err != nil {
+				return
+			}
+			_ = conn.CloseWithError(QuicErrorCodeNoLongerNeeded, "listener closed")
+		}
+	}()
+	return nil
 }
 
 func (l *quicNetworkListener) Addr() net.Addr {

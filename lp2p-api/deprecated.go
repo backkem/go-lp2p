@@ -29,12 +29,15 @@ func NewLP2Receiver(config LP2PReceiverConfig) (*LP2PReceiver, error) {
 	return NewLP2PReceiver(config)
 }
 
-// Deprecated: use NewLP2PQuicTransport(r, init).
-func (r *LP2PRequest) NewLP2PQuicTransport(init LP2PQuicTransportInit) (*LP2PQuicTransport, error) {
-	return NewLP2PQuicTransport(r, init)
-}
-
 // Deprecated: use NewLP2PQuicTransport(c, init).
 func (c *LP2PConnection) NewLP2PQuicTransport(init LP2PQuicTransportInit) (*LP2PQuicTransport, error) {
 	return NewLP2PQuicTransport(c, init)
+}
+
+// Close stops the receiver.
+//
+// Deprecated: use Stop, the proposal's name.
+func (r *LP2PReceiver) Close() error {
+	r.Stop()
+	return nil
 }

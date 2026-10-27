@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	ospc "github.com/backkem/go-lp2p/openscreen-go/network"
 )
 
 // Errors returned by the user agent. The lp2p package maps them onto
@@ -34,7 +36,13 @@ var (
 	ErrAuthenticationFailed = errors.New("authentication failed")
 	// ErrClosed means the user agent or advertisement was closed.
 	ErrClosed = errors.New("user agent closed")
+	// ErrRefused means the peer refused the session: no receiver of the
+	// peer allows the requesting origin, or its user declined.
+	ErrRefused = errors.New("session refused by the peer")
 )
+
+// logger is the user agent's logger type.
+type logger = *slog.Logger
 
 const (
 	// DefaultHandshakeTimeout bounds consent and authentication of a
@@ -64,6 +72,17 @@ type Config struct {
 	PairingTimeout time.Duration
 	// Logger receives diagnostics. Nil discards them.
 	Logger *slog.Logger
+
+	// DisableSessionExtension turns off the LP2P session extension
+	// (index.bs "Session extension") for interop with peers that don't
+	// implement lp2p-session-request/response, such as openscreen's
+	// lp2p_demo. Off by default. With it, the user agent falls back to
+	// plain OSP: no requesting origin is carried, so allowed origins can't
+	// be checked, either side may start SPAKE2, and every connection pairs
+	// with a PIN even with a trusted peer; the user is asked to accept each
+	// incoming connection before pairing. Violates index.bs "Session
+	// extension" and "Incoming sessions".
+	DisableSessionExtension bool
 }
 
 // UserAgent is a mock browser hosting LP2P pages. It is safe for concurrent
@@ -75,6 +94,11 @@ type UserAgent struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// identity holds the agent certificate shared by all of the user
+	// agent's connections, so peers see one stable peer ID.
+	identity *ospc.Agent
+	trust    *trustState
 
 	mu      sync.Mutex
 	closed  bool
@@ -103,19 +127,29 @@ func New(cfg Config) (*UserAgent, error) {
 	if cfg.Name != "" {
 		log = log.With("ua", cfg.Name)
 	}
+	identity, err := ospc.NewAgent(ospc.NewAgentConfig(cfg.Name))
+	if err != nil {
+		return nil, fmt.Errorf("ua: generate agent certificate: %w", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &UserAgent{
-		cfg:     cfg,
-		log:     log,
-		peers:   newPeerList(),
-		ctx:     ctx,
-		cancel:  cancel,
-		adverts: make(map[*Advertisement]struct{}),
+		cfg:      cfg,
+		log:      log,
+		peers:    newPeerList(),
+		ctx:      ctx,
+		cancel:   cancel,
+		identity: identity,
+		trust:    newTrustState(),
+		adverts:  make(map[*Advertisement]struct{}),
 	}, nil
 }
 
 // Name of the user agent, as configured.
 func (u *UserAgent) Name() string { return u.cfg.Name }
+
+// PeerID is the ID peers know this user agent by: the fingerprint of its
+// agent certificate, the same for all of its connections.
+func (u *UserAgent) PeerID() string { return string(u.identity.PeerID) }
 
 // UI returns the user agent's UI.
 func (u *UserAgent) UI() UI { return u.cfg.UI }

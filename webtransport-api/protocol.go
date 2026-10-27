@@ -23,6 +23,32 @@ type Session interface {
 	CloseWithError(uint64, string) error
 }
 
+// Optional capabilities of a Session, checked at run time by Transport.
+
+// SessionCloser reports how a session was closed.
+type SessionCloser interface {
+	// Closed blocks until the session is closed and returns the close info
+	// of a clean close, or the error of an abrupt one.
+	Closed(context.Context) (WebTransportCloseInfo, error)
+}
+
+// SessionDrainer reports the peer's request to drain the session.
+type SessionDrainer interface {
+	// Draining is closed once the peer asked to finish using the session.
+	Draining() <-chan struct{}
+}
+
+// SessionExporter derives keying material bound to the session.
+type SessionExporter interface {
+	ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error)
+}
+
+// SessionDatagrams sends and receives datagrams on the session.
+type SessionDatagrams interface {
+	SendDatagram([]byte) error
+	ReceiveDatagram(context.Context) ([]byte, error)
+}
+
 // Stream
 type Stream interface {
 	ReceiveStream
