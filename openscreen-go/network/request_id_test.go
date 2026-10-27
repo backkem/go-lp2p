@@ -96,7 +96,7 @@ func newTestLocalAgent(t *testing.T) *Agent {
 func TestRequestIDsSurviveReconnect(t *testing.T) {
 	local := newTestLocalAgent(t)
 
-	conn1 := newBaseConnection(nil, local, &Agent{PeerID: "peer-a"}, AgentRoleClient, "")
+	conn1 := newBaseConnection(nil, local, &Agent{PeerID: "peer-a"}, AgentRoleClient, "", false)
 	for want := uint64(1); want <= 3; want++ {
 		if got := conn1.nextRequestID(); got != want {
 			t.Fatalf("conn1: got %d, want %d", got, want)
@@ -104,13 +104,13 @@ func TestRequestIDsSurviveReconnect(t *testing.T) {
 	}
 
 	// Reconnect to the same peer.
-	conn2 := newBaseConnection(nil, local, &Agent{PeerID: "peer-a"}, AgentRoleClient, "")
+	conn2 := newBaseConnection(nil, local, &Agent{PeerID: "peer-a"}, AgentRoleClient, "", false)
 	if got := conn2.nextRequestID(); got != 4 {
 		t.Fatalf("conn2 after reconnect: got %d, want 4", got)
 	}
 
 	// A different peer has its own counter.
-	conn3 := newBaseConnection(nil, local, &Agent{PeerID: "peer-b"}, AgentRoleServer, "")
+	conn3 := newBaseConnection(nil, local, &Agent{PeerID: "peer-b"}, AgentRoleServer, "", false)
 	if got := conn3.nextRequestID(); got != 1 {
 		t.Fatalf("conn3 (other peer): got %d, want 1", got)
 	}
@@ -172,7 +172,7 @@ func TestRequestIDsConcurrentConnections(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			conn := newBaseConnection(nil, local, &Agent{PeerID: "peer-a"}, AgentRoleClient, "")
+			conn := newBaseConnection(nil, local, &Agent{PeerID: "peer-a"}, AgentRoleClient, "", false)
 			for i := 0; i < perConn; i++ {
 				id := conn.nextRequestID()
 				mu.Lock()

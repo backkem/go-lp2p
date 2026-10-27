@@ -16,36 +16,35 @@ var ErrAuthenticationFailed = errors.New("authentication failed")
 
 type exchangeInfoState struct {
 	requestIds map[uint64]bool // Of the agent-info-requests sent.
+	infoDone   chan struct{}   // Closed when the remote agent-info is received.
 	done       chan struct{}   // Closed when the remote info is complete.
 }
 
 // exchangeInfo sends the local auth-capabilities and requests the remote
-// agent-info. The returned channel is closed once both the remote agent-info
-// and auth-capabilities are received.
-func (c *baseConnection) exchangeInfo() (<-chan struct{}, error) {
+// agent-info. The returned state's done channel is closed once both the
+// remote agent-info and auth-capabilities are received.
+//
+// A server with the session extension doesn't send auth-capabilities here:
+// it is the cue for the client to authenticate, sent by RequestAuthentication
+// once the requesting origin hint was checked.
+func (c *baseConnection) exchangeInfo() (*exchangeInfoState, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.exchangeInfoState != nil {
-		return c.exchangeInfoState.done, nil
+		return c.exchangeInfoState, nil
 	}
 
-	// Auth Info
-	localAuthInfo := c.localAgent.AuthenticationInfo()
-	authMsg := &msgAuthCapabilities{
-		PskEaseOfInput:      uint64(localAuthInfo.PSKConfig.EaseOfInput),
-		PskInputMethods:     []msgPskInputMethod{PskInputMethodNumeric},
-		PskMinBitsOfEntropy: uint64(localAuthInfo.PSKConfig.Entropy),
-	}
-
-	err := c.send(authMsg)
-	if err != nil {
-		return nil, err
+	if c.session == nil || c.agentRole != AgentRoleServer {
+		if err := c.sendAuthCapabilities(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Remote AgentInfo
 	state := &exchangeInfoState{
 		requestIds: make(map[uint64]bool),
+		infoDone:   make(chan struct{}),
 		done:       make(chan struct{}),
 	}
 	c.exchangeInfoState = state
@@ -53,7 +52,19 @@ func (c *baseConnection) exchangeInfo() (<-chan struct{}, error) {
 		return nil, err
 	}
 
-	return state.done, nil
+	return state, nil
+}
+
+// sendAuthCapabilities sends the local auth-capabilities.
+//
+// Caller should hold connection lock.
+func (c *baseConnection) sendAuthCapabilities() error {
+	localAuthInfo := c.localAgent.AuthenticationInfo()
+	return c.send(&msgAuthCapabilities{
+		PskEaseOfInput:      uint64(localAuthInfo.PSKConfig.EaseOfInput),
+		PskInputMethods:     []msgPskInputMethod{PskInputMethodNumeric},
+		PskMinBitsOfEntropy: uint64(localAuthInfo.PSKConfig.Entropy),
+	})
 }
 
 // sendAgentInfoRequest sends an agent-info-request with a new request ID.
@@ -90,7 +101,7 @@ func (c *baseConnection) retryAgentInfoRequest() error {
 var ErrNoAgentInfo = errors.New("peer did not complete metadata discovery")
 
 // infoExchangeTimeout bounds the info exchange of new connections.
-const infoExchangeTimeout = 10 * time.Second
+var infoExchangeTimeout = 10 * time.Second
 
 // infoRetryInterval is how often the agent-info-request is resent while
 // waiting for the response.
@@ -102,10 +113,23 @@ const tolerateInfoGrace = 2 * time.Second
 
 // awaitInfo runs the info exchange and waits for it to complete, at most
 // infoExchangeTimeout. It does not close the connection on failure.
+//
+// With the session extension, a client only waits for the remote agent-info,
+// as the server holds back its auth-capabilities; a server also waits for
+// the lp2p-session-request.
 func (c *baseConnection) awaitInfo(ctx context.Context) error {
-	done, err := c.exchangeInfo()
+	state, err := c.exchangeInfo()
 	if err != nil {
 		return fmt.Errorf("failed to exchange info: %w", err)
+	}
+	done := state.done
+	var sessionRequested <-chan struct{}
+	if c.session != nil {
+		if c.agentRole == AgentRoleClient {
+			done = state.infoDone
+		} else {
+			sessionRequested = c.session.requested
+		}
 	}
 
 	timeout := infoExchangeTimeout
@@ -133,7 +157,19 @@ func (c *baseConnection) awaitInfo(ctx context.Context) error {
 		case <-c.ctx.Done():
 			return c.err()
 		case <-done:
-			return nil
+			if sessionRequested == nil {
+				return nil
+			}
+			select {
+			case <-sessionRequested:
+				return nil
+			case <-ctx.Done():
+				return fmt.Errorf("%w: %w", ErrNoSessionRequest, ctx.Err())
+			case <-c.ctx.Done():
+				return c.err()
+			case <-timer.C:
+				return fmt.Errorf("%w within %v", ErrNoSessionRequest, timeout)
+			}
 		case <-timer.C:
 			if tolerate {
 				c.proceedWithoutInfo()
@@ -177,7 +213,17 @@ func (c *baseConnection) proceedWithoutInfo() {
 // caller should hold connection lock.
 func (c *baseConnection) checkAgentInfoComplete() {
 	state := c.exchangeInfoState
-	if state == nil || !c.remoteAgent.HasInfo() || !c.remoteAgent.HasAuthenticationInfo() {
+	if state == nil {
+		return
+	}
+	if c.remoteAgent.HasInfo() {
+		select {
+		case <-state.infoDone:
+		default:
+			close(state.infoDone)
+		}
+	}
+	if !c.remoteAgent.HasInfo() || !c.remoteAgent.HasAuthenticationInfo() {
 		return
 	}
 	select {
@@ -208,12 +254,18 @@ func (t AuthenticationRole) String() string {
 	}
 }
 
-// GetAuthenticationRole determines if the agent should act as presenter or consumer of the PSK.
-// Only correct after auth-capabilities exchange.
+// GetAuthenticationRole determines if the agent should act as presenter or
+// consumer of the PSK. Only correct after the auth-capabilities exchange;
+// before, the peer's capabilities are assumed equal to the local ones. That
+// is the case for a client that must authenticate after the server accepted
+// its session without sending auth-capabilities.
 func (c *baseConnection) GetAuthenticationRole() AuthenticationRole {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if !c.authNotified {
+		c.determineAuthenticationRole()
+	}
 	return c.authenticationRole
 }
 
@@ -407,14 +459,18 @@ func (c *baseConnection) skipAuthentication() (*Connection, error) {
 	return c.handOff(false)
 }
 
-// handOff hands the connection to the application protocol.
+// handOff hands the connection to the application protocol. Once handed
+// off, it only marks the remote agent authenticated.
 func (c *baseConnection) handOff(authenticated bool) (*Connection, error) {
+	if authenticated {
+		c.remoteAgent.setAuthenticated()
+	}
+	if c.app.Load() != nil {
+		return &Connection{base: c}, nil
+	}
 	appConn, err := c.netConn.IntoApplicationConnection()
 	if err != nil {
 		return nil, err
-	}
-	if authenticated {
-		c.remoteAgent.setAuthenticated()
 	}
 
 	c.app.Store(&connectedState{
@@ -451,6 +507,9 @@ func (c *baseConnection) authenticatePSK(psk []byte) (<-chan struct{}, error) {
 		return nil, errors.New("already authenticating")
 	}
 	authState.psk = []byte(pw)
+	if !c.authNotified {
+		c.determineAuthenticationRole()
+	}
 	if !c.localAgent.quirks.Spake2SuiteP256 {
 		err = c.authFailed(AuthStatusResultUnknownError, ErrSpake2SuiteUnsupported)
 	} else {
@@ -561,6 +620,9 @@ func (c *baseConnection) authenticatePSKProgress() error {
 		var err error
 		if hs := authState.remoteHandshake; hs != nil {
 			err = c.authRespond(hs)
+		} else if c.session != nil && c.agentRole == AgentRoleServer {
+			// Session extension: only the client initiates.
+			return nil
 		} else {
 			err = c.authInitiate()
 		}
@@ -708,6 +770,9 @@ func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if !c.sessionRequested() {
+		return fmt.Errorf("%w: authentication before lp2p-session-request", ErrSessionProtocol)
+	}
 	if token := msg.AuthInitiationToken.Token; token != nil && !c.validAuthInitiationToken(*token) {
 		c.log.Warn("discarding auth-spake2-handshake with invalid auth-initiation-token")
 		return nil
@@ -835,6 +900,9 @@ func (c *baseConnection) runNetwork() bool {
 
 func (c *baseConnection) handleNetworkMessage(msg interface{}) error {
 	switch typedMsg := msg.(type) {
+	case *incomingSessionRequest:
+		return c.handleSessionRequest(typedMsg)
+
 	case *msgAgentInfoRequest:
 		return c.handleAgentInfoRequest(typedMsg)
 

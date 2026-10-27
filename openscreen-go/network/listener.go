@@ -390,7 +390,7 @@ func (l *Listener) handleNetworkConnection(nc NetworkConnection) {
 	at := l.authToken
 	l.mu.Unlock()
 
-	bConn := newBaseConnection(nc, l.agent, remoteAgent, AgentRoleServer, at)
+	bConn := newBaseConnection(nc, l.agent, remoteAgent, AgentRoleServer, at, l.agent.sessionExtension)
 	bConn.runNetwork()
 
 	l.wg.Add(1)

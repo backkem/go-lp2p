@@ -66,6 +66,17 @@ type AgentConfig struct {
 	// InteropQuirks enables deviations from the spec for interop with
 	// non-conforming peers. All are off by default, see InteropQuirks.
 	InteropQuirks InteropQuirks
+
+	// SessionExtension enables the LP2P session extension
+	// (local-peer-to-peer index.bs "Session extension") on connections
+	// accepted by this agent's listeners: every client must send an
+	// lp2p-session-request, reported by RequestingOrigin, and the connection
+	// is refused (RefuseSession) or accepted (CompleteSession) by the caller;
+	// auth-capabilities is only sent on RequestAuthentication and SPAKE2 is
+	// only ever started by the client. Off by default: plain OSP peers don't
+	// send lp2p-session-request. Dialing with it is per connection, see
+	// DiscoveredAgent.DialSession.
+	SessionExtension bool
 }
 
 func NewAgentConfig(nickname string) AgentConfig {
@@ -132,9 +143,10 @@ type Agent struct {
 
 	capabilities []AgentCapability // Only set for local agents, see AgentConfig.Capabilities.
 
-	keepAlive KeepAliveConfig
-	log       *slog.Logger  // Only set for local agents.
-	quirks    InteropQuirks // Only set for local agents.
+	keepAlive        KeepAliveConfig
+	log              *slog.Logger  // Only set for local agents.
+	quirks           InteropQuirks // Only set for local agents.
+	sessionExtension bool          // Only set for local agents.
 
 	// Local agent state, see request_id.go. Initialized lazily.
 	stateToken string
@@ -232,6 +244,7 @@ func NewAgent(c AgentConfig) (*Agent, error) {
 	agent.keepAlive = c.KeepAlive
 	agent.log = c.Logger
 	agent.quirks = c.InteropQuirks
+	agent.sessionExtension = c.SessionExtension
 	if agent.quirks.Any() {
 		agent.logger().Warn("interop quirks enabled, the agent deviates from the Open Screen Protocol", "quirks", fmt.Sprintf("%+v", agent.quirks))
 	}

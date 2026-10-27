@@ -141,12 +141,17 @@ type baseConnection struct {
 	authenticationState *authenticationState
 	authTokenSent       bool
 
+	// session is the state of the session extension, nil without it.
+	session *sessionState
+
 	// app is set once authenticated, before the Connection is handed out
 	// and before the application goroutines start.
 	app atomic.Pointer[connectedState]
 }
 
-func newBaseConnection(nc NetworkConnection, localAgent *Agent, remoteAgent *Agent, role AgentRole, authToken string) *baseConnection {
+// newBaseConnection creates a connection. session enables the session
+// extension on it.
+func newBaseConnection(nc NetworkConnection, localAgent *Agent, remoteAgent *Agent, role AgentRole, authToken string, session bool) *baseConnection {
 	// TODO: Retransmission in case NetworkConnection is not reliable.
 
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -160,6 +165,9 @@ func newBaseConnection(nc NetworkConnection, localAgent *Agent, remoteAgent *Age
 		remoteAgent: remoteAgent,
 		authToken:   authToken,
 		authNotify:  make(chan struct{}),
+	}
+	if session {
+		bConn.session = newSessionState()
 	}
 
 	// Transport-level keep-alive requests share the per-peer request IDs.
@@ -198,9 +206,14 @@ func (c *baseConnection) RemoteAgent() *Agent {
 	return c.remoteAgent
 }
 
-// send writes a network protocol message.
+// send writes a network protocol message. It keeps working after the
+// hand-off on transports that allow it, for authentication messages a
+// client sends after the server accepted its session on trust.
 func (c *baseConnection) send(msg interface{}) error {
 	c.log.Debug("send", "msg", msgName(msg))
+	if s, ok := c.netConn.(interface{ sendMessage(interface{}) error }); ok {
+		return s.sendMessage(msg)
+	}
 	return writeMessage(msg, c.netConn)
 }
 

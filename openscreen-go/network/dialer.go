@@ -32,7 +32,25 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 	tlsConfig := dialTLSConfig(fp, ra.serverName(), la)
 	addr := fmt.Sprintf("%s:%d", getMdnsHost(ra.info), ra.info.Port)
 
-	return ra.dial(ctx, transportType, la, addr, tlsConfig)
+	return ra.dial(ctx, transportType, la, addr, tlsConfig, nil)
+}
+
+// DialSession opens a connection to the remote agent with the LP2P session
+// extension: it sends an lp2p-session-request with origin, the requesting
+// origin, right after the agent-info exchange. It fails with
+// ErrSessionUnsupported if the agent lists neither data-channels nor
+// quic-transport. The returned connection is driven with AwaitSession,
+// AuthenticatePSK or TrustPeer, and CompleteSession.
+func (ra DiscoveredAgent) DialSession(ctx context.Context, transportType AgentTransport, la *Agent, origin string) (*UnauthenticatedConnection, error) {
+	fp, err := ra.TXT.GetOne(txtKeyFingerprint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get fp record: %v", err)
+	}
+
+	tlsConfig := dialTLSConfig(fp, ra.serverName(), la)
+	addr := fmt.Sprintf("%s:%d", getMdnsHost(ra.info), ra.info.Port)
+
+	return ra.dial(ctx, transportType, la, addr, tlsConfig, &origin)
 }
 
 // serverName returns the TLS server_name for dialing the agent: its agent
@@ -68,9 +86,10 @@ func dialTLSConfig(fp, serverName string, la *Agent) *tls.Config {
 	}
 }
 
-// dial connects to addr and runs the info exchange. On failure, including
-// cancellation of ctx, everything set up so far is closed.
-func (ra DiscoveredAgent) dial(ctx context.Context, transportType AgentTransport, la *Agent, addr string, tlsConfig *tls.Config) (*UnauthenticatedConnection, error) {
+// dial connects to addr and runs the info exchange, and with a non-nil
+// sessionOrigin the session request. On failure, including cancellation of
+// ctx, everything set up so far is closed.
+func (ra DiscoveredAgent) dial(ctx context.Context, transportType AgentTransport, la *Agent, addr string, tlsConfig *tls.Config, sessionOrigin *string) (*UnauthenticatedConnection, error) {
 	t, err := newAgentTransport(transportType, la.keepAlive, la.logger())
 	if err != nil {
 		return nil, err
@@ -94,12 +113,18 @@ func (ra DiscoveredAgent) dial(ctx context.Context, transportType AgentTransport
 		at = ""
 	}
 
-	bConn := newBaseConnection(nc, la, remoteAgent, AgentRoleClient, at)
+	bConn := newBaseConnection(nc, la, remoteAgent, AgentRoleClient, at, sessionOrigin != nil)
 	bConn.runNetwork()
 
 	if err := bConn.awaitInfo(ctx); err != nil {
 		_ = bConn.Close()
 		return nil, err
+	}
+	if sessionOrigin != nil {
+		if err := bConn.startSession(ctx, *sessionOrigin); err != nil {
+			_ = bConn.Close()
+			return nil, err
+		}
 	}
 
 	return &UnauthenticatedConnection{

@@ -50,7 +50,21 @@ func (c *baseConnection) routeStream(s ApplicationStream) {
 		return
 	}
 
+	switch {
+	case typeKey >= typeKeyAuthCapabilities && typeKey < typeKeyDataChannelOpenRequest:
+		// auth-* after the hand-off: with the session extension, a client
+		// that doesn't trust the server's certificate authenticates after
+		// the server accepted its session on trust. The server answers.
+		c.handleLateAuthStream(rec, s, typeKey)
+		return
+	}
+
 	switch typeKey {
+	case typeKeyLp2pSessionRequest:
+		// Only one per connection, and it precedes authentication.
+		_ = s.Close()
+		c.shutdown(fmt.Errorf("%w: lp2p-session-request after authentication", ErrSessionProtocol))
+		return
 	case typeKeyDataChannelOpenRequest, typeKeyDataTransportStartRequest, typeKeyDataTransportStream:
 	default:
 		// Not ours: hand the stream over as received.
@@ -85,6 +99,27 @@ func (c *baseConnection) routeStream(s ApplicationStream) {
 
 	case *msgDataTransportStream:
 		deliver(c, app.acceptTransportStream, s, s.Close)
+	}
+}
+
+// handleLateAuthStream handles the authentication messages of a stream
+// received after the hand-off, see routeStream.
+func (c *baseConnection) handleLateAuthStream(rec *recordingReader, s ApplicationStream, typeKey TypeKey) {
+	msg, err := readMessageBody(rec, typeKey)
+	for {
+		if err == io.EOF {
+			_ = s.Close()
+			return
+		} else if err != nil {
+			c.shutdown(fmt.Errorf("authentication after hand-off: %w", err))
+			return
+		}
+		c.log.Debug("receive", "msg", msgName(msg))
+		if err := c.handleNetworkMessage(msg); err != nil {
+			c.shutdown(fmt.Errorf("network protocol: %w", err))
+			return
+		}
+		msg, err = readMessage(rec)
 	}
 }
 

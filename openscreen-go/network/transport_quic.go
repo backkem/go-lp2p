@@ -300,6 +300,22 @@ func (q *quicNetworkConnection) readStream(r quic.ReceiveStream, w quic.SendStre
 	q.mu.Lock()
 	handedOff := errors.Is(q.closeErr, ErrTransportHandedOff)
 	q.mu.Unlock()
+	if typeKey == typeKeyLp2pSessionRequest && !handedOff {
+		// Session extension: the request is delivered with its stream, on
+		// which the response goes.
+		msg, err := readMessageBody(r, typeKey)
+		if err != nil {
+			q.logReadError(r, err)
+			r.CancelRead(0)
+			return
+		}
+		req := &incomingSessionRequest{msg: msg.(*msgLp2pSessionRequest)}
+		if w != nil {
+			req.stream = &quicApplicationStream{recv: r, send: w, r: r, keepAlive: q.keepAlive}
+		}
+		q.dispatch(req)
+		return
+	}
 	if !isKeepAliveTypeKey(typeKey) && (handedOff || !isNetworkTypeKey(typeKey)) {
 		q.routeApplicationStream(&quicApplicationStream{
 			recv:      r,
@@ -437,6 +453,19 @@ type writerFunc func(p []byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) {
 	return f(p)
+}
+
+// OpenNetworkStream opens a bidirectional stream during the network phase,
+// for the session extension.
+func (q *quicNetworkConnection) OpenNetworkStream(ctx context.Context) (ApplicationStream, error) {
+	if err := q.closeError(); err != nil {
+		return nil, err
+	}
+	s, err := q.conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &quicApplicationStream{recv: s, send: s, r: s, keepAlive: q.keepAlive}, nil
 }
 
 func (q *quicNetworkConnection) setRequestIDSource(next func() uint64) {
