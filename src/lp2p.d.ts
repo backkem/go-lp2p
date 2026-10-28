@@ -17,10 +17,13 @@ interface LP2PConnectionEventInit extends EventInit {
 }
 class LP2PRequest {
     constructor(options?: LP2PRequestOptions): LP2PRequest;
-    start(): Promise<LP2PConnection>;
+    start(options?: LP2PRequestStartOptions): Promise<LP2PConnection>;
 }
 interface LP2PRequestOptions {
     nickname?: string;
+}
+interface LP2PRequestStartOptions {
+    signal?: AbortSignal;
 }
 interface LP2PConnection extends EventTarget {
     close(): undefined;

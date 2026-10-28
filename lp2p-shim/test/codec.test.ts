@@ -117,6 +117,8 @@ test("messages: LP2P session and WebTransport messages match the CDDL (PR 17 App
     ],
     // lp2p-session-response = { response, 1: &result } (1111), success = 1
     [{ type: TypeKey.SessionResponse, requestId: 1, result: 1 }, "4457" + "a2" + "0001" + "0101"],
+    // lp2p-session-result authentication-required = 1110 (provisional)
+    [{ type: TypeKey.SessionResponse, requestId: 1, result: 1110 }, "4457" + "a2" + "0001" + "01" + "190456"],
     // data-transport-start-request = { request, 1: exchange-id, ? 2: bytes .size 32 } (1201)
     [{ type: TypeKey.DataTransportStartRequest, requestId: 2, exchangeId: 4 }, "44b1" + "a2" + "0002" + "0104"],
     [

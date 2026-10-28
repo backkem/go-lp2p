@@ -47,6 +47,13 @@ export declare const Result: {
     readonly Terminating: 103;
     readonly UnknownError: 199;
 };
+/** lp2p-session-result: &result plus the provisional authentication-required. */
+export declare const SessionResult: {
+    readonly Success: 1;
+    readonly PermanentError: 102;
+    /** Provisional: the server asks the client to authenticate; a final result follows. */
+    readonly AuthenticationRequired: 1110;
+};
 /** auth-spake2-psk-status */
 export declare const PskStatus: {
     readonly NeedsPresentation: 0;

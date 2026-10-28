@@ -15,7 +15,7 @@
 
 import type { LP2PConnection } from "./connection.ts";
 import { LP2PReceiver, type LP2PReceiverOptions } from "./receiver.ts";
-import { LP2PRequest, type LP2PRequestOptions } from "./request.ts";
+import { LP2PRequest, type LP2PRequestOptions, type LP2PRequestStartOptions } from "./request.ts";
 import {
   LP2PQuicTransport,
   LP2PQuicTransportListener,
@@ -24,7 +24,7 @@ import {
 } from "./quictransport.ts";
 
 export interface MakeDiscoverableOptions extends LP2PReceiverOptions, LP2PQuicTransportListenerInit {}
-export interface ConnectOptions extends LP2PRequestOptions, LP2PQuicTransportInit {}
+export interface ConnectOptions extends LP2PRequestOptions, LP2PRequestStartOptions, LP2PQuicTransportInit {}
 
 function receiverOptions(o: MakeDiscoverableOptions): LP2PReceiverOptions {
   const r: LP2PReceiverOptions = {};
@@ -127,12 +127,20 @@ export function makeDiscoverable(options: MakeDiscoverableOptions = {}): Readabl
  * Resolves with the transport once a peer is picked and the session is up;
  * rejects with NotAllowedError if the request fails, or with the
  * transport's error (and then closes the connection, which the page never
- * saw). The connection stays the page's to use and close
+ * saw). Aborting options.signal takes the picker or the session setup
+ * down, as for LP2PRequest.start({signal}). The shorthand covers
+ * transports only: a connection on which the peer only opens data
+ * channels never shows up in makeDiscoverable(). The connection stays the page's to use and close
  * (transport.connection).
  */
 export async function connect(options: ConnectOptions = {}): Promise<LP2PQuicTransport> {
   const opts = options ?? {};
-  const connection = await new LP2PRequest(opts).start();
+  const request = new LP2PRequest(opts.nickname === undefined ? {} : { nickname: opts.nickname });
+  const connection = await request.start(opts.signal ? { signal: opts.signal } : {});
+  if (opts.signal?.aborted) {
+    connection.close();
+    throw opts.signal.reason;
+  }
   try {
     const transport = new LP2PQuicTransport(connection, transportOptions(opts));
     await transport.ready;

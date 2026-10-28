@@ -2,7 +2,7 @@
 // Not secure; see README.md.
 
 export { LP2PReceiver, type LP2PReceiverOptions } from "./api/receiver.ts";
-export { LP2PRequest, type LP2PRequestOptions } from "./api/request.ts";
+export { LP2PRequest, type LP2PRequestOptions, type LP2PRequestStartOptions } from "./api/request.ts";
 export { LP2PConnection } from "./api/connection.ts";
 export { LP2PDataChannel, type LP2PDataChannelInit, type LP2PDataChannelState } from "./api/datachannel.ts";
 export {

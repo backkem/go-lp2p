@@ -70,6 +70,14 @@ export const Result = {
   UnknownError: 199,
 } as const;
 
+/** lp2p-session-result: &result plus the provisional authentication-required. */
+export const SessionResult = {
+  Success: 1,
+  PermanentError: 102,
+  /** Provisional: the server asks the client to authenticate; a final result follows. */
+  AuthenticationRequired: 1110,
+} as const;
+
 /** auth-spake2-psk-status */
 export const PskStatus = {
   NeedsPresentation: 0,

@@ -774,6 +774,7 @@ __export(messages_exports, {
   PskStatus: () => PskStatus,
   Result: () => Result,
   SESSION_BINDING_BYTES: () => SESSION_BINDING_BYTES,
+  SessionResult: () => SessionResult,
   TypeKey: () => TypeKey,
   decodeMessage: () => decodeMessage,
   encodeMessage: () => encodeMessage
@@ -1109,6 +1110,12 @@ var Result = {
   PermanentError: 102,
   Terminating: 103,
   UnknownError: 199
+};
+var SessionResult = {
+  Success: 1,
+  PermanentError: 102,
+  /** Provisional: the server asks the client to authenticate; a final result follows. */
+  AuthenticationRequired: 1110
 };
 var PskStatus = {
   NeedsPresentation: 0,
@@ -2182,10 +2189,11 @@ var Session = class {
   }
   /**
    * Client: sends lp2p-session-request with origin on a new stream. The
-   * promise resolves with the server's result, or rejects if the stream or
-   * the connection closes first.
+   * promise resolves with the server's final result, or rejects if the
+   * stream or the connection closes first. A provisional
+   * authentication-required calls onAuthenticationRequired.
    */
-  requestSession(origin) {
+  requestSession(origin, onAuthenticationRequired) {
     const stream = this.connection.openStream();
     const requestId = this.requestId();
     stream.send(encodeMessage({ type: TypeKey.SessionRequest, requestId, requestingOrigin: origin }));
@@ -2198,6 +2206,10 @@ var Session = class {
           return;
         }
         if (m.type !== TypeKey.SessionResponse || m.requestId !== requestId) return;
+        if (m.result === SessionResult.AuthenticationRequired) {
+          onAuthenticationRequired?.();
+          return;
+        }
         resolve(m.result);
         stream.onclose = null;
         stream.close();
@@ -2323,6 +2335,10 @@ var Session = class {
     let answered = false;
     const req = {
       requestingOrigin,
+      requireAuthentication: () => {
+        if (answered || stream.closed) return;
+        stream.send(encodeMessage({ type: TypeKey.SessionResponse, requestId, result: SessionResult.AuthenticationRequired }));
+      },
       respond: (result) => {
         if (answered || stream.closed) return Promise.resolve();
         answered = true;
@@ -2541,48 +2557,51 @@ var UserAgent = class {
         session.onsessionrequest = resolve;
         ac.signal.addEventListener("abort", () => reject(ac.signal.reason), { once: true });
       });
-      let info;
-      const { control, tls, req } = await this.withTimeout(
+      request.catch(() => {
+      });
+      const { control, tls, remote } = await this.withTimeout(
         (async () => {
           const control2 = await session.controlChannel(ac.signal);
           const tls2 = await handshake(control2, identity, "server", ac.signal);
           session.tls = tls2;
-          info = session.exchangeInfo(this.agentInfo(), ac.signal);
-          info.catch(() => {
-          });
-          return { control: control2, tls: tls2, req: await request };
+          sendAuthCapabilities(control2);
+          const remote2 = await session.exchangeInfo(this.agentInfo(), ac.signal);
+          return { control: control2, tls: tls2, remote: remote2 };
         })(),
         ac
       );
-      const hint = parseOrigin(req.requestingOrigin) ?? "null";
-      if (!this.receiverFor(hint, own)) {
-        refuse(req, `no receiver allows ${hint}`);
-        return;
-      }
-      const parties = { client: tls.peerFingerprint, server: identity.fingerprint };
-      const remote = await this.withTimeout(info, ac);
+      const client = tls.peerFingerprint;
+      const parties = { client, server: identity.fingerprint };
       const peer = { id: conn.remoteId, nickname: "", displayName: remote.displayName, verified: false };
-      const showPIN = this.pairing === "pin" ? this.pinPresenter(own, peer, ac.signal) : null;
-      if (this.local.isAuthenticated(tls.peerFingerprint)) {
-        const live2 = new AbortController();
-        session.whenClosed(() => live2.abort(new DOMException("connection closed", "AbortError")));
-        const show = this.pairing === "pin" ? this.pinPresenter(own, peer, live2.signal) : null;
-        answerCeremony(control, parties, show, live2.signal).catch((err) => {
-          if (err instanceof AuthError) session.close("authentication after success failed");
-        });
-      } else {
-        sendAuthCapabilities(control);
-        await answerCeremony(control, parties, showPIN, ac.signal);
-        this.local.addSelfAnchor(tls.peerFingerprint);
+      let verified = this.local.isAuthenticated(client);
+      const shown = new AbortController();
+      session.whenClosed(() => shown.abort());
+      const ceremony = answerCeremony(control, parties, this.pairing === "pin" ? this.pinPresenter(own, peer, shown.signal) : null, ac.signal).finally(() => shown.abort()).then(
+        () => {
+          this.local.addSelfAnchor(client);
+          verified = true;
+        },
+        (err) => {
+          if (err instanceof AuthError) session.close("authentication failed");
+          throw err;
+        }
+      );
+      ceremony.catch(() => {
+      });
+      const req = await request;
+      if (!verified) {
+        req.requireAuthentication();
+        await ceremony;
       }
       peer.verified = true;
-      const receiver = this.receiverFor(hint, own);
+      const origin = parseOrigin(req.requestingOrigin) ?? "null";
+      const receiver = this.receiverFor(origin, own);
       if (!receiver) {
-        refuse(req, `no receiver allows ${hint} anymore`);
+        refuse(req, `no receiver allows ${origin}`);
         return;
       }
-      this.local.rememberPeer({ identity: tls.peerFingerprint, anchorKey: tls.peerFingerprint, displayName: remote.displayName });
-      if (!this.local.hasGrant(receiver.origin, tls.peerFingerprint)) {
+      this.local.rememberPeer({ identity: client, anchorKey: client, displayName: remote.displayName });
+      if (!this.local.hasGrant(receiver.origin, client)) {
         const ok = await this.ui.requestPermission(
           { permission: "accept-connection", origin: receiver.origin, nickname: receiver.nickname, peer },
           ac.signal
@@ -2591,9 +2610,9 @@ var UserAgent = class {
           refuse(req, "the user declined");
           return;
         }
-        this.local.addGrant(receiver.origin, tls.peerFingerprint);
+        this.local.addGrant(receiver.origin, client);
       }
-      req.respond(Result.Success);
+      void req.respond(Result.Success);
       session.onclose = null;
       setTimeout(() => {
         if (!receiver.deliver(session)) session.close("receiver stopped");
@@ -2602,7 +2621,7 @@ var UserAgent = class {
       session.close(String(err));
       throw err;
     } finally {
-      ac.abort();
+      if (session.closed) ac.abort();
     }
   }
   /** A started receiver of this device that allows origin, preferring preferred. */
@@ -2620,66 +2639,94 @@ var UserAgent = class {
   }
   /**
    * LP2PRequest.start(): shows the picker, connects to the chosen peer,
-   * runs the session request and, when needed, the trust ceremony. Rejects
-   * with NotAllowedError on every failure, as the spec requires.
+   * verifies it (a ceremony if it isn't trusted), sends the requesting
+   * origin and, if the server asks, runs the ceremony. Rejects with
+   * NotAllowedError on every failure, as the spec requires. Aborting signal
+   * takes the picker down or closes the session being set up, and rejects
+   * with the abort reason.
    */
-  async request(nickname) {
+  async request(nickname, signal) {
+    signal?.throwIfAborted();
     const picker = new LivePicker(this.origin, nickname);
     const pickAbort = new AbortController();
+    const onAbort = () => pickAbort.abort(signal?.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
     const discovery = this.transport.discover((e) => picker.update(e));
     let chosen;
     try {
       chosen = await this.ui.pickPeer(picker, pickAbort.signal);
     } finally {
+      signal?.removeEventListener("abort", onAbort);
       pickAbort.abort();
       discovery.close();
     }
+    signal?.throwIfAborted();
     if (!chosen) throw notAllowed("The user dismissed the device picker.");
     const peer = chosen;
     this.log(`connecting to ${peer.nickname} (${peer.id}) over ${this.transport.name}`);
     let conn;
     try {
-      conn = await this.transport.connect(peer.id, { id: randomId(), nickname });
+      conn = await this.transport.connect(peer.id, { id: randomId(), nickname }, signal ? { signal } : {});
     } catch (err) {
+      signal?.throwIfAborted();
       throw notAllowed(`Could not connect to the peer: ${String(err)}`);
     }
     const session = new Session(conn, "client");
     const ac = new AbortController();
     session.onclose = (reason) => ac.abort(new DOMException(`connection closed: ${reason}`, "NetworkError"));
+    const abortSetup = () => ac.abort(signal?.reason);
+    signal?.addEventListener("abort", abortSetup, { once: true });
     try {
       const identity = await this.local.identity();
       const control = await session.controlChannel(ac.signal);
       const tls = await this.withTimeout(handshake(control, identity, "client", ac.signal), ac);
       session.tls = tls;
+      sendAuthCapabilities(control);
       const remote = await this.withTimeout(session.exchangeInfo(this.agentInfo(), ac.signal), ac);
-      const result = session.requestSession(this.origin);
-      result.catch(() => {
-      });
-      const cue = control.next([TypeKey.AuthCapabilities], ac.signal).then(() => "cue");
-      cue.catch(() => {
-      });
-      const parties = { client: identity.fingerprint, server: tls.peerFingerprint };
-      const trusted = this.local.isAuthenticated(tls.peerFingerprint);
-      const first = await Promise.race([cue, result]);
-      if (first !== "cue" && first !== Result.Success) throw notAllowed("The peer refused the session.");
+      const server = tls.peerFingerprint;
+      const parties = { client: identity.fingerprint, server };
       const verified = { ...peer, displayName: remote.displayName, verified: false };
-      if (first === "cue" || !trusted) {
+      const ceremony = async () => {
         await startCeremony(control, parties, () => this.ui.enterPIN({ origin: this.origin, nickname, peer: verified }, ac.signal), ac.signal);
-        this.local.addSelfAnchor(tls.peerFingerprint);
+        this.local.addSelfAnchor(server);
+      };
+      let ran = false;
+      if (!this.local.isAuthenticated(server)) {
+        await ceremony();
+        ran = true;
       }
       verified.verified = true;
-      if (await result !== Result.Success) throw notAllowed("The peer refused the session.");
+      let cue;
+      const required = new Promise((r) => cue = () => r("required"));
+      const result = session.requestSession(this.origin, cue);
+      result.catch(() => {
+      });
+      const aborted = new Promise((_, reject) => {
+        if (ac.signal.aborted) reject(ac.signal.reason);
+        ac.signal.addEventListener("abort", () => reject(ac.signal.reason), { once: true });
+      });
+      aborted.catch(() => {
+      });
+      const first = await Promise.race([required, result, aborted]);
+      if (first === "required") {
+        if (ran) throw notAllowed("The peer asked for a second ceremony.");
+        await ceremony();
+      }
+      const final = await Promise.race([result, aborted]);
+      if (final !== Result.Success) throw notAllowed("The peer refused the session.");
       session.markAccepted();
-      this.local.rememberPeer({ identity: tls.peerFingerprint, anchorKey: tls.peerFingerprint, displayName: remote.displayName });
-      this.local.addGrant(this.origin, tls.peerFingerprint);
+      this.local.rememberPeer({ identity: server, anchorKey: server, displayName: remote.displayName });
+      this.local.addGrant(this.origin, server);
       session.onclose = null;
       return { session, peer: verified };
     } catch (err) {
       session.close(String(err));
+      signal?.throwIfAborted();
       if (err instanceof DOMException && err.name === "NotAllowedError") throw err;
       if (err instanceof AuthError) throw notAllowed(`Pairing failed: ${err.message}.`);
       throw notAllowed(`Connection setup failed: ${String(err instanceof Error ? err.message : err)}`);
     } finally {
+      signal?.removeEventListener("abort", abortSetup);
       ac.abort();
     }
   }
@@ -3143,17 +3190,52 @@ var LP2PRequest = class {
    * Shows the device picker, connects to the chosen peer and, if needed,
    * pairs with it. Rejects with NotAllowedError on every failure: dismissed
    * picker, unreachable peer, failed pairing or refused session, so script
-   * can't tell them apart. While pending or after success, calling it again
-   * returns the same promise; after a failure it starts over.
+   * can't tell them apart. options.signal aborts it: the promise rejects with
+   * the abort reason and the picker or the session being set up is taken
+   * down. While pending or after success, calling it again returns the same
+   * promise and ignores the new options; aborting after success does
+   * nothing. After a failure it starts over.
    */
-  start() {
+  start(options = {}) {
+    const signal = options?.signal ?? null;
+    if (signal?.aborted) return Promise.reject(signal.reason);
     if (this.#started) return this.#started;
     const ua = getUserAgent();
     if (ua.origin === "null") return Promise.reject(new DOMException("opaque origin", "NotAllowedError"));
-    const p = ua.request(this.#nickname).then(({ session }) => adoptConnection(session));
+    const internal = new AbortController();
+    let settled = false;
+    let aborted = false;
+    const p = new Promise((resolve, reject) => {
+      signal?.addEventListener(
+        "abort",
+        () => {
+          if (settled) return;
+          aborted = true;
+          if (this.#started === p) this.#started = null;
+          reject(signal.reason);
+          internal.abort(signal.reason);
+        },
+        { once: true }
+      );
+      ua.request(this.#nickname, internal.signal).then(
+        ({ session }) => {
+          if (aborted) {
+            session.close("start() was aborted");
+            return;
+          }
+          settled = true;
+          resolve(adoptConnection(session));
+        },
+        (err) => {
+          if (aborted) return;
+          settled = true;
+          if (this.#started === p) this.#started = null;
+          reject(err);
+        }
+      );
+    });
     this.#started = p;
     p.catch(() => {
-      if (this.#started === p) this.#started = null;
     });
     return p;
   }
@@ -3956,7 +4038,12 @@ function makeDiscoverable(options = {}) {
 }
 async function connect(options = {}) {
   const opts = options ?? {};
-  const connection = await new LP2PRequest(opts).start();
+  const request = new LP2PRequest(opts.nickname === void 0 ? {} : { nickname: opts.nickname });
+  const connection = await request.start(opts.signal ? { signal: opts.signal } : {});
+  if (opts.signal?.aborted) {
+    connection.close();
+    throw opts.signal.reason;
+  }
   try {
     const transport = new LP2PQuicTransport(connection, transportOptions(opts));
     await transport.ready;

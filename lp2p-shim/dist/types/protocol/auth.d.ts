@@ -11,7 +11,10 @@ export interface Parties {
 }
 /** A 9-digit PIN, about 27 bits, shown as "123-456-789" (OSP Appendix B grouping). */
 export declare function generatePIN(): string;
-/** Server: the cue that it checked the requesting origin hint and needs a ceremony. */
+/**
+ * Both agents send it when the connection starts, as in OSP. It says which
+ * agent presents the PSK and starts nothing (the shim's server always presents).
+ */
 export declare function sendAuthCapabilities(control: ControlChannel): void;
 /**
  * Server: answers the ceremony the client starts. With showPIN null

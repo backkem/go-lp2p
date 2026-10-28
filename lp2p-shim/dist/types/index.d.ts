@@ -1,5 +1,5 @@
 export { LP2PReceiver, type LP2PReceiverOptions } from "./api/receiver.js";
-export { LP2PRequest, type LP2PRequestOptions } from "./api/request.js";
+export { LP2PRequest, type LP2PRequestOptions, type LP2PRequestStartOptions } from "./api/request.js";
 export { LP2PConnection } from "./api/connection.js";
 export { LP2PDataChannel, type LP2PDataChannelInit, type LP2PDataChannelState } from "./api/datachannel.js";
 export { LP2PQuicTransport, LP2PQuicTransportListener, LP2PBidirectionalStream, LP2PReceiveStream, LP2PSendStream, LP2PSendGroup, LP2PDatagramDuplexStream, LP2PDatagramsWritable, WebTransportError, type LP2PQuicTransportInit, type LP2PQuicTransportListenerInit, type WebTransportCloseInfo, type WebTransportConnectionStats, type WebTransportErrorInit, type WebTransportSendOptions, type WebTransportSendStreamOptions, type WebTransportSendStreamStats, type WebTransportReceiveStreamStats, } from "./api/quictransport.js";

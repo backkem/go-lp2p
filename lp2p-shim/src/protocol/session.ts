@@ -24,7 +24,7 @@
 
 import type { TransportConnection, TransportStream } from "../transport/types.ts";
 import { decodeVarint } from "../codec/varint.ts";
-import { DataEncoding, Result, TypeKey, decodeMessage, encodeMessage, type AgentInfo, type Message } from "./messages.ts";
+import { DataEncoding, Result, SessionResult, TypeKey, decodeMessage, encodeMessage, type AgentInfo, type Message } from "./messages.ts";
 import { exportKeyingMaterial, type HandshakeResult } from "./identity.ts";
 import { SESSION_GONE, WTSession, WTStream, type WTHost } from "./webtransport.ts";
 
@@ -142,8 +142,10 @@ export class ControlChannel {
 export interface SessionRequest {
   /** The requesting origin hint, as sent. */
   requestingOrigin: string;
+  /** Sends the provisional lp2p-session-response authentication-required: the cue for the client's ceremony. */
+  requireAuthentication(): void;
   /**
-   * Sends lp2p-session-response. On success both sides end the stream; on a
+   * Sends the final lp2p-session-response. On success both sides end the stream; on a
    * refusal the promise resolves once the client ended its side, or after a
    * timeout, and the caller then closes the connection.
    */
@@ -408,10 +410,11 @@ export class Session implements WTHost {
 
   /**
    * Client: sends lp2p-session-request with origin on a new stream. The
-   * promise resolves with the server's result, or rejects if the stream or
-   * the connection closes first.
+   * promise resolves with the server's final result, or rejects if the
+   * stream or the connection closes first. A provisional
+   * authentication-required calls onAuthenticationRequired.
    */
-  requestSession(origin: string): Promise<number> {
+  requestSession(origin: string, onAuthenticationRequired?: () => void): Promise<number> {
     const stream = this.connection.openStream();
     const requestId = this.requestId();
     stream.send(encodeMessage({ type: TypeKey.SessionRequest, requestId, requestingOrigin: origin }));
@@ -424,6 +427,11 @@ export class Session implements WTHost {
           return;
         }
         if (m.type !== TypeKey.SessionResponse || m.requestId !== requestId) return;
+        if (m.result === SessionResult.AuthenticationRequired) {
+          // Provisional: the final result follows on this stream.
+          onAuthenticationRequired?.();
+          return;
+        }
         resolve(m.result);
         stream.onclose = null;
         stream.close(); // both agents end their side of the stream
@@ -564,6 +572,10 @@ export class Session implements WTHost {
     let answered = false;
     const req: SessionRequest = {
       requestingOrigin,
+      requireAuthentication: () => {
+        if (answered || stream.closed) return;
+        stream.send(encodeMessage({ type: TypeKey.SessionResponse, requestId, result: SessionResult.AuthenticationRequired }));
+      },
       respond: (result) => {
         if (answered || stream.closed) return Promise.resolve();
         answered = true;

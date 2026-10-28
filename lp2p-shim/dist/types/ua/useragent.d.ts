@@ -54,10 +54,13 @@ export declare class UserAgent {
     private pinPresenter;
     /**
      * LP2PRequest.start(): shows the picker, connects to the chosen peer,
-     * runs the session request and, when needed, the trust ceremony. Rejects
-     * with NotAllowedError on every failure, as the spec requires.
+     * verifies it (a ceremony if it isn't trusted), sends the requesting
+     * origin and, if the server asks, runs the ceremony. Rejects with
+     * NotAllowedError on every failure, as the spec requires. Aborting signal
+     * takes the picker down or closes the session being set up, and rejects
+     * with the abort reason.
      */
-    request(nickname: string): Promise<GrantedSession>;
+    request(nickname: string, signal?: AbortSignal): Promise<GrantedSession>;
     private agentInfo;
     private withTimeout;
 }

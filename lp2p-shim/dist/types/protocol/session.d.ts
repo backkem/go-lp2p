@@ -37,8 +37,10 @@ export declare class ControlChannel {
 export interface SessionRequest {
     /** The requesting origin hint, as sent. */
     requestingOrigin: string;
+    /** Sends the provisional lp2p-session-response authentication-required: the cue for the client's ceremony. */
+    requireAuthentication(): void;
     /**
-     * Sends lp2p-session-response. On success both sides end the stream; on a
+     * Sends the final lp2p-session-response. On success both sides end the stream; on a
      * refusal the promise resolves once the client ended its side, or after a
      * timeout, and the caller then closes the connection.
      */
@@ -129,10 +131,11 @@ export declare class Session implements WTHost {
     exchangeInfo(local: AgentInfo, signal?: AbortSignal): Promise<AgentInfo>;
     /**
      * Client: sends lp2p-session-request with origin on a new stream. The
-     * promise resolves with the server's result, or rejects if the stream or
-     * the connection closes first.
+     * promise resolves with the server's final result, or rejects if the
+     * stream or the connection closes first. A provisional
+     * authentication-required calls onAuthenticationRequired.
      */
-    requestSession(origin: string): Promise<number>;
+    requestSession(origin: string, onAuthenticationRequired?: () => void): Promise<number>;
     /**
      * Allocates the lowest free channel ID of the local parity, or validates
      * and reserves a requested one, which must be free and of that parity.

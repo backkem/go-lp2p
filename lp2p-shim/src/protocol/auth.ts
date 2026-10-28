@@ -3,12 +3,13 @@
 //
 // It exists so the user-facing flow (one device shows a PIN, the other
 // enters it) and the message sequence look like the real thing. As the LP2P
-// session extension requires, only the client starts it, once the server
-// sent auth-capabilities as its cue (or accepted without it, see
-// ../ua/useragent.ts):
+// session extension requires, only the client starts it, on the server's
+// provisional lp2p-session-response authentication-required, or on success
+// from a server it hasn't verified (see ../ua/useragent.ts). Both agents
+// sent auth-capabilities at connection start:
 //
 //   server (PSK presenter)                       client (PSK consumer)
-//   auth-capabilities (cue)                 -->
+//   lp2p-session-response (authentication-required, session stream) -->
 //                                           <--  auth-spake2-handshake (psk-needs-presentation, nQ)
 //   shows the PIN
 //   auth-spake2-handshake (psk-input, nS)   -->  user enters the PIN
@@ -80,7 +81,10 @@ function equal(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
-/** Server: the cue that it checked the requesting origin hint and needs a ceremony. */
+/**
+ * Both agents send it when the connection starts, as in OSP. It says which
+ * agent presents the PSK and starts nothing (the shim's server always presents).
+ */
 export function sendAuthCapabilities(control: ControlChannel): void {
   control.send({ type: TypeKey.AuthCapabilities, pskEaseOfInput: 50, pskInputMethods: [0], pskMinBitsOfEntropy: 20 });
 }

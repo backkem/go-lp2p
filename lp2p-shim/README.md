@@ -172,28 +172,26 @@ accepts is the **server**.
    for keying material exporters. It does not encrypt anything. Then both sides exchange
    `agent-info` (10/11): `display-name` is the **device name** (`deviceName`, default
    `"lp2p-shim device"`), not the page's nickname, which only travels in discovery.
-2. **Session request.** The client opens a second stream with `lp2p-session-request` (1110: request-id,
-   requesting origin). The server refuses with `lp2p-session-response` (1111) `permanent-error` and
-   closes if no advertising receiver on the device allows that origin, before any ceremony or prompt.
-   A second 1110 on a connection closes it.
-3. **Trust ceremony, client-initiated.** The session request waits for the server's agent-info. If the client's key doesn't chain to a trust anchor, the server
-   sends `auth-capabilities` (1001) as the cue. The client starts: `auth-spake2-handshake` (1005,
+2. **Verify the server first.** Both agents send `auth-capabilities` (1001) at connection start, as in
+   OSP; it starts nothing. A client that doesn't trust the server's key runs the trust ceremony now,
+   before the server learns anything about the page.
+3. **Trust ceremony, client-initiated.** The client sends `auth-spake2-handshake` (1005,
    `psk-needs-presentation`, a nonce). The server shows a 9-digit PIN and answers with its handshake
    (`psk-input`, its nonce); the client's user enters the PIN, the client sends
    `auth-spake2-confirmation` (1003) = `SHA-512(tag ‖ PIN ‖ nonceS ‖ nonceQ ‖ fpClient ‖ fpServer)`, and
-   the server answers `auth-status` (1004). Success adds a one-peer trust anchor on each side; a
-   ceremony that fails after `success` closes the connection. This is
-   **not SPAKE2** and is brute-forceable offline. With `pairing: "none"` the server answers the client's
-   handshake with `auth-status authenticated`. If the server already trusts the client, it sends no
-   `auth-capabilities`; a client that doesn't trust the server starts the ceremony anyway once it sees
-   `success`.
-4. **Acceptance.** The server asks its user to grant the client to the receiver's origin (skipped if
-   granted before), then answers 1111 `success` and the receiver fires `connection`. The client
-   accepts once it has `success` and has verified the server's key. After a refusal the client ends its
-   side of the stream and the server closes the connection once it has, or after 2 s, so the response
-   isn't lost. Both add the peer to their known
-   peers and grants. No data channel or WebTransport stream may come before `success`: the server closes
-   such streams, the client holds them until its 1111 arrives.
+   the server answers `auth-status` (1004). Success adds a one-peer trust anchor on each side; a failure
+   closes the connection. This is **not SPAKE2** and is brute-forceable offline. With
+   `pairing: "none"` the server answers the client's handshake with `auth-status authenticated`.
+4. **Session request and answer.** Only with a verified server, the client opens a stream with
+   `lp2p-session-request` (1110: request-id, requesting origin). A server that doesn't trust the
+   client's key answers a provisional `lp2p-session-response` (1111) `authentication-required` (1110),
+   without looking at the origin, and the client runs the ceremony. Once the client is verified, the
+   server picks a receiver that allows the origin (the one whose advertisement the client picked, if
+   it does), asks its user to grant the client (skipped if granted before), and answers `success` or
+   `permanent-error`. So the origin only reaches a verified server and the answer only a verified
+   client, and peers that trust each other run no ceremony. The client accepts on `success` and holds
+   streams that arrive before it. After a refusal the client ends its side of the stream and the
+   server closes the connection once it has, or after 2 s. A second 1110 on a connection closes it.
 5. **Data channels** each get their own stream, starting with `data-channel-open-request` (1101); the
    acceptor answers `data-channel-open-response` (1102) on it before any `data-frame` (24). The client
    allocates the lowest free even channel ID, the server the lowest free odd one. Closing the stream
@@ -265,13 +263,14 @@ needed.
 go-lp2p's `useragent`:
 
 - `LP2PReceiver.start()` asks `requestPermission({permission: "advertise"})`, then advertises.
-- For each incoming connection it runs the handshake, checks the requesting origin against the
-  advertising receivers (refusing without any prompt), lets the client run the ceremony
-  (`presentPIN`) unless the client's key is trusted, then asks
+- For each incoming connection it runs the handshake, answers the ceremony the client starts
+  (`presentPIN`), asks for one with `authentication-required` if the client's key isn't trusted, then
+  picks a receiver that allows the requesting origin (preferring the one the client picked), asks
   `requestPermission({permission: "accept-connection", peer})` unless the peer is granted already,
-  and fires `connection` on a receiver that allows the origin, preferring the one the client picked.
-- `LP2PRequest.start()` shows `pickPeer(picker)` with a live peer list, connects, sends the requesting
-  origin, and pairs (`enterPIN`) when the server asks or when it doesn't trust the server.
+  and fires `connection`.
+- `LP2PRequest.start({signal})` shows `pickPeer(picker)` with a live peer list, connects, pairs
+  (`enterPIN`) if it doesn't trust the server, sends the requesting origin, and pairs again only if the
+  server asks. Aborting the signal takes down the picker or closes the session being set up.
 
 The UI is the `UserAgentUI` interface, with `requestPermission`, `pickPeer`, `presentPIN` and
 `enterPIN`, each given an `AbortSignal` that says when to take the UI down. There are two built-in
@@ -300,7 +299,7 @@ and pooled-only WebTransport.
 
 | Topic | Shim behavior |
 |---|---|
-| Errors | `start()` of `LP2PRequest` rejects with `NotAllowedError` on every failure, as the spec requires: picker dismissed, peer unreachable, pairing failed or session refused. The message differs, for debugging. `LP2PReceiver.start()` rejects with `NotAllowedError` when advertising is denied and `InvalidStateError` after `stop()` (checked first, as P1 asked). |
+| Errors | `start()` of `LP2PRequest` rejects with the abort reason when its signal aborts, and otherwise with `NotAllowedError` on every failure, as the spec requires: picker dismissed, peer unreachable, pairing failed or session refused. The message differs, for debugging. `LP2PReceiver.start()` rejects with `NotAllowedError` when advertising is denied and `InvalidStateError` after `stop()` (checked first, as P1 asked). |
 | `start()` twice | Returns the same promise while pending or after success. After a failure it starts over. |
 | `LP2PDataChannel.readyState` | Added (`connecting`/`open`/`closing`/`closed`, as on RTCDataChannel). Without it a page cannot know when `send()` is allowed. |
 | `binaryType` | Defaults to `"arraybuffer"`, as on RTCDataChannel. The receiver's `binaryType` decides whether binary data arrives as an ArrayBuffer or a Blob. The sender's encoding-id (blob or array-buffer) is informational. |
@@ -336,8 +335,10 @@ const transport = await lp2p.connect({ nickname: "Peer B" });
 returns a `ReadableStream` of ready `LP2PQuicTransport`s. It owns the listener of each connection it
 creates and moves transports from it as fast as the page reads, so an unread stream fills the queues
 and further sessions are refused. Cancelling it stops the receiver and closes the listeners.
-`connect()` takes the `LP2PRequestOptions` and `LP2PQuicTransportInit` members and resolves with a
-ready `LP2PQuicTransport`; it creates no listener. On both sides `transport.connection` is the
+`connect()` takes the `LP2PRequestOptions` and `LP2PQuicTransportInit` members and a `signal`, and
+resolves with a ready `LP2PQuicTransport`; it creates no listener. The shorthand covers transports
+only: a connection on which the peer only opens data channels never shows up in
+`makeDiscoverable()`. On both sides `transport.connection` is the
 connection, which stays the page's to use and close.
 
 How they coexist with the full API (`test/shorthand.test.ts`):
@@ -423,29 +424,17 @@ issue asked for; "PR 17" marks the ones that change resolved.
 
 ### Raised on PR 17
 
-P1, P3, P4 and P5 are **resolved** by the spec's follow-up commit "Address implementation feedback",
-and the shim follows it. P2 is **resolved** by `connect()` returning a promise; its cancellation half
-remains (S2). P6 is **half resolved**: the server now still answers a ceremony after `success` and closes
-if it fails, but sending auth-capabilities with `success` doesn't work (S1).
+All **resolved** by the spec's follow-up commits, and the shim follows them:
 
-- **S1. auth-capabilities with `success` forces a ceremony on trusted peers.** The follow-up says "A
-  server that has not sent auth-capabilities yet sends it together with a `success`
-  lp2p-session-response", while "The client starts authentication when it receives auth-capabilities".
-  So a client that already verified the server still starts authentication, which in OSP is a PIN
-  ceremony, on every session. And the client can't tell the cue from the copy sent with `success`:
-  they travel on different streams, in either order. The shim (and go-lp2p) don't implement that
-  sentence; without auth-capabilities the client assumes equal ease of input, so the QUIC server
-  presents the PSK. Proposal: send the cue on the session stream, e.g. a provisional
-  `lp2p-session-response` with a result such as `authentication-required`, and let agents send
-  auth-capabilities at connection start as plain OSP does, so it is always there and never a cue.
-- **S2. `lp2p.connect()` and `LP2PRequest.start()` can't be cancelled.** Neither takes an
-  `AbortSignal`, so a page can't take the picker down or abandon a pending session. Proposal:
-  `start({signal})` and `connect({signal})`.
-- **S3. Connections that only carry data channels are invisible to `makeDiscoverable()`.** A peer using
-  `LP2PRequest` and only `createDataChannel()` gets a connection the discoverable page never sees: it
-  learns of connections only through transports. Proposal: say that the shorthand is for transports
-  only, or have it also surface connections (e.g. an `onconnection`).
-- **S4. Early data channels.** The spec holds incoming WebTransport sessions until the connection is
-  exposed, but says nothing for data channels and their first messages; a page that sets
-  `ondatachannel` in the `connection` handler can miss them. The shim holds them the same way.
-  Proposal: apply the same hold rule to incoming data channels.
+- **P1–P5**: `start()` checks the stopped state first; `connect()` returns a promise for a transport;
+  `transport.connection`, with the shorthand owning its connections' listeners; the picked
+  advertisement wins; early streams are held until `success`.
+- **P6, S1**: auth-capabilities is sent at connection start as in OSP and starts nothing; the client
+  verifies the server before it sends the origin, and a server that doesn't trust the client asks
+  with a provisional `authentication-required`. So the requesting origin is never exposed to an
+  unverified server, nor the answer to an unverified client, and peers that trust each other run no
+  ceremony. The cost, which the spec states: a first ceremony with a peer can end in a refusal.
+- **S2**: `LP2PRequest.start({signal})` and `lp2p.connect({signal})`.
+- **S3**: the explainer says the shorthand covers transports only.
+- **S4**: incoming data channels are held until the connection is exposed, like WebTransport
+  sessions. The shim also holds their messages until the `datachannel` event has run.
