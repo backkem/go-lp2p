@@ -151,8 +151,11 @@ documented where they live:
 - `ospc.AgentConfig.SessionExtension`: a listener expects the LP2P session
   extension (`lp2p-session-request`) on every connection. Off for plain
   OSP agents; the user agent turns it on.
-- The session flow follows spec commit a0ba2f3, not the later 4761890: see
-  "Spec gap" in [`openscreen-go/network/README.md`](./openscreen-go/network/README.md).
+- The session flow follows spec commit 4761890 and assumes an OSP fix for
+  how a PSK consumer starts SPAKE2: see "Spec gap" in
+  [`openscreen-go/network/README.md`](./openscreen-go/network/README.md).
+  `ospc.InteropQuirks.ConsumerInitiatesWithPublicValue` sends the current
+  network.bs form (`psk-needs-presentation` with `pA`) for osp_demo.
 - `ua.Config.DisableSessionExtension`: the user agent falls back to plain
   OSP for peers that don't implement the session extension, such as
   openscreen's `lp2p_demo`. It then can't check `allowedOrigins`, pairs on

@@ -32,44 +32,47 @@ without it `AuthenticatePSK` fails with `ErrSpake2SuiteUnsupported`.
 
 ### LP2P sessions
 
-The LP2P session extension (local-peer-to-peer index.bs "Session extension")
-is opt-in: `AgentConfig.SessionExtension` on a listening agent,
-`DiscoveredAgent.DialSession` on the dialing one. Plain OSP agents are
-unaffected, which keeps the `osp_demo` and `lp2p_demo` interop working.
+The LP2P session extension (local-peer-to-peer index.bs "Session extension",
+spec commit 4761890) is opt-in: `AgentConfig.SessionExtension` on a
+listening agent, `DiscoveredAgent.DialSession` on the dialing one. Plain OSP
+agents are unaffected, which keeps the `osp_demo` and `lp2p_demo` interop
+working.
 
-- The client sends `lp2p-session-request` with the requesting origin on a
-  new bidirectional stream once the agent-info-response lists
-  `data-channels` or `quic-transport` (else `ErrSessionUnsupported`).
-- The server reports it as `RequestingOrigin` and holds back its
-  `auth-capabilities`. It refuses with `RefuseSession` (permanent-error,
-  then the connection is closed once the client ended the stream, so the
-  response isn't lost), asks for authentication with
-  `RequestAuthentication` (sends `auth-capabilities`), or accepts with
-  `CompleteSession` (success) once the client's certificate is verified by
-  `AuthenticatePSK` or asserted with `TrustPeer`.
-- The client waits for the cue with `AwaitSession`: `auth-capabilities`
-  (authenticate) or success (accepted; still authenticate if the server's
-  certificate isn't trusted, assuming the server's auth-capabilities equal
-  its own as none were received). Only the client starts SPAKE2; a server
-  that accepted on trust still answers a handshake after the hand-off.
+- Both agents exchange agent-info and `auth-capabilities` as in OSP; only
+  the client ever starts SPAKE2. As the PSK consumer it asks the presenter
+  to show the PSK (`StartAuthentication`, see the spec gap below).
+- The client verifies the server first (`AuthenticatePSK`, or `TrustPeer`
+  for a trusted fingerprint), then sends `lp2p-session-request` with the
+  origin (`RequestSession`, only to an agent listing `data-channels` or
+  `quic-transport`, else `ErrSessionUnsupported`).
+- A server that hasn't verified the client answers the provisional
+  `authentication-required` (`RequireAuthentication`) without looking at
+  the origin; the client then authenticates. Once the client is verified
+  the origin is available (`RequestingOrigin`) and the server accepts
+  (`CompleteSession`, success) or refuses (`RefuseSession`,
+  permanent-error, then the connection is closed once the client ended the
+  stream). Agents that trust each other run no ceremony.
+- `AwaitSession` reports the cues on both sides: authenticate, requested
+  (server), accepted (client). Neither side hands the connection to the
+  application protocol before the session is accepted; streams that arrive
+  earlier are held, and discarded if the connection closes first.
 - A second `lp2p-session-request`, or one received by an agent without the
   extension, is refused and closes the connection.
 
 #### Spec gap
 
-Spec commit 4761890 of local-peer-to-peer moves the requesting origin after
-authentication: a client meeting a server it hasn't verified must start a
-trust ceremony before it sends `lp2p-session-request`, and only the client
-starts one. But an OSP PSK consumer can't initiate: `psk-needs-presentation`
-already carries `pA`, which needs the PSK, and with equal ease of input the
-server presents the PSK (network.bs "Authentication"), so the server has no
-cue to show a PIN and the client's user has nothing to type. go-lp2p keeps
-the earlier order (request with the origin hint first, `auth-capabilities`
-as the server's cue) until the spec decides. Only the
-`lp2p-session-result` value `authentication-required` (1110) is defined so
-far, not sent. The same gap applies on the current flow when a server
-accepts on trust a client that no longer trusts it: the client is expected
-to start a ceremony it can't start as a consumer.
+Under 4761890 a client meeting a server it hasn't verified must start a
+trust ceremony, and only the client starts one. But network.bs has a PSK
+consumer initiate with "`psk-needs-presentation` and the `public-value`
+field set to `pA`", which needs the PSK the presenter hasn't shown yet, and
+with equal ease of input the server presents. go-lp2p assumes the OSP fix
+the LP2P editors proposed: a consumer's `psk-needs-presentation` carries no
+`public-value`; the presenter shows the PSK and initiates with `psk-shown`
+and `pA`, and the consumer answers `psk-input` with `pB`. The old form, with
+`pA`, is only sent with `InteropQuirks.ConsumerInitiatesWithPublicValue`,
+for Chromium's openscreen when it presents (it never sends
+`psk-needs-presentation` itself and reads `public-value` as `pA`). Received
+`psk-needs-presentation` with `pA` is still answered.
 
 ### WebTransport
 
