@@ -175,11 +175,15 @@ accepts is the **server**.
 2. **Verify the server first.** Both agents send `auth-capabilities` (1001) at connection start, as in
    OSP; it starts nothing. A client that doesn't trust the server's key runs the trust ceremony now,
    before the server learns anything about the page.
-3. **Trust ceremony, client-initiated.** The client sends `auth-spake2-handshake` (1005,
-   `psk-needs-presentation`, a nonce). The server shows a 9-digit PIN and answers with its handshake
-   (`psk-input`, its nonce); the client's user enters the PIN, the client sends
-   `auth-spake2-confirmation` (1003) = `SHA-512(tag ‖ PIN ‖ nonceS ‖ nonceQ ‖ fpClient ‖ fpServer)`, and
-   the server answers `auth-status` (1004). Success adds a one-peer trust anchor on each side; a failure
+3. **Trust ceremony, client-initiated.** The server presents the PSK, so the client asks for
+   presentation: `auth-spake2-handshake` (1005, `psk-needs-presentation`) with **no public-value**, as
+   the OSP fix the LP2P binding assumes (OSP today requires `pA` there, which a consumer can't have
+   before the PSK is shown). The server shows a 9-digit PIN and runs OSP's presenter-initiated flow:
+   `psk-shown` with its nonce; the client's user enters the PIN and the client answers `psk-input` with
+   its nonce and `auth-spake2-confirmation` (1003) =
+   `SHA-512(tag ‖ PIN ‖ nonceS ‖ nonceQ ‖ fpClient ‖ fpServer)`; the server answers `auth-status` (1004).
+   The nonces stand in for SPAKE2's `pA`/`pB`. (Before, the client's request carried a nonce and the
+   server answered `psk-input`; that didn't follow OSP's message rules.) Success adds a one-peer trust anchor on each side; a failure
    closes the connection. This is **not SPAKE2** and is brute-forceable offline. With
    `pairing: "none"` the server answers the client's handshake with `auth-status authenticated`.
 4. **Session request and answer.** Only with a verified server, the client opens a stream with

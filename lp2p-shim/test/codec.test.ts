@@ -93,6 +93,8 @@ test("messages: round trip and tolerance of OSP optional fields", () => {
     { type: TypeKey.AuthCapabilities, pskEaseOfInput: 50, pskInputMethods: [0], pskMinBitsOfEntropy: 20 },
     { type: TypeKey.AuthSpake2Handshake, pskStatus: 1, publicValue: new Uint8Array(32) },
     { type: TypeKey.AuthSpake2Handshake, initiationToken: "tok", pskStatus: 2, publicValue: new Uint8Array(3) },
+    // A consumer's psk-needs-presentation carries no public-value (the OSP fix the binding assumes).
+    { type: TypeKey.AuthSpake2Handshake, pskStatus: 0 },
     { type: TypeKey.AuthSpake2Confirmation, confirmationValue: new Uint8Array(64).fill(9) },
     { type: TypeKey.AuthStatus, result: 0 },
   ];
@@ -102,6 +104,8 @@ test("messages: round trip and tolerance of OSP optional fields", () => {
   const frame = unhex("18" + "a3" + "0002" + "0105" + "04" + "4401020304");
   assert.deepEqual(decodeMessage(frame), { type: 24, encodingId: 2, payload: new Uint8Array([1, 2, 3, 4]) });
 
+  // varint(1005) then {0: {}, 1: 0}: no key 2.
+  assert.equal(hex(encodeMessage({ type: TypeKey.AuthSpake2Handshake, pskStatus: 0 })), "43ed" + "a2" + "00a0" + "0100");
   assert.throws(() => decodeMessage(unhex("444da0"))); // missing fields
   assert.throws(() => decodeMessage(unhex("3fa0"))); // unknown type key 63
 });

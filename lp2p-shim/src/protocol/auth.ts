@@ -3,27 +3,29 @@
 //
 // It exists so the user-facing flow (one device shows a PIN, the other
 // enters it) and the message sequence look like the real thing. As the LP2P
-// session extension requires, only the client starts it, on the server's
-// provisional lp2p-session-response authentication-required, or on success
-// from a server it hasn't verified (see ../ua/useragent.ts). Both agents
-// sent auth-capabilities at connection start:
+// session extension requires, only the client starts it: before its session
+// request if it hasn't verified the server, or on the server's provisional
+// authentication-required. The server is the PSK presenter, so the client,
+// the consumer, asks for presentation, and the server then runs OSP's
+// presenter-initiated flow. Following the OSP fix the LP2P binding assumes,
+// psk-needs-presentation carries no public-value:
 //
 //   server (PSK presenter)                       client (PSK consumer)
-//   lp2p-session-response (authentication-required, session stream) -->
-//                                           <--  auth-spake2-handshake (psk-needs-presentation, nQ)
+//                                           <--  auth-spake2-handshake (psk-needs-presentation, no public-value)
 //   shows the PIN
-//   auth-spake2-handshake (psk-input, nS)   -->  user enters the PIN
+//   auth-spake2-handshake (psk-shown, nS)   -->  user enters the PIN
+//                                           <--  auth-spake2-handshake (psk-input, nQ)
 //                                           <--  auth-spake2-confirmation
 //                                                  SHA-512(tag | PIN | nS | nQ | fpClient | fpServer)
 //   auth-status (authenticated | proof-invalid) -->
 //
-// The proof covers both agent fingerprints from the handshake in
-// identity.ts, so a successful ceremony vouches for those keys, and the
-// trust anchors it adds mean something on later sessions. Why this is still
-// not security: the transports underneath are not encrypted, and the
-// confirmation hash of a 9-digit PIN can be brute-forced offline by anyone
-// who sees it. A page cannot do better; that is part of the case for a
-// native API.
+// The nonces stand in for SPAKE2's pA and pB. The proof covers both agent
+// fingerprints from the handshake in identity.ts, so a successful ceremony
+// vouches for those keys, and the trust anchors it adds mean something on
+// later sessions. Why this is still not security: the transports underneath
+// are not encrypted, and the confirmation hash of a 9-digit PIN can be
+// brute-forced offline by anyone who sees it. A page cannot do better; that
+// is part of the case for a native API.
 //
 // With pairing "none" the server answers the client's handshake with
 // auth-status authenticated, and no PIN is involved.
@@ -101,7 +103,7 @@ export async function answerCeremony(
   signal?: AbortSignal,
 ): Promise<void> {
   const hs = await control.next([TypeKey.AuthSpake2Handshake], signal);
-  if (hs.pskStatus !== PskStatus.NeedsPresentation) {
+  if (hs.pskStatus !== PskStatus.NeedsPresentation || hs.publicValue !== undefined) {
     control.send({ type: TypeKey.AuthStatus, result: AuthResult.UnknownError });
     throw new AuthError("unexpected psk-status from the client", AuthResult.UnknownError);
   }
@@ -112,9 +114,14 @@ export async function answerCeremony(
   const pin = generatePIN();
   const nS = nonce();
   showPIN(pin);
-  control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.Input, publicValue: nS });
+  control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.Shown, publicValue: nS });
+  const answer = await control.next([TypeKey.AuthSpake2Handshake], signal);
   const conf = await control.next([TypeKey.AuthSpake2Confirmation], signal);
-  const ok = equal(conf.confirmationValue, await proof(pin, nS, hs.publicValue, parties));
+  if (answer.pskStatus !== PskStatus.Input || !answer.publicValue) {
+    control.send({ type: TypeKey.AuthStatus, result: AuthResult.UnknownError });
+    throw new AuthError("expected psk-input with a public-value", AuthResult.UnknownError);
+  }
+  const ok = equal(conf.confirmationValue, await proof(pin, nS, answer.publicValue, parties));
   const result = ok ? AuthResult.Authenticated : AuthResult.ProofInvalid;
   control.send({ type: TypeKey.AuthStatus, result });
   if (!ok) throw new AuthError("the peer entered a wrong PIN", result);
@@ -131,17 +138,19 @@ export async function startCeremony(
   enterPIN: () => Promise<string | null>,
   signal?: AbortSignal,
 ): Promise<void> {
-  const nQ = nonce();
-  control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.NeedsPresentation, publicValue: nQ });
+  // Ask for presentation; no public-value until the PIN is known.
+  control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.NeedsPresentation });
   for (;;) {
     const m = await control.next([TypeKey.AuthSpake2Handshake, TypeKey.AuthStatus], signal);
     if (m.type === TypeKey.AuthStatus) {
       if (m.result === AuthResult.Authenticated) return;
       throw new AuthError(m.result === AuthResult.ProofInvalid ? "wrong PIN" : `authentication failed (${m.result})`, m.result);
     }
-    if (m.pskStatus !== PskStatus.Input) continue;
+    if (m.pskStatus !== PskStatus.Shown || !m.publicValue) continue;
     const pin = await enterPIN();
     if (pin === null) throw new AuthError("the user canceled pairing", AuthResult.UnknownError);
+    const nQ = nonce();
+    control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.Input, publicValue: nQ });
     control.send({ type: TypeKey.AuthSpake2Confirmation, confirmationValue: await proof(pin, m.publicValue, nQ, parties) });
   }
 }

@@ -113,7 +113,8 @@ export type Message =
       pskInputMethods: number[];
       pskMinBitsOfEntropy: number;
     }
-  | { type: typeof TypeKey.AuthSpake2Handshake; initiationToken?: string; pskStatus: number; publicValue: Uint8Array }
+  // publicValue is absent on a consumer's psk-needs-presentation (the OSP fix the LP2P binding assumes).
+  | { type: typeof TypeKey.AuthSpake2Handshake; initiationToken?: string; pskStatus: number; publicValue?: Uint8Array }
   | { type: typeof TypeKey.AuthSpake2Confirmation; confirmationValue: Uint8Array }
   | { type: typeof TypeKey.AuthStatus; result: number }
   | { type: typeof TypeKey.DataChannelOpenRequest; requestId: number; channelId: number; label: string; protocol: string }
@@ -149,7 +150,7 @@ function toCBOR(m: Message): CBORMap {
       return {
         0: m.initiationToken === undefined ? {} : { 0: m.initiationToken },
         1: m.pskStatus,
-        2: m.publicValue,
+        ...(m.publicValue === undefined ? {} : { 2: m.publicValue }),
       };
     case TypeKey.AuthSpake2Confirmation:
       return { 0: m.confirmationValue };
@@ -265,7 +266,7 @@ function fromCBOR(type: number, value: CBORValue): Message {
         type,
         ...(typeof token === "string" ? { initiationToken: token } : {}),
         pskStatus: uint(m, 1, "auth-spake2-handshake"),
-        publicValue: bytes(m, 2, "auth-spake2-handshake"),
+        ...(m[2] === undefined ? {} : { publicValue: bytes(m, 2, "auth-spake2-handshake") }),
       };
     }
     case TypeKey.AuthSpake2Confirmation:

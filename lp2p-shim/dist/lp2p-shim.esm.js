@@ -1149,7 +1149,7 @@ function toCBOR(m) {
       return {
         0: m.initiationToken === void 0 ? {} : { 0: m.initiationToken },
         1: m.pskStatus,
-        2: m.publicValue
+        ...m.publicValue === void 0 ? {} : { 2: m.publicValue }
       };
     case TypeKey.AuthSpake2Confirmation:
       return { 0: m.confirmationValue };
@@ -1261,7 +1261,7 @@ function fromCBOR(type, value) {
         type,
         ...typeof token === "string" ? { initiationToken: token } : {},
         pskStatus: uint(m, 1, "auth-spake2-handshake"),
-        publicValue: bytes(m, 2, "auth-spake2-handshake")
+        ...m[2] === void 0 ? {} : { publicValue: bytes(m, 2, "auth-spake2-handshake") }
       };
     }
     case TypeKey.AuthSpake2Confirmation:
@@ -1380,7 +1380,7 @@ function sendAuthCapabilities(control) {
 }
 async function answerCeremony(control, parties, showPIN, signal) {
   const hs = await control.next([TypeKey.AuthSpake2Handshake], signal);
-  if (hs.pskStatus !== PskStatus.NeedsPresentation) {
+  if (hs.pskStatus !== PskStatus.NeedsPresentation || hs.publicValue !== void 0) {
     control.send({ type: TypeKey.AuthStatus, result: AuthResult.UnknownError });
     throw new AuthError("unexpected psk-status from the client", AuthResult.UnknownError);
   }
@@ -1391,25 +1391,31 @@ async function answerCeremony(control, parties, showPIN, signal) {
   const pin = generatePIN();
   const nS = nonce();
   showPIN(pin);
-  control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.Input, publicValue: nS });
+  control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.Shown, publicValue: nS });
+  const answer = await control.next([TypeKey.AuthSpake2Handshake], signal);
   const conf = await control.next([TypeKey.AuthSpake2Confirmation], signal);
-  const ok = equal(conf.confirmationValue, await proof(pin, nS, hs.publicValue, parties));
+  if (answer.pskStatus !== PskStatus.Input || !answer.publicValue) {
+    control.send({ type: TypeKey.AuthStatus, result: AuthResult.UnknownError });
+    throw new AuthError("expected psk-input with a public-value", AuthResult.UnknownError);
+  }
+  const ok = equal(conf.confirmationValue, await proof(pin, nS, answer.publicValue, parties));
   const result = ok ? AuthResult.Authenticated : AuthResult.ProofInvalid;
   control.send({ type: TypeKey.AuthStatus, result });
   if (!ok) throw new AuthError("the peer entered a wrong PIN", result);
 }
 async function startCeremony(control, parties, enterPIN, signal) {
-  const nQ = nonce();
-  control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.NeedsPresentation, publicValue: nQ });
+  control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.NeedsPresentation });
   for (; ; ) {
     const m = await control.next([TypeKey.AuthSpake2Handshake, TypeKey.AuthStatus], signal);
     if (m.type === TypeKey.AuthStatus) {
       if (m.result === AuthResult.Authenticated) return;
       throw new AuthError(m.result === AuthResult.ProofInvalid ? "wrong PIN" : `authentication failed (${m.result})`, m.result);
     }
-    if (m.pskStatus !== PskStatus.Input) continue;
+    if (m.pskStatus !== PskStatus.Shown || !m.publicValue) continue;
     const pin = await enterPIN();
     if (pin === null) throw new AuthError("the user canceled pairing", AuthResult.UnknownError);
+    const nQ = nonce();
+    control.send({ type: TypeKey.AuthSpake2Handshake, pskStatus: PskStatus.Input, publicValue: nQ });
     control.send({ type: TypeKey.AuthSpake2Confirmation, confirmationValue: await proof(pin, m.publicValue, nQ, parties) });
   }
 }

@@ -183,7 +183,9 @@ function tapped(t: PostMessageTransport, log: string[]): Transport {
   const name = (b: Uint8Array): string | null => {
     try {
       const m = decodeMessage(b);
-      return m.type === TypeKey.SessionResponse ? `${m.type}:${m.result}` : String(m.type);
+      if (m.type === TypeKey.SessionResponse) return `${m.type}:${m.result}`;
+      if (m.type === TypeKey.AuthSpake2Handshake) return `${m.type}:${m.pskStatus}:${m.publicValue ? "pv" : "nopv"}`;
+      return String(m.type);
     } catch {
       return null;
     }
@@ -248,6 +250,14 @@ test("wire: neither side knows the other - the origin is sent only after the ser
     assert.ok(log.includes(AUTHED) && log.includes(REQ));
     assert.ok(log.indexOf(AUTHED) < log.indexOf(REQ), log.join(" "));
     assert.ok(!log.includes(CUE)); // the ceremony already verified the client too
+    // The client, the PSK consumer, asks for presentation without a
+    // public-value; the server presents (psk-shown) and the client answers.
+    const hs = log.filter((x) => x.includes(`:${TypeKey.AuthSpake2Handshake}:`));
+    assert.deepEqual(hs, [
+      `send:${TypeKey.AuthSpake2Handshake}:0:nopv`,
+      `recv:${TypeKey.AuthSpake2Handshake}:1:pv`,
+      `send:${TypeKey.AuthSpake2Handshake}:2:pv`,
+    ]);
     assert.ok(log.includes(SUCCESS));
     assert.equal(p.pins.length, 1);
     receiver.stop();

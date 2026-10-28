@@ -96,7 +96,7 @@ export type Message = {
     type: typeof TypeKey.AuthSpake2Handshake;
     initiationToken?: string;
     pskStatus: number;
-    publicValue: Uint8Array;
+    publicValue?: Uint8Array;
 } | {
     type: typeof TypeKey.AuthSpake2Confirmation;
     confirmationValue: Uint8Array;
