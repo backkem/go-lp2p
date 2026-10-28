@@ -587,8 +587,8 @@ func TestAllowedOrigins(t *testing.T) {
 	}
 	t.Cleanup(r.Stop)
 
-	// The requester's origin isn't allowed: refused on the hint, before any
-	// PIN or prompt on the receiver.
+	// The requester's origin isn't allowed: refused once the requester is
+	// verified, so after a PIN ceremony but before any grant prompt.
 	other := NewWindow(tx.ua, "https://other.test")
 	req, err := other.NewLP2PRequest(LP2PRequestOptions{Nickname: "Requester"})
 	if err != nil {
@@ -599,11 +599,12 @@ func TestAllowedOrigins(t *testing.T) {
 	if !errors.Is(de, ua.ErrRefused) {
 		t.Errorf("%v doesn't wrap ua.ErrRefused", de)
 	}
-	if prompts != 0 || pins != 0 {
-		t.Errorf("receiver prompted %d times and showed %d PINs for a refused origin", prompts, pins)
+	if prompts != 0 || pins != 1 {
+		t.Errorf("receiver prompted %d times and showed %d PINs for a refused origin, want 0 and 1", prompts, pins)
 	}
 
-	// A page of an allowed origin on the same browser gets through.
+	// A page of an allowed origin on the same browser gets through; the
+	// browsers trust each other now, so without another PIN.
 	partner := NewWindow(tx.ua, "https://partner.test")
 	req, err = partner.NewLP2PRequest(LP2PRequestOptions{Nickname: "Partner"})
 	if err != nil {

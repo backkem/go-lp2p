@@ -163,48 +163,64 @@ func (a *Advertisement) handshake(uc *ospc.UnauthenticatedConnection) {
 	}
 }
 
-// sessionHandshake runs index.bs "Incoming sessions": check the requesting
-// origin hint, authenticate unless the peer is trusted, ask the user to
-// grant the peer to the origin unless granted already, accept. The session
-// goes to this advertisement, the one the client picked, if it allows the
-// origin, else to another advertisement of the user agent that does.
+// sessionHandshake runs index.bs "Incoming sessions" over the session
+// extension: it answers the client's ceremony if it starts one, asks for
+// one when the client requests a session without being verified, and once
+// the client is verified and the request is in, delivers the session to the
+// receiver that allows its origin: this advertisement, the one the client
+// picked, if it does, else another one of the user agent.
 func (a *Advertisement) sessionHandshake(ctx context.Context, uc *ospc.UnauthenticatedConnection, peer Peer, log logger) (*Connection, error) {
 	u := a.u
-	hint, _ := uc.RequestingOrigin()
-	target := a
-	if !a.allows(hint) {
-		target = u.advertisementAllowing(hint)
+	for {
+		cue, err := uc.AwaitSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+		switch cue {
+		case ospc.SessionCueAuthenticate:
+			if _, err := u.pair(ctx, uc, a.origin, a.nickname, peer); err != nil {
+				return nil, err
+			}
+			u.trust.addAnchor(peer.ID)
+		case ospc.SessionCueRequested:
+			if !uc.RemoteAgent().Authenticated() {
+				if u.trust.trusted(peer.ID) {
+					if err := uc.TrustPeer(); err != nil {
+						return nil, err
+					}
+				} else if err := uc.RequireAuthentication(); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if !uc.RemoteAgent().Authenticated() {
+			continue
+		}
+		origin, ok := uc.RequestingOrigin()
+		if !ok {
+			continue // Verified; the request is still to come.
+		}
+		peer = verifiedPeer(uc.RemoteAgent(), peer)
+		target := a
+		if !a.allows(origin) {
+			target = u.advertisementAllowing(origin)
+		}
+		if target == nil {
+			log.Info("refusing session: requesting origin not allowed", "origin", origin)
+			return nil, errors.Join(ErrRefused, uc.RefuseSession())
+		}
+		if target != a {
+			log.Info("delivering session to another receiver that allows the origin", "origin", origin, "nickname", target.nickname)
+		}
+		return target.acceptSession(ctx, uc, peer, origin)
 	}
-	if target == nil {
-		// Before any trust ceremony or prompt.
-		log.Info("refusing session: requesting origin not allowed", "origin", hint)
-		return nil, errors.Join(ErrRefused, uc.RefuseSession())
-	}
-	if target != a {
-		log.Info("delivering session to another receiver that allows the origin", "origin", hint, "nickname", target.nickname)
-	}
-	return target.acceptSession(ctx, uc, peer, hint)
 }
 
-// acceptSession authenticates, prompts and accepts an incoming session for
-// this advertisement, and hands the connection to Accept.
-func (a *Advertisement) acceptSession(ctx context.Context, uc *ospc.UnauthenticatedConnection, peer Peer, hint string) (*Connection, error) {
+// acceptSession prompts for the grant if needed, accepts the session of a
+// verified client for this advertisement, and hands the connection to
+// Accept.
+func (a *Advertisement) acceptSession(ctx context.Context, uc *ospc.UnauthenticatedConnection, peer Peer, origin string) (*Connection, error) {
 	u := a.u
-
-	if u.trust.trusted(peer.ID) {
-		if err := uc.TrustPeer(); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := uc.RequestAuthentication(); err != nil {
-			return nil, err
-		}
-		if _, err := u.pair(ctx, uc, a.origin, a.nickname, peer); err != nil {
-			return nil, err
-		}
-		u.trust.addAnchor(peer.ID)
-	}
-	peer = verifiedPeer(uc.RemoteAgent(), peer)
 	u.trust.addKnown(peer)
 
 	if !u.trust.granted(a.origin, peer.ID) {
@@ -213,7 +229,7 @@ func (a *Advertisement) acceptSession(ctx context.Context, uc *ospc.Unauthentica
 			Origin:           a.origin,
 			Nickname:         a.nickname,
 			Peer:             peer,
-			RequestingOrigin: hint,
+			RequestingOrigin: origin,
 		})
 		if err != nil {
 			_ = uc.RefuseSession()
@@ -229,7 +245,7 @@ func (a *Advertisement) acceptSession(ctx context.Context, uc *ospc.Unauthentica
 	if err != nil {
 		return nil, err
 	}
-	c := &Connection{Connection: conn, Peer: peer, RequestingOrigin: hint}
+	c := &Connection{Connection: conn, Peer: peer, RequestingOrigin: origin}
 	select {
 	case a.conns <- c:
 		return nil, nil
@@ -350,20 +366,34 @@ func (u *UserAgent) Connect(ctx context.Context, origin, nickname string) (*Conn
 	}
 	defer uc.Close() // no-op once authenticated
 
-	// Wait for the server to check the requesting origin: it either asks
-	// for authentication or accepts a trusted client right away.
-	cue, err := uc.AwaitSession(hctx)
-	if err != nil {
-		return nil, sessionError(err)
-	}
+	// Verify the server before telling it the origin: a ceremony unless
+	// it is trusted. Then request the session and follow the server's
+	// cues: it asks for a ceremony if it doesn't trust this agent.
 	id := string(uc.RemoteAgent().PeerID)
-	if cue == ospc.SessionCueAuthenticate || !u.trust.trusted(id) {
+	if u.trust.trusted(id) {
+		if err := uc.TrustPeer(); err != nil {
+			return nil, err
+		}
+	} else {
 		if _, err := u.pair(hctx, uc, origin, nickname, peer); err != nil {
 			return nil, err
 		}
 		u.trust.addAnchor(id)
-	} else if err := uc.TrustPeer(); err != nil {
+	}
+	if err := uc.RequestSession(hctx); err != nil {
 		return nil, err
+	}
+	for {
+		cue, err := uc.AwaitSession(hctx)
+		if err != nil {
+			return nil, sessionError(err)
+		}
+		if cue != ospc.SessionCueAuthenticate {
+			break
+		}
+		if _, err := u.pair(hctx, uc, origin, nickname, peer); err != nil {
+			return nil, err
+		}
 	}
 	conn, err := uc.CompleteSession(hctx)
 	if err != nil {
@@ -417,9 +447,11 @@ func (u *UserAgent) pair(ctx context.Context, uc *ospc.UnauthenticatedConnection
 		}
 		psk = raw
 	} else {
-		// The presenter initiates when its user is shown the PIN; this side
-		// answers once the user entered it, or initiates itself if the
-		// presenter hasn't yet.
+		// The consumer asks the presenter to show the PIN, whose user is
+		// then shown it, and answers once its own user entered it.
+		if err := uc.StartAuthentication(); err != nil {
+			return nil, err
+		}
 		pin, err := u.cfg.UI.EnterPIN(ctx, PINPrompt{Origin: origin, Nickname: nickname, Peer: peer})
 		if err != nil {
 			return nil, err
