@@ -676,6 +676,130 @@ func TestSessionGoesToAllowingReceiver(t *testing.T) {
 	}
 }
 
+// TestStartAbort: aborting Start through its signal fails it with the abort
+// reason and takes down the picker or the session being set up.
+func TestStartAbort(t *testing.T) {
+	name := uniqueName(t, "Receiver")
+	rx, tx := pair(t, name)
+	_, conns := startReceiver(t, rx, name)
+
+	// Already aborted: fails right away, with a DOMException cause as is.
+	req, err := tx.window.NewLP2PRequest(LP2PRequestOptions{Nickname: "Requester"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason := newDOMException("TimeoutError", "took too long", nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(reason)
+	if _, err := req.Start(LP2PRequestStartOptions{Signal: ctx}); err != reason {
+		t.Fatalf("already aborted: got %v, want the abort reason", err)
+	}
+
+	// Abort during the picker: the picker blocks until aborted.
+	tx.ui.Pick = func(ctx context.Context, p *ua.Picker) (ua.Peer, error) {
+		<-ctx.Done()
+		return ua.Peer{}, ctx.Err()
+	}
+	ctx, cancel = context.WithCancelCause(context.Background())
+	// A second Start while pending returns the pending result.
+	second := make(chan error, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_, err := req.Start()
+		second <- err
+	}()
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel(errors.New("user navigated away"))
+	}()
+	_, err = req.Start(LP2PRequestStartOptions{Signal: ctx})
+	de := wantDOMException(t, err, AbortError)
+	if de.Err == nil || de.Err.Error() != "user navigated away" {
+		t.Errorf("abort reason: %v", de.Err)
+	}
+	if err2 := recv(t, second, "second Start"); err2 != err {
+		t.Errorf("second Start got %v, want the pending result %v", err2, err)
+	}
+
+	// Abort during the session: the PIN is shown, the requester's user
+	// never types it, the page aborts; the receiver gets no connection.
+	tx.ui.Pick = ua.PickByName(name)
+	shown := make(chan struct{}, 1)
+	rx.ui.Present = func(p ua.PINPresentation) { shown <- struct{}{} }
+	tx.ui.Enter = func(ctx context.Context, p ua.PINPrompt) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	ctx, cancel = context.WithCancelCause(context.Background())
+	go func() {
+		recv(t, shown, "PIN shown")
+		cancel(nil)
+	}()
+	_, err = req.Start(LP2PRequestStartOptions{Signal: ctx})
+	wantDOMException(t, err, AbortError)
+	select {
+	case <-conns:
+		t.Error("receiver got a connection from an aborted request")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// After a failure Start starts over; after success, aborting does
+	// nothing and Start returns the same connection.
+	relay := ua.NewPINRelay()
+	rx.ui.Present, tx.ui.Enter = relay.Present, relay.Enter
+	ctx, cancel = context.WithCancelCause(context.Background())
+	c, err := req.Start(LP2PRequestStartOptions{Signal: ctx})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	recv(t, conns, "connection")
+	cancel(nil)
+	if again, err := req.Start(); err != nil || again != c {
+		t.Errorf("Start after success: %v, %v; want the same connection", again, err)
+	}
+	if c.isClosed() {
+		t.Error("abort after success closed the connection")
+	}
+}
+
+// TestEarlyDataChannelHeld: a data channel the requester opens right after
+// start() is delivered to the receiver's page only once its connection
+// event handler has run, so that ondatachannel can be set there.
+func TestEarlyDataChannelHeld(t *testing.T) {
+	name := uniqueName(t, "Receiver")
+	rx, tx := pair(t, name)
+	r, err := rx.window.NewLP2PReceiver(LP2PReceiverOptions{Nickname: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlerDone := make(chan struct{})
+	got := make(chan bool, 1)
+	r.OnConnection(func(e LP2PConnectionEvent) {
+		e.Connection.OnDataChannel(func(LP2PDataChannelEvent) {
+			select {
+			case <-handlerDone:
+				got <- true
+			default:
+				got <- false
+			}
+		})
+		time.Sleep(200 * time.Millisecond) // The channel arrives meanwhile.
+		close(handlerDone)
+	})
+	if err := r.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Stop)
+	c := connect(t, tx, "Requester")
+	if _, err := c.CreateDataChannel("early", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !recv(t, got, "ondatachannel") {
+		t.Error("data channel delivered before the connection event handler finished")
+	}
+}
+
 func TestTrustedPeerSkipsPairing(t *testing.T) {
 	name := uniqueName(t, "Receiver")
 	rx, tx := pair(t, name)
