@@ -55,6 +55,22 @@ unaffected, which keeps the `osp_demo` and `lp2p_demo` interop working.
 - A second `lp2p-session-request`, or one received by an agent without the
   extension, is refused and closes the connection.
 
+#### Spec gap
+
+Spec commit 4761890 of local-peer-to-peer moves the requesting origin after
+authentication: a client meeting a server it hasn't verified must start a
+trust ceremony before it sends `lp2p-session-request`, and only the client
+starts one. But an OSP PSK consumer can't initiate: `psk-needs-presentation`
+already carries `pA`, which needs the PSK, and with equal ease of input the
+server presents the PSK (network.bs "Authentication"), so the server has no
+cue to show a PIN and the client's user has nothing to type. go-lp2p keeps
+the earlier order (request with the origin hint first, `auth-capabilities`
+as the server's cue) until the spec decides. Only the
+`lp2p-session-result` value `authentication-required` (1110) is defined so
+far, not sent. The same gap applies on the current flow when a server
+accepts on trust a client that no longer trusts it: the client is expected
+to start a ceremony it can't start as a consumer.
+
 ### WebTransport
 
 The WebTransport extension (index.bs "WebTransport extension") pools
