@@ -1,12 +1,15 @@
 package ospc
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/fxamacker/cbor/v2"
 )
 
 const testOrigin = "https://page.example"
@@ -80,43 +83,114 @@ func runSessionPair(t *testing.T, serverAgent, clientAgent *Agent, server sessio
 
 const sessionPSK = "123456"
 
-// serverCeremony is a server that asks the client to authenticate and
-// accepts the session afterwards.
-func serverCeremony(t *testing.T, wantOrigin string) sessionServer {
+// ceremony runs the PSK exchange on one side with psk: the consumer first
+// asks for the PSK to be shown, as a user agent does before asking its user.
+func ceremony(ctx context.Context, uc *UnauthenticatedConnection, psk string) error {
+	if err := uc.StartAuthentication(); err != nil {
+		return err
+	}
+	if _, err := uc.AcceptAuthenticate(ctx); err != nil {
+		return err
+	}
+	_, err := uc.AuthenticatePSK(ctx, []byte(psk))
+	return err
+}
+
+// serverFlow is a server driver: it trusts the client if trustClient, runs
+// a ceremony on each authentication cue, and accepts the session if allow
+// accepts the requesting origin. cues receives every cue in order.
+func serverFlow(trustClient bool, allow func(origin string) bool, cues *[]SessionCue) sessionServer {
 	return func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-		origin, ok := uc.RequestingOrigin()
-		if !ok || origin != wantOrigin {
-			return nil, errors.New("wrong requesting origin " + origin)
+		for {
+			cue, err := uc.AwaitSession(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if cues != nil {
+				*cues = append(*cues, cue)
+			}
+			switch cue {
+			case SessionCueAuthenticate:
+				if err := ceremony(ctx, uc, sessionPSK); err != nil {
+					return nil, err
+				}
+			case SessionCueRequested:
+				if _, ok := uc.RequestingOrigin(); ok && !uc.RemoteAgent().Authenticated() {
+					return nil, errors.New("requesting origin exposed before the client was verified")
+				}
+				if trustClient {
+					if err := uc.TrustPeer(); err != nil {
+						return nil, err
+					}
+				} else if !uc.RemoteAgent().Authenticated() {
+					if err := uc.RequireAuthentication(); err != nil {
+						return nil, err
+					}
+					if cue, err := uc.AwaitSession(ctx); err != nil || cue != SessionCueAuthenticate {
+						return nil, errors.New("no authentication cue after authentication-required")
+					}
+					if cues != nil {
+						*cues = append(*cues, SessionCueAuthenticate)
+					}
+					if err := ceremony(ctx, uc, sessionPSK); err != nil {
+						return nil, err
+					}
+				}
+			}
+			if !uc.RemoteAgent().Authenticated() {
+				continue
+			}
+			origin, ok := uc.RequestingOrigin()
+			if !ok {
+				continue // Verified, but no request yet.
+			}
+			if !allow(origin) {
+				return nil, uc.RefuseSession()
+			}
+			return uc.CompleteSession(ctx)
 		}
-		if err := uc.RequestAuthentication(); err != nil {
-			return nil, err
-		}
-		if _, err := uc.AcceptAuthenticate(ctx); err != nil {
-			return nil, err
-		}
-		if _, err := uc.AuthenticatePSK(ctx, []byte(sessionPSK)); err != nil {
-			return nil, err
-		}
-		return uc.CompleteSession(ctx)
 	}
 }
 
-// clientCeremony is a client that expects to be asked to authenticate.
-func clientCeremony(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-	cue, err := uc.AwaitSession(ctx)
-	if err != nil {
-		return nil, err
+func allowAll(string) bool { return true }
+
+// clientFlow is a client driver: it trusts the server if trustServer, else
+// runs the ceremony first; then requests the session and follows the cues.
+func clientFlow(trustServer bool, cues *[]SessionCue) sessionClient {
+	return func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
+		if trustServer {
+			if err := uc.TrustPeer(); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := uc.RequestSession(ctx); !errors.Is(err, ErrSessionNotVerified) {
+				return nil, errors.New("lp2p-session-request allowed before verifying the server")
+			}
+			if err := ceremony(ctx, uc, sessionPSK); err != nil {
+				return nil, err
+			}
+		}
+		if err := uc.RequestSession(ctx); err != nil {
+			return nil, err
+		}
+		for {
+			cue, err := uc.AwaitSession(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if cues != nil {
+				*cues = append(*cues, cue)
+			}
+			switch cue {
+			case SessionCueAuthenticate:
+				if err := ceremony(ctx, uc, sessionPSK); err != nil {
+					return nil, err
+				}
+			case SessionCueAccepted:
+				return uc.CompleteSession(ctx)
+			}
+		}
 	}
-	if cue != SessionCueAuthenticate {
-		return nil, errors.New("unexpected cue " + cue.String())
-	}
-	if _, err := uc.AcceptAuthenticate(ctx); err != nil {
-		return nil, err
-	}
-	if _, err := uc.AuthenticatePSK(ctx, []byte(sessionPSK)); err != nil {
-		return nil, err
-	}
-	return uc.CompleteSession(ctx)
 }
 
 // checkDataChannel opens a data channel from client to server and sends a
@@ -152,43 +226,198 @@ func checkDataChannel(t *testing.T, server, client *Connection) {
 	}
 }
 
-func TestSessionAcceptWithCeremony(t *testing.T) {
+func cuesEqual(a []SessionCue, b ...SessionCue) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// consumerRequest returns the consumer's psk-needs-presentation the server
+// received, which must carry no public-value.
+func consumerRequest(t *testing.T, uc *UnauthenticatedConnection) {
+	t.Helper()
+	uc.base.mu.Lock()
+	defer uc.base.mu.Unlock()
+	hs := uc.base.authenticationState.remoteHandshake
+	if hs == nil || hs.PskStatus != AuthSpake2PskStatusPskNeedsPresentation {
+		t.Errorf("server got %+v, want the consumer's psk-needs-presentation", hs)
+	} else if hs.PublicValue != nil {
+		t.Errorf("psk-needs-presentation carries a public-value of %d bytes", len(hs.PublicValue))
+	}
+}
+
+// TestConsumerRequestHasNoPublicValue checks the wire form of a consumer's
+// psk-needs-presentation: key 2 is absent.
+func TestConsumerRequestHasNoPublicValue(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeMessage(&msgAuthSpake2Handshake{PskStatus: AuthSpake2PskStatusPskNeedsPresentation}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	r := bytes.NewReader(buf.Bytes())
+	if key, err := readTypeKey(r); err != nil || key != typeKeyAuthSpake2Handshake {
+		t.Fatalf("type key %d, %v", key, err)
+	}
+	var m map[uint64]cbor.RawMessage
+	if err := cbor.Unmarshal(buf.Bytes()[buf.Len()-r.Len():], &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m[2]; ok {
+		t.Errorf("public-value (key 2) present: %x", buf.Bytes())
+	}
+	if _, ok := m[1]; !ok {
+		t.Errorf("psk-status (key 1) missing: %x", buf.Bytes())
+	}
+	// And with pA (the presenter's psk-shown) it is present.
+	buf.Reset()
+	if err := writeMessage(&msgAuthSpake2Handshake{PskStatus: AuthSpake2PskStatusPskShown, PublicValue: []byte{1, 2, 3}}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	r = bytes.NewReader(buf.Bytes())
+	readTypeKey(r)
+	m = nil
+	if err := cbor.Unmarshal(buf.Bytes()[buf.Len()-r.Len():], &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m[2]; !ok {
+		t.Errorf("public-value (key 2) missing from psk-shown: %x", buf.Bytes())
+	}
+}
+
+// TestSessionNeitherTrusts: the client, as PSK consumer, asks the server to
+// show the PSK, verifies it, and only then sends the origin.
+func TestSessionNeitherTrusts(t *testing.T) {
 	checkNoLeaks(t)
+	var serverCues, clientCues []SessionCue
 	server, client := runSessionPair(t,
 		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
-		serverCeremony(t, testOrigin), clientCeremony)
+		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
+			conn, err := serverFlow(false, allowAll, &serverCues)(ctx, uc)
+			if err == nil {
+				consumerRequest(t, uc)
+			}
+			return conn, err
+		}, clientFlow(false, &clientCues))
 	if server.err != nil || client.err != nil {
 		t.Fatalf("session failed: server %v, client %v", server.err, client.err)
 	}
-	if !server.conn.Authenticated() || !client.conn.Authenticated() {
-		t.Error("connections not authenticated")
+	// The request may already be there once the server's ceremony is done.
+	if len(serverCues) == 0 || serverCues[0] != SessionCueAuthenticate {
+		t.Errorf("server cues %v, want authenticate first", serverCues)
+	}
+	if !cuesEqual(clientCues, SessionCueAccepted) {
+		t.Errorf("client cues %v, want [accepted]", clientCues)
 	}
 	checkDataChannel(t, server.conn, client.conn)
 }
 
-func TestSessionRefusedOnHint(t *testing.T) {
+func TestSessionMutualTrust(t *testing.T) {
 	checkNoLeaks(t)
+	var serverCues, clientCues []SessionCue
+	server, client := runSessionPair(t,
+		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
+		serverFlow(true, allowAll, &serverCues), clientFlow(true, &clientCues))
+	if server.err != nil || client.err != nil {
+		t.Fatalf("session failed: server %v, client %v", server.err, client.err)
+	}
+	if !cuesEqual(serverCues, SessionCueRequested) || !cuesEqual(clientCues, SessionCueAccepted) {
+		t.Errorf("cues: server %v, client %v; want no ceremony", serverCues, clientCues)
+	}
+	for _, r := range []authResult{server, client} {
+		r.conn.base.mu.Lock()
+		ran := r.conn.base.authenticationState != nil
+		r.conn.base.mu.Unlock()
+		if ran {
+			t.Error("a ceremony ran between peers that trust each other")
+		}
+	}
+	checkDataChannel(t, server.conn, client.conn)
+}
+
+// TestSessionServerForgotClient: the client trusts the server, so it sends
+// the request right away; the server answers authentication-required and
+// the client, as consumer, asks for the PSK and authenticates.
+func TestSessionServerForgotClient(t *testing.T) {
+	checkNoLeaks(t)
+	var serverCues, clientCues []SessionCue
 	server, client := runSessionPair(t,
 		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
 		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			origin, ok := uc.RequestingOrigin()
-			if !ok || origin != testOrigin {
-				return nil, errors.New("wrong requesting origin " + origin)
-			}
-			// The hint isn't allowed: refuse before any authentication.
-			return nil, uc.RefuseSession()
-		},
-		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			_, err := uc.AwaitSession(ctx)
+			conn, err := serverFlow(false, allowAll, &serverCues)(ctx, uc)
 			if err == nil {
-				err = errors.New("session not refused")
+				consumerRequest(t, uc)
 			}
-			// The server sent no authentication message at all.
-			if uc.RemoteAgent().HasAuthenticationInfo() {
-				return nil, errors.New("server sent auth-capabilities before refusing")
+			return conn, err
+		}, clientFlow(true, &clientCues))
+	if server.err != nil || client.err != nil {
+		t.Fatalf("session failed: server %v, client %v", server.err, client.err)
+	}
+	if !cuesEqual(serverCues, SessionCueRequested, SessionCueAuthenticate) {
+		t.Errorf("server cues %v, want [requested authenticate]", serverCues)
+	}
+	if !cuesEqual(clientCues, SessionCueAuthenticate, SessionCueAccepted) {
+		t.Errorf("client cues %v, want [authenticate accepted]", clientCues)
+	}
+	checkDataChannel(t, server.conn, client.conn)
+}
+
+// TestSessionClientForgotServer: the server trusts the client, but the
+// client authenticates first anyway, before sending the origin.
+func TestSessionClientForgotServer(t *testing.T) {
+	checkNoLeaks(t)
+	var serverCues, clientCues []SessionCue
+	server, client := runSessionPair(t,
+		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
+		serverFlow(true, allowAll, &serverCues), clientFlow(false, &clientCues))
+	if server.err != nil || client.err != nil {
+		t.Fatalf("session failed: server %v, client %v", server.err, client.err)
+	}
+	if len(serverCues) == 0 || serverCues[0] != SessionCueAuthenticate {
+		t.Errorf("server cues %v, want authenticate first", serverCues)
+	}
+	if !cuesEqual(clientCues, SessionCueAccepted) {
+		t.Errorf("client cues %v, want [accepted]", clientCues)
+	}
+	checkDataChannel(t, server.conn, client.conn)
+}
+
+// TestSessionClientPresents: with a lower ease of input the client is the
+// presenter and initiates with psk-shown itself.
+func TestSessionClientPresents(t *testing.T) {
+	checkNoLeaks(t)
+	clientAgent := newSessionTestAgent(t, "Client", false)
+	clientAgent.authenticationInfo.PSKConfig.EaseOfInput = 0
+	serverAgent := newSessionTestAgent(t, "Server", true)
+	serverAgent.authenticationInfo.PSKConfig.EaseOfInput = 90
+	server, client := runSessionPair(t, serverAgent, clientAgent,
+		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
+			conn, err := serverFlow(false, allowAll, nil)(ctx, uc)
+			if err == nil {
+				uc.base.mu.Lock()
+				hs := uc.base.authenticationState.remoteHandshake
+				uc.base.mu.Unlock()
+				if hs == nil || hs.PskStatus != AuthSpake2PskStatusPskShown || hs.PublicValue == nil {
+					t.Errorf("server got %+v, want the client's psk-shown with pA", hs)
+				}
 			}
-			return nil, err
-		})
+			return conn, err
+		}, clientFlow(false, nil))
+	if server.err != nil || client.err != nil {
+		t.Fatalf("session failed: server %v, client %v", server.err, client.err)
+	}
+}
+
+func TestSessionRefusedOrigin(t *testing.T) {
+	checkNoLeaks(t)
+	server, client := runSessionPair(t,
+		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
+		serverFlow(true, func(origin string) bool { return origin != testOrigin }, nil),
+		clientFlow(true, nil))
 	if server.err != nil {
 		t.Errorf("server: %v", server.err)
 	}
@@ -197,44 +426,53 @@ func TestSessionRefusedOnHint(t *testing.T) {
 	}
 }
 
-func TestSessionTrustedPeers(t *testing.T) {
+// TestSessionWrongPINOnCue: an unverified client never learns whether its
+// origin is accepted: the ceremony after authentication-required fails and
+// the connection closes without a final response.
+func TestSessionWrongPINOnCue(t *testing.T) {
 	checkNoLeaks(t)
-	// Both agents trust each other's fingerprint: no auth-capabilities, no
-	// SPAKE2, just success.
+	var clientUC *UnauthenticatedConnection
 	server, client := runSessionPair(t,
 		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
 		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			if _, ok := uc.RequestingOrigin(); !ok {
-				return nil, errors.New("no requesting origin")
+			if cue, err := uc.AwaitSession(ctx); err != nil || cue != SessionCueRequested {
+				return nil, errors.New("want the request first")
 			}
-			if err := uc.TrustPeer(); err != nil {
+			if err := uc.RequireAuthentication(); err != nil {
 				return nil, err
 			}
-			return uc.CompleteSession(ctx)
+			if cue, err := uc.AwaitSession(ctx); err != nil || cue != SessionCueAuthenticate {
+				return nil, errors.New("want the authentication cue")
+			}
+			return nil, ceremony(ctx, uc, "111111")
 		},
 		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			cue, err := uc.AwaitSession(ctx)
-			if err != nil {
+			clientUC = uc
+			if err := uc.TrustPeer(); err != nil {
 				return nil, err
 			}
-			if cue != SessionCueAccepted {
-				return nil, errors.New("unexpected cue " + cue.String())
+			if err := uc.RequestSession(ctx); err != nil {
+				return nil, err
 			}
-			if uc.RemoteAgent().HasAuthenticationInfo() {
-				return nil, errors.New("server sent auth-capabilities to a trusted client")
+			if cue, err := uc.AwaitSession(ctx); err != nil || cue != SessionCueAuthenticate {
+				return nil, errors.New("want the authentication cue")
 			}
-			if err := uc.TrustPeer(); err != nil {
+			if err := ceremony(ctx, uc, "222222"); err != nil {
 				return nil, err
 			}
 			return uc.CompleteSession(ctx)
 		})
-	if server.err != nil || client.err != nil {
-		t.Fatalf("session failed: server %v, client %v", server.err, client.err)
+	if server.err == nil || client.err == nil {
+		t.Fatalf("wrong PIN accepted: server %v, client %v", server.err, client.err)
 	}
-	if !server.conn.Authenticated() || !client.conn.Authenticated() {
-		t.Error("connections not authenticated")
+	if errors.Is(client.err, ErrSessionRefused) {
+		t.Error("client got a final response despite failing the ceremony")
 	}
-	checkDataChannel(t, server.conn, client.conn)
+	select {
+	case <-clientUC.base.session.accepted:
+		t.Error("client got success despite failing the ceremony")
+	default:
+	}
 }
 
 // TestSessionClientHoldsEarlyStreams: the server opens a data channel right
@@ -242,16 +480,14 @@ func TestSessionTrustedPeers(t *testing.T) {
 // only later, holds it until then.
 func TestSessionClientHoldsEarlyStreams(t *testing.T) {
 	checkNoLeaks(t)
-	var serverConn *Connection
 	opened := make(chan error, 1)
 	server, client := runSessionPair(t,
 		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
 		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			conn, err := serverCeremony(t, testOrigin)(ctx, uc)
+			conn, err := serverFlow(true, allowAll, nil)(ctx, uc)
 			if err != nil {
 				return nil, err
 			}
-			serverConn = conn
 			go func() {
 				// Outlives the pair's context, which ends when both sides returned.
 				octx, cancel := context.WithTimeout(context.Background(), testTimeout)
@@ -265,14 +501,14 @@ func TestSessionClientHoldsEarlyStreams(t *testing.T) {
 			return conn, nil
 		},
 		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			if _, err := uc.AwaitSession(ctx); err != nil {
+			if err := uc.TrustPeer(); err != nil {
 				return nil, err
 			}
-			if _, err := uc.AcceptAuthenticate(ctx); err != nil {
+			if err := uc.RequestSession(ctx); err != nil {
 				return nil, err
 			}
-			if _, err := uc.AuthenticatePSK(ctx, []byte(sessionPSK)); err != nil {
-				return nil, err
+			if cue, err := uc.AwaitSession(ctx); err != nil || cue != SessionCueAccepted {
+				return nil, errors.New("want accepted")
 			}
 			// Let the server's data channel arrive before the session is
 			// treated as accepted.
@@ -298,79 +534,32 @@ func TestSessionClientHoldsEarlyStreams(t *testing.T) {
 	if err := <-opened; err != nil {
 		t.Fatal(err)
 	}
-	_ = serverConn
 }
 
-// TestSessionLateCeremonyFails: a server that accepted on trust answers a
-// ceremony the client starts afterwards, and closes the connection when it
-// fails.
+// TestSessionLateCeremonyFails: a server still answers a ceremony the
+// client starts after success, and closes the connection when it fails.
 func TestSessionLateCeremonyFails(t *testing.T) {
 	checkNoLeaks(t)
 	server, client := runSessionPair(t,
 		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
 		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			if err := uc.TrustPeer(); err != nil {
+			if _, err := serverFlow(true, allowAll, nil)(ctx, uc); err != nil {
 				return nil, err
 			}
-			if _, err := uc.CompleteSession(ctx); err != nil {
-				return nil, err
+			if cue, err := uc.AwaitSession(ctx); err != nil || cue != SessionCueAuthenticate {
+				return nil, errors.New("want the late authentication cue")
 			}
-			_, err := uc.AuthenticatePSK(ctx, []byte("111111"))
-			return nil, err
+			return nil, ceremony(ctx, uc, "111111")
 		},
 		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			if _, err := uc.AwaitSession(ctx); err != nil {
+			if _, err := clientFlow(true, nil)(ctx, uc); err != nil {
 				return nil, err
 			}
-			_, err := uc.AuthenticatePSK(ctx, []byte("222222"))
-			return nil, err
+			return nil, ceremony(ctx, uc, "222222")
 		})
 	if !errors.Is(server.err, ErrAuthenticationFailed) && !errors.Is(client.err, ErrAuthenticationFailed) {
 		t.Fatalf("late ceremony with different PSKs succeeded: server %v, client %v", server.err, client.err)
 	}
-}
-
-// TestSessionAcceptedUntrustedServer: the server trusts the client and
-// accepts right away, but the client doesn't trust the server, so it
-// authenticates after the success response; the server only answers.
-func TestSessionAcceptedUntrustedServer(t *testing.T) {
-	checkNoLeaks(t)
-	server, client := runSessionPair(t,
-		newSessionTestAgent(t, "Server", true), newSessionTestAgent(t, "Client", false),
-		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			if err := uc.TrustPeer(); err != nil {
-				return nil, err
-			}
-			conn, err := uc.CompleteSession(ctx)
-			if err != nil {
-				return nil, err
-			}
-			// Answer the client's authentication, as the ua would.
-			if _, err := uc.AuthenticatePSK(ctx, []byte(sessionPSK)); err != nil {
-				return nil, err
-			}
-			return conn, nil
-		},
-		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			cue, err := uc.AwaitSession(ctx)
-			if err != nil {
-				return nil, err
-			}
-			if cue != SessionCueAccepted {
-				return nil, errors.New("unexpected cue " + cue.String())
-			}
-			if _, err := uc.CompleteSession(ctx); !errors.Is(err, ErrSessionNotVerified) {
-				return nil, errors.New("CompleteSession before verifying the server succeeded")
-			}
-			if _, err := uc.AuthenticatePSK(ctx, []byte(sessionPSK)); err != nil {
-				return nil, err
-			}
-			return uc.CompleteSession(ctx)
-		})
-	if server.err != nil || client.err != nil {
-		t.Fatalf("session failed: server %v, client %v", server.err, client.err)
-	}
-	checkDataChannel(t, server.conn, client.conn)
 }
 
 func TestSessionSecondRequestCloses(t *testing.T) {
@@ -379,9 +568,6 @@ func TestSessionSecondRequestCloses(t *testing.T) {
 	defer cancel()
 	l, ra := startTestListener(t, newSessionTestAgent(t, "Server", true))
 
-	// The server closes the connection on the second request, usually
-	// before the listener hands it to Accept; if Accept does return it, the
-	// connection is closed with ErrSessionProtocol.
 	accepted := make(chan *UnauthenticatedConnection, 1)
 	go func() {
 		uc, err := l.Accept(ctx)
@@ -396,6 +582,12 @@ func TestSessionSecondRequestCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer uc.Close()
+	if err := uc.TrustPeer(); err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.RequestSession(ctx); err != nil {
+		t.Fatal(err)
+	}
 	s, err := uc.base.netConn.(networkStreamOpener).OpenNetworkStream(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -403,16 +595,16 @@ func TestSessionSecondRequestCloses(t *testing.T) {
 	if err := writeMessage(&msgLp2pSessionRequest{RequestingOrigin: testOrigin}, s); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := uc.AwaitSession(ctx); err == nil {
-		t.Fatal("session survived a second lp2p-session-request")
-	}
 	select {
 	case <-uc.base.ctx.Done():
 	case <-ctx.Done():
 		t.Fatal("client connection not closed")
 	}
 
-	l.Close() // Unblocks Accept if the listener never handed the connection out.
+	// The server usually closes the connection before the listener hands
+	// it to Accept; if Accept does return it, it is closed with
+	// ErrSessionProtocol.
+	l.Close()
 	if serverConn := <-accepted; serverConn != nil {
 		defer serverConn.Close()
 		select {
@@ -441,17 +633,14 @@ func TestSessionLegacyServer(t *testing.T) {
 			}
 		},
 		func(ctx context.Context, uc *UnauthenticatedConnection) (*Connection, error) {
-			// A plain OSP server sends auth-capabilities right away, which
-			// is a valid cue; the refusal follows.
-			if _, err := uc.AwaitSession(ctx); err != nil {
+			if err := uc.TrustPeer(); err != nil {
 				return nil, err
 			}
-			select {
-			case <-uc.base.ctx.Done():
-				return nil, uc.base.err()
-			case <-ctx.Done():
-				return nil, errors.New("connection not closed")
+			if err := uc.RequestSession(ctx); err != nil {
+				return nil, err
 			}
+			_, err := uc.AwaitSession(ctx)
+			return nil, err
 		})
 	if !errors.Is(server.err, ErrSessionProtocol) {
 		t.Errorf("server: got %v, want ErrSessionProtocol", server.err)
@@ -461,43 +650,56 @@ func TestSessionLegacyServer(t *testing.T) {
 	}
 }
 
-// TestSessionLegacyClient: a listener with the session extension closes a
-// connection from a client that sends no lp2p-session-request.
+// TestSessionLegacyClient: a plain OSP client reaches a listener with the
+// session extension as an unauthenticated connection; its SPAKE2 is
+// answered like a ceremony, but no session is ever requested.
 func TestSessionLegacyClient(t *testing.T) {
 	checkNoLeaks(t)
-	defer func(d time.Duration) { infoExchangeTimeout = d }(infoExchangeTimeout)
-	infoExchangeTimeout = 500 * time.Millisecond
-
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 	l, ra := startTestListener(t, newSessionTestAgent(t, "Server", true))
-	accepted := make(chan error, 1)
+	serverCh := make(chan error, 1)
 	go func() {
-		_, err := l.Accept(ctx)
-		accepted <- err
+		uc, err := l.Accept(ctx)
+		if err != nil {
+			serverCh <- err
+			return
+		}
+		defer uc.Close()
+		cue, err := uc.AwaitSession(ctx)
+		if err != nil {
+			serverCh <- err
+			return
+		}
+		if cue != SessionCueAuthenticate {
+			serverCh <- errors.New("unexpected cue " + cue.String())
+			return
+		}
+		if err := ceremony(ctx, uc, sessionPSK); err != nil {
+			serverCh <- err
+			return
+		}
+		short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		defer cancel()
+		if _, err := uc.AwaitSession(short); !errors.Is(err, context.DeadlineExceeded) {
+			serverCh <- errors.New("a plain client requested a session")
+			return
+		}
+		serverCh <- nil
 	}()
 
-	// The server withholds auth-capabilities, so the plain Dial times out
-	// too; either way the connection ends without being accepted.
 	uc, err := ra.Dial(ctx, AgentTransportQUIC, newSessionTestAgent(t, "Client", false))
-	if err == nil {
-		defer uc.Close()
-		select {
-		case <-uc.base.ctx.Done():
-		case <-ctx.Done():
-			t.Fatal("connection without lp2p-session-request not closed")
-		}
-	} else if !errors.Is(err, ErrNoAgentInfo) {
-		t.Fatalf("Dial: got %v, want ErrNoAgentInfo", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	select {
-	case err := <-accepted:
-		t.Fatalf("Accept returned %v for a client without lp2p-session-request", err)
-	case <-time.After(infoExchangeTimeout):
+	defer uc.Close()
+	conn, err := uc.AuthenticatePSK(ctx, []byte(sessionPSK))
+	if err != nil {
+		t.Fatal(err)
 	}
-	l.Close()
-	if err := <-accepted; !errors.Is(err, ErrListenerClosed) {
-		t.Errorf("Accept: got %v, want ErrListenerClosed", err)
+	defer conn.Close()
+	if err := <-serverCh; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -518,8 +720,15 @@ func TestSessionUnsupportedPeer(t *testing.T) {
 			uc.Close()
 		}
 	}()
-	_, err := ra.DialSession(ctx, AgentTransportWebRTC, newSessionTestAgent(t, "Client", false), testOrigin)
-	if !errors.Is(err, ErrSessionUnsupported) {
+	uc, err := ra.DialSession(ctx, AgentTransportWebRTC, newSessionTestAgent(t, "Client", false), testOrigin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uc.Close()
+	if err := uc.TrustPeer(); err != nil {
+		t.Fatal(err)
+	}
+	if err := uc.RequestSession(ctx); !errors.Is(err, ErrSessionUnsupported) {
 		t.Fatalf("got %v, want ErrSessionUnsupported", err)
 	}
 }

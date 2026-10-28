@@ -22,11 +22,8 @@ type exchangeInfoState struct {
 
 // exchangeInfo sends the local auth-capabilities and requests the remote
 // agent-info. The returned state's done channel is closed once both the
-// remote agent-info and auth-capabilities are received.
-//
-// A server with the session extension doesn't send auth-capabilities here:
-// it is the cue for the client to authenticate, sent by RequestAuthentication
-// once the requesting origin hint was checked.
+// remote agent-info and auth-capabilities are received. With the session
+// extension auth-capabilities starts nothing: only the client starts SPAKE2.
 func (c *baseConnection) exchangeInfo() (*exchangeInfoState, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -35,10 +32,8 @@ func (c *baseConnection) exchangeInfo() (*exchangeInfoState, error) {
 		return c.exchangeInfoState, nil
 	}
 
-	if c.session == nil || c.agentRole != AgentRoleServer {
-		if err := c.sendAuthCapabilities(); err != nil {
-			return nil, err
-		}
+	if err := c.sendAuthCapabilities(); err != nil {
+		return nil, err
 	}
 
 	// Remote AgentInfo
@@ -113,24 +108,12 @@ const tolerateInfoGrace = 2 * time.Second
 
 // awaitInfo runs the info exchange and waits for it to complete, at most
 // infoExchangeTimeout. It does not close the connection on failure.
-//
-// With the session extension, a client only waits for the remote agent-info,
-// as the server holds back its auth-capabilities; a server also waits for
-// the lp2p-session-request.
 func (c *baseConnection) awaitInfo(ctx context.Context) error {
 	state, err := c.exchangeInfo()
 	if err != nil {
 		return fmt.Errorf("failed to exchange info: %w", err)
 	}
 	done := state.done
-	var sessionRequested <-chan struct{}
-	if c.session != nil {
-		if c.agentRole == AgentRoleClient {
-			done = state.infoDone
-		} else {
-			sessionRequested = c.session.requested
-		}
-	}
 
 	timeout := infoExchangeTimeout
 	tolerate := c.localAgent.quirks.TolerateMissingAgentInfo
@@ -157,19 +140,7 @@ func (c *baseConnection) awaitInfo(ctx context.Context) error {
 		case <-c.ctx.Done():
 			return c.err()
 		case <-done:
-			if sessionRequested == nil {
-				return nil
-			}
-			select {
-			case <-sessionRequested:
-				return nil
-			case <-ctx.Done():
-				return fmt.Errorf("%w: %w", ErrNoSessionRequest, ctx.Err())
-			case <-c.ctx.Done():
-				return c.err()
-			case <-timer.C:
-				return fmt.Errorf("%w within %v", ErrNoSessionRequest, timeout)
-			}
+			return nil
 		case <-timer.C:
 			if tolerate {
 				c.proceedWithoutInfo()
@@ -320,9 +291,13 @@ func (c *baseConnection) GeneratePSK() ([]byte, error) {
 type authenticationState struct {
 	// psk is the canonical PSK (SPAKE2 pw), nil until AuthenticatePSK.
 	psk []byte
-	// remoteHandshake is the peer's initiating auth-spake2-handshake (pA),
-	// kept until the PSK is known.
+	// remoteHandshake is the peer's initiating auth-spake2-handshake, kept
+	// until the PSK is known: psk-shown with pA, or a consumer's
+	// psk-needs-presentation without one.
 	remoteHandshake *msgAuthSpake2Handshake
+	// presentationRequested is set once a consumer sent
+	// psk-needs-presentation, asking the presenter to show the PSK.
+	presentationRequested bool
 
 	spakeState *spake2.SPAKE2 // Nil until the local PSK is known.
 	alice      bool           // The local agent initiated.
@@ -444,12 +419,13 @@ func (c *baseConnection) finishAuthentication() (*Connection, error) {
 		return nil, fmt.Errorf("%w: remote result %v", ErrAuthenticationFailed, remoteResult)
 	}
 
-	if c.session != nil && c.agentRole == AgentRoleClient {
-		// Session extension: the client sends nothing of the other
-		// extensions before it treats the session as accepted, and holds
-		// the streams the server opens right after sending success until
-		// then. CompleteSession hands off; the transport holds the streams
-		// meanwhile and discards them if the connection closes first.
+	if c.session != nil {
+		// Session extension: neither agent sends messages of the other
+		// extensions before the session is accepted, and the client may
+		// authenticate before it sends the lp2p-session-request, which the
+		// network phase handles. CompleteSession hands off; the transport
+		// holds application streams meanwhile and discards them if the
+		// connection closes first.
 		c.remoteAgent.setAuthenticated()
 		return &Connection{base: c}, nil
 	}
@@ -582,14 +558,62 @@ func (c *baseConnection) authInitiate() error {
 	if err != nil {
 		return c.authFailed(AuthStatusResultUnknownError, err)
 	}
-	// network.bs: the presenter initiates with psk-status psk-shown, the
-	// consumer with psk-needs-presentation, both with pA.
+	// network.bs: the presenter initiates with psk-status psk-shown and pA;
+	// a consumer only with InteropQuirks.ConsumerInitiatesWithPublicValue.
 	status := AuthSpake2PskStatusPskNeedsPresentation
 	if c.authenticationRole == AuthenticationRolePresenter {
 		status = AuthSpake2PskStatusPskShown
 	}
 	c.log.Debug("SPAKE2: initiating as Alice", "role", c.authenticationRole, "psk-status", status)
 	return c.sendAuthSpake2Handshake(status, pA)
+}
+
+// requestPresentation sends, as the PSK consumer, auth-spake2-handshake
+// psk-needs-presentation without a public-value: it asks the presenter to
+// show the PSK and initiate with psk-shown. Sent once.
+//
+// Caller should hold connection lock.
+func (c *baseConnection) requestPresentation() error {
+	authState := c.authState()
+	if authState.presentationRequested {
+		return nil
+	}
+	authState.presentationRequested = true
+	c.log.Debug("SPAKE2: asking the presenter to show the PSK", "role", c.authenticationRole)
+	return c.sendAuthSpake2Handshake(AuthSpake2PskStatusPskNeedsPresentation, nil)
+}
+
+// StartAuthentication starts a trust ceremony as far as this agent can
+// before its user acted: a PSK consumer asks the presenter to show the PSK
+// (auth-spake2-handshake psk-needs-presentation), so that the presenter's
+// user is shown one and the consumer's user can enter it with
+// AuthenticatePSK. A presenter has nothing to send yet: it initiates in
+// AuthenticatePSK, once the PSK is shown. On a server with the session
+// extension it does nothing: only the client starts.
+func (c *baseConnection) StartAuthentication() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session != nil && c.agentRole == AgentRoleServer {
+		return nil
+	}
+	if !c.authNotified {
+		c.determineAuthenticationRole()
+	}
+	authState := c.authState()
+	if c.authenticationRole != AuthenticationRoleConsumer || authState.spakeState != nil ||
+		authState.remoteHandshake != nil || c.localAgent.quirks.ConsumerInitiatesWithPublicValue {
+		return nil
+	}
+	return c.failOnErrorLocked(c.requestPresentation())
+}
+
+// failOnErrorLocked is failOnError for callers holding the connection lock:
+// the shutdown runs once the lock is released.
+func (c *baseConnection) failOnErrorLocked(err error) error {
+	if err != nil {
+		go c.shutdown(err)
+	}
+	return err
 }
 
 // authRespond answers the peer's initiating handshake as Bob.
@@ -625,20 +649,39 @@ func (c *baseConnection) authenticatePSKProgress() error {
 
 	// Start SPAKE2 once the PSK is known.
 	if authState.spakeState == nil {
-		if authState.psk == nil {
-			return nil // Waiting for AuthenticatePSK.
-		}
-		var err error
-		if hs := authState.remoteHandshake; hs != nil {
-			err = c.authRespond(hs)
+		if hs := authState.remoteHandshake; hs != nil && hs.PublicValue == nil {
+			// The consumer asks for the PSK to be shown: the presenter
+			// initiates with psk-shown once its user was shown the PSK.
+			if c.authenticationRole != AuthenticationRolePresenter {
+				return c.authFailed(AuthStatusResultUnknownError, errors.New("both agents are the PSK consumer"))
+			}
+			if authState.psk == nil {
+				return nil // Waiting for AuthenticatePSK.
+			}
+			if err := c.authInitiate(); err != nil || authState.failed {
+				return err
+			}
+		} else if hs != nil {
+			if authState.psk == nil {
+				return nil // Waiting for AuthenticatePSK.
+			}
+			if err := c.authRespond(hs); err != nil || authState.failed {
+				return err
+			}
 		} else if c.session != nil && c.agentRole == AgentRoleServer {
 			// Session extension: only the client initiates.
 			return nil
+		} else if c.authenticationRole == AuthenticationRoleConsumer && !c.localAgent.quirks.ConsumerInitiatesWithPublicValue {
+			// A consumer can't compute pA before the PSK is shown: ask the
+			// presenter to show it and initiate.
+			return c.requestPresentation()
 		} else {
-			err = c.authInitiate()
-		}
-		if err != nil || authState.failed {
-			return err
+			if authState.psk == nil {
+				return nil // Waiting for AuthenticatePSK.
+			}
+			if err := c.authInitiate(); err != nil || authState.failed {
+				return err
+			}
 		}
 	}
 
@@ -781,9 +824,6 @@ func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.sessionRequested() {
-		return fmt.Errorf("%w: authentication before lp2p-session-request", ErrSessionProtocol)
-	}
 	if token := msg.AuthInitiationToken.Token; token != nil && !c.validAuthInitiationToken(*token) {
 		c.log.Warn("discarding auth-spake2-handshake with invalid auth-initiation-token")
 		return nil
@@ -796,19 +836,22 @@ func (c *baseConnection) handleAuthSpake2Handshake(msg *msgAuthSpake2Handshake) 
 
 	switch {
 	case authState.spakeState == nil:
-		// The peer initiated. Answer once the PSK is known.
+		// The peer initiated, or asks for the PSK to be shown. Answer once
+		// the PSK is known.
 		if authState.remoteHandshake != nil {
 			c.log.Debug("ignoring repeated initiating auth-spake2-handshake")
 			return nil
 		}
 		authState.remoteHandshake = msg
+		c.notifySessionAuthStarted()
 
 	case authState.alice && authState.remotePublic == nil:
 		if msg.PskStatus == AuthSpake2PskStatusPskNeedsPresentation {
-			// Both agents initiated, network.bs doesn't say how to resolve
-			// this. The presenter's initiation wins: as presenter, ignore the
-			// consumer's. If both claim to be the consumer the roles disagree
-			// and the peer's psk-input reply will never come; ignore it too.
+			// The consumer asks for a presentation that is under way, or
+			// both agents initiated (with the quirk). The presenter's
+			// initiation wins: as presenter, ignore the consumer's. If both
+			// claim to be the consumer the roles disagree and the peer's
+			// psk-input reply will never come; ignore it too.
 			c.log.Debug("both agents initiated SPAKE2, ignoring the peer's psk-needs-presentation", "role", c.authenticationRole)
 			return nil
 		}

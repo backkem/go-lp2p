@@ -485,6 +485,13 @@ func (c *UnauthenticatedConnection) AcceptAuthenticate(ctx context.Context) (rol
 	return c.base.AcceptAuthenticate(ctx)
 }
 
+// StartAuthentication asks the PSK presenter to show the PSK when this
+// agent is the consumer, see baseConnection.StartAuthentication. Call it
+// before asking the user for the PSK.
+func (c *UnauthenticatedConnection) StartAuthentication() error {
+	return c.base.StartAuthentication()
+}
+
 // AuthenticatePSK authenticates the peer with SPAKE2 (network.bs
 // "Authentication with SPAKE2") using psk, a base-10 numeric PSK in any form
 // ParsePSK accepts. It blocks until authentication completes or ctx is done.

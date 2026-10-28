@@ -143,7 +143,9 @@ type msgAuthStatus struct {
 type msgAuthSpake2Handshake struct {
 	AuthInitiationToken msgAuthInitiationToken `cbor:"0,keyasint"`
 	PskStatus           msgAuthSpake2PskStatus `cbor:"1,keyasint"`
-	PublicValue         []byte                 `cbor:"2,keyasint"`
+	// PublicValue is omitted from a consumer's psk-needs-presentation, which
+	// carries no pA (hand-edited: omitempty isn't in the generated form).
+	PublicValue []byte `cbor:"2,keyasint,omitempty"`
 }
 
 // (cddlc) Ident: watch-id

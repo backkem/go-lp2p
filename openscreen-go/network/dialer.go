@@ -36,11 +36,11 @@ func (ra DiscoveredAgent) Dial(ctx context.Context, transportType AgentTransport
 }
 
 // DialSession opens a connection to the remote agent with the LP2P session
-// extension: it sends an lp2p-session-request with origin, the requesting
-// origin, right after the agent-info exchange. It fails with
-// ErrSessionUnsupported if the agent lists neither data-channels nor
-// quic-transport. The returned connection is driven with AwaitSession,
-// AuthenticatePSK or TrustPeer, and CompleteSession.
+// extension, for a session requested by origin. After the agent-info
+// exchange the caller verifies the server (StartAuthentication and
+// AuthenticatePSK, or TrustPeer), sends the lp2p-session-request with
+// RequestSession, follows the server's cues with AwaitSession, and finishes
+// with CompleteSession.
 func (ra DiscoveredAgent) DialSession(ctx context.Context, transportType AgentTransport, la *Agent, origin string) (*UnauthenticatedConnection, error) {
 	fp, err := ra.TXT.GetOne(txtKeyFingerprint)
 	if err != nil {
@@ -121,10 +121,7 @@ func (ra DiscoveredAgent) dial(ctx context.Context, transportType AgentTransport
 		return nil, err
 	}
 	if sessionOrigin != nil {
-		if err := bConn.startSession(ctx, *sessionOrigin); err != nil {
-			_ = bConn.Close()
-			return nil, err
-		}
+		bConn.session.origin = *sessionOrigin
 	}
 
 	return &UnauthenticatedConnection{

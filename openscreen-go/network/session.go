@@ -5,21 +5,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"time"
 )
 
 // LP2P session extension (local-peer-to-peer index.bs "Session extension").
 //
-// The QUIC client sends an lp2p-session-request carrying the requesting
-// origin on a new bidirectional stream right after the handshake, before
-// authentication. The QUIC server reports it as the requesting origin hint
-// (RequestingOrigin) and either refuses the session (RefuseSession), or, if
-// it hasn't verified the client's certificate, asks it to authenticate by
-// sending auth-capabilities (RequestAuthentication): only the client starts
-// SPAKE2, the server only responds. Once the server has verified the
-// client's certificate and accepted the session it answers success
-// (CompleteSession). The client treats the session as accepted once it has
-// received success and verified the server's certificate.
+// Both agents exchange agent-info and auth-capabilities as in OSP; only the
+// client ever starts SPAKE2 (as the PSK consumer, by asking the presenter to
+// show the PSK). The requesting origin is only sent to a verified server:
+// once the client has verified the server's certificate (by SPAKE2, or
+// because it trusts its fingerprint) it sends an lp2p-session-request on a
+// new bidirectional stream. A server that hasn't verified the client answers
+// a provisional authentication-required without looking at the origin, and
+// the client authenticates; once the client is verified the server reports
+// the session (RequestingOrigin) and answers success (CompleteSession) or
+// permanent-error (RefuseSession). The client treats the session as accepted
+// once it has received success. Agents that trust each other run no
+// ceremony.
 //
 // The extension is enabled per agent with AgentConfig.SessionExtension (for
 // listeners) and per connection with DiscoveredAgent.DialSession.
@@ -29,35 +32,36 @@ var (
 	// server refused the session with lp2p-session-response permanent-error,
 	// or because RefuseSession was called.
 	ErrSessionRefused = errors.New("session refused")
-	// ErrSessionUnsupported is returned by DialSession when the peer lists
-	// neither data-channels nor quic-transport in its agent-info, or the
-	// transport can't carry the session stream.
+	// ErrSessionUnsupported is returned by RequestSession when the peer
+	// lists neither data-channels nor quic-transport in its agent-info, or
+	// the transport can't carry the session stream.
 	ErrSessionUnsupported = errors.New("peer does not support LP2P sessions")
-	// ErrNoSessionRequest is the cause of a connection closed by a listener
-	// with the session extension because the client sent no
-	// lp2p-session-request in time.
-	ErrNoSessionRequest = errors.New("client sent no lp2p-session-request")
 	// ErrSessionProtocol is the cause of a connection closed for a violation
 	// of the session extension, e.g. a second lp2p-session-request.
 	ErrSessionProtocol = errors.New("session extension protocol violation")
-	// ErrSessionNotVerified is returned by CompleteSession on the server when
-	// the client's certificate wasn't verified first.
+	// ErrSessionNotVerified is returned by RequestSession, CompleteSession
+	// and RequestingOrigin when the peer's certificate wasn't verified first.
 	ErrSessionNotVerified = errors.New("peer certificate not verified")
 )
 
-// SessionCue is what AwaitSession reports on the client.
+// SessionCue is what AwaitSession reports.
 type SessionCue int
 
 const (
-	// SessionCueAuthenticate: the server sent auth-capabilities, so it
-	// hasn't verified the client's certificate. Authenticate with
-	// AcceptAuthenticate and AuthenticatePSK, then call CompleteSession.
+	// SessionCueAuthenticate: a trust ceremony is due. On the client, the
+	// server answered authentication-required; on the server, the client
+	// started SPAKE2. Run AcceptAuthenticate and AuthenticatePSK (the
+	// client first StartAuthentication), then AwaitSession again.
 	SessionCueAuthenticate SessionCue = iota + 1
-	// SessionCueAccepted: the server accepted the session (success) without
-	// asking for authentication, because it trusts the client's certificate.
-	// If the server's certificate isn't trusted either, authenticate first
-	// (the client initiates; the server answers); then call CompleteSession.
+	// SessionCueAccepted (client): the server accepted the session; call
+	// CompleteSession.
 	SessionCueAccepted
+	// SessionCueRequested (server): the lp2p-session-request arrived. If
+	// the client isn't verified yet, call RequireAuthentication and wait for
+	// SessionCueAuthenticate; otherwise RequestingOrigin is available and
+	// the session is accepted with CompleteSession or refused with
+	// RefuseSession.
+	SessionCueRequested
 )
 
 func (c SessionCue) String() string {
@@ -66,6 +70,8 @@ func (c SessionCue) String() string {
 		return "authenticate"
 	case SessionCueAccepted:
 		return "accepted"
+	case SessionCueRequested:
+		return "requested"
 	default:
 		return fmt.Sprintf("SessionCue(%d)", int(c))
 	}
@@ -80,7 +86,7 @@ type networkStreamOpener interface {
 
 // incomingSessionRequest is delivered by the transport in place of a message
 // when a bidirectional stream starts with an lp2p-session-request. The
-// stream, read past the request, carries the response.
+// stream, read past the request, carries the responses.
 type incomingSessionRequest struct {
 	msg    *msgLp2pSessionRequest
 	stream ApplicationStream // Nil if the request came on a unidirectional stream.
@@ -90,65 +96,93 @@ type incomingSessionRequest struct {
 //
 // Fields are protected by baseConnection.mu unless noted.
 type sessionState struct {
-	// origin is the requesting origin: sent by the client, received by the
-	// server. Immutable once requested is closed.
+	// origin is the requesting origin: given to DialSession by the client,
+	// received by the server. Immutable once requested is closed.
 	origin string
 	// requested is closed once the lp2p-session-request was sent (client)
 	// or received (server).
 	requested chan struct{}
 	// stream is the session stream. Set once requested is closed.
 	stream ApplicationStream
-	// authRequested is set on the server once auth-capabilities was sent.
-	authRequested bool
+	// requestID is the request-id of the lp2p-session-request, on the server.
+	requestID msgRequestId
+	// authStarted is closed on the server once the client started SPAKE2;
+	// authRequired on the client once authentication-required arrived.
+	authStarted  chan struct{}
+	authRequired chan struct{}
+	// authCues counts the authentication cues AwaitSession reported and
+	// requestedCues the request cues, so each is reported once.
+	authCues      atomic.Int32
+	requestedCues atomic.Int32
+	// authRequiredSent is set on the server once the provisional response
+	// was sent.
+	authRequiredSent bool
 	// accepted is closed once success was sent (server) or received
 	// (client).
 	accepted chan struct{}
 	// completed is set once CompleteSession ran.
 	completed bool
-	// responded is set on the server once a response was sent.
+	// responded is set on the server once a final response was sent.
 	responded bool
-	// requestID is the request-id of the lp2p-session-request, on the server.
-	requestID msgRequestId
 }
 
 func newSessionState() *sessionState {
 	return &sessionState{
-		requested: make(chan struct{}),
-		accepted:  make(chan struct{}),
+		requested:    make(chan struct{}),
+		authStarted:  make(chan struct{}),
+		authRequired: make(chan struct{}),
+		accepted:     make(chan struct{}),
 	}
 }
 
-// requestedOrigin returns the requesting origin once known.
-func (s *sessionState) requestedOrigin() (string, bool) {
+// isRequested reports whether the lp2p-session-request was sent or received.
+func (s *sessionState) isRequested() bool {
 	select {
 	case <-s.requested:
-		return s.origin, true
-	default:
-		return "", false
-	}
-}
-
-// isAccepted reports whether success was sent or received.
-func (s *sessionState) isAccepted() bool {
-	select {
-	case <-s.accepted:
 		return true
 	default:
 		return false
 	}
 }
 
-// startSession is run by the client once the remote agent-info is known: it
+// notifySessionAuthStarted reports, on a server with the session extension,
+// that the client started SPAKE2.
+//
+// Caller should hold connection lock.
+func (c *baseConnection) notifySessionAuthStarted() {
+	if c.session == nil || c.agentRole != AgentRoleServer {
+		return
+	}
+	select {
+	case <-c.session.authStarted:
+	default:
+		close(c.session.authStarted)
+	}
+}
+
+// requestSession is run by the client once it has verified the server: it
 // opens the session stream, sends the lp2p-session-request and reads the
-// response in the background.
-func (c *baseConnection) startSession(ctx context.Context, origin string) error {
+// responses in the background.
+func (c *baseConnection) requestSession(ctx context.Context) error {
+	if !c.remoteAgent.Authenticated() {
+		return ErrSessionNotVerified
+	}
 	if !c.remoteAgent.HasCapability(AgentCapabilityDataChannels) && !c.remoteAgent.HasCapability(AgentCapabilityQuickTransport) {
 		return fmt.Errorf("%w: agent-info lists neither data-channels nor quic-transport", ErrSessionUnsupported)
 	}
 	opener, ok := c.netConn.(networkStreamOpener)
 	if !ok {
-		return fmt.Errorf("%w: transport has no bidirectional streams before authentication", ErrSessionUnsupported)
+		return fmt.Errorf("%w: transport has no bidirectional streams before the hand-off", ErrSessionUnsupported)
 	}
+
+	c.mu.Lock()
+	if c.session.isRequested() {
+		c.mu.Unlock()
+		return nil
+	}
+	origin := c.session.origin
+	c.mu.Unlock()
+
 	stream, err := opener.OpenNetworkStream(ctx)
 	if err != nil {
 		return fmt.Errorf("open session stream: %w", err)
@@ -164,44 +198,60 @@ func (c *baseConnection) startSession(ctx context.Context, origin string) error 
 	}
 
 	c.mu.Lock()
-	c.session.origin = origin
 	c.session.stream = stream
 	close(c.session.requested)
 	c.mu.Unlock()
 
-	if !c.goroutine(func() { c.readSessionResponse(stream) }) {
+	if !c.goroutine(func() { c.readSessionResponses(stream) }) {
 		return c.err()
 	}
 	return nil
 }
 
-// readSessionResponse reads the server's lp2p-session-response and then
-// expects the stream to end.
-func (c *baseConnection) readSessionResponse(stream ApplicationStream) {
-	msg, err := readMessage(stream)
-	if err != nil {
-		c.shutdown(fmt.Errorf("%w: session stream ended before lp2p-session-response: %w", ErrSessionProtocol, err))
-		return
+// readSessionResponses reads the server's lp2p-session-responses: an
+// optional provisional authentication-required, then the final result, after
+// which the stream ends.
+func (c *baseConnection) readSessionResponses(stream ApplicationStream) {
+	for {
+		msg, err := readMessage(stream)
+		if err != nil {
+			c.shutdown(fmt.Errorf("%w: session stream ended before a final lp2p-session-response: %w", ErrSessionProtocol, err))
+			return
+		}
+		resp, ok := msg.(*msgLp2pSessionResponse)
+		if !ok {
+			c.shutdown(fmt.Errorf("%w: got %s on the session stream, want lp2p-session-response", ErrSessionProtocol, msgName(msg)))
+			return
+		}
+		c.log.Debug("receive", "msg", msgName(resp), "result", resp.Result)
+		switch resp.Result {
+		case LP2PSessionResultAuthenticationRequired:
+			c.mu.Lock()
+			select {
+			case <-c.session.authRequired:
+				c.mu.Unlock()
+				c.shutdown(fmt.Errorf("%w: second authentication-required", ErrSessionProtocol))
+				return
+			default:
+				close(c.session.authRequired)
+			}
+			c.mu.Unlock()
+			continue
+		case LP2PSessionResultSuccess:
+			c.mu.Lock()
+			close(c.session.accepted)
+			c.mu.Unlock()
+			// Both agents end their side of the stream.
+			_ = stream.Close()
+			c.expectSessionStreamEnd(stream)
+			return
+		default:
+			// Ending the stream tells the server the refusal arrived.
+			_ = stream.Close()
+			c.shutdown(fmt.Errorf("%w: result %d", ErrSessionRefused, resp.Result))
+			return
+		}
 	}
-	resp, ok := msg.(*msgLp2pSessionResponse)
-	if !ok {
-		c.shutdown(fmt.Errorf("%w: got %s on the session stream, want lp2p-session-response", ErrSessionProtocol, msgName(msg)))
-		return
-	}
-	c.log.Debug("receive", "msg", msgName(resp), "result", resp.Result)
-	if resp.Result != LP2PSessionResultSuccess {
-		// Ending the stream tells the server the refusal arrived.
-		_ = stream.Close()
-		c.shutdown(fmt.Errorf("%w: result %d", ErrSessionRefused, resp.Result))
-		return
-	}
-
-	c.mu.Lock()
-	close(c.session.accepted)
-	c.mu.Unlock()
-	// Both agents end their side of the stream.
-	_ = stream.Close()
-	c.expectSessionStreamEnd(stream)
 }
 
 // expectSessionStreamEnd reads the session stream to its end; any further
@@ -243,10 +293,10 @@ func (c *baseConnection) handleSessionRequest(req *incomingSessionRequest) error
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, ok := c.session.requestedOrigin(); ok {
+	if c.session.isRequested() {
 		return fmt.Errorf("%w: second lp2p-session-request", ErrSessionProtocol)
 	}
-	c.log.Debug("session requested", "origin", req.msg.RequestingOrigin)
+	c.log.Debug("session requested")
 	c.session.origin = req.msg.RequestingOrigin
 	c.session.stream = req.stream
 	c.session.requestID = req.msg.RequestId
@@ -254,20 +304,8 @@ func (c *baseConnection) handleSessionRequest(req *incomingSessionRequest) error
 	return nil
 }
 
-// sessionRequested reports whether the server received the
-// lp2p-session-request. Without the extension it is true.
-//
-// Caller should hold connection lock.
-func (c *baseConnection) sessionRequested() bool {
-	if c.session == nil || c.agentRole != AgentRoleServer {
-		return true
-	}
-	_, ok := c.session.requestedOrigin()
-	return ok
-}
-
 // sendSessionResponse answers the lp2p-session-request on the server. Only
-// the first response is sent.
+// one final response is sent.
 //
 // Caller should hold connection lock.
 func (c *baseConnection) sendSessionResponse(result msgLp2pSessionResult) error {
@@ -275,7 +313,10 @@ func (c *baseConnection) sendSessionResponse(result msgLp2pSessionResult) error 
 	if s.responded {
 		return nil
 	}
-	s.responded = true
+	final := result != LP2PSessionResultAuthenticationRequired
+	if final {
+		s.responded = true
+	}
 	resp := &msgLp2pSessionResponse{
 		msgResponse: msgResponse{RequestId: s.requestID},
 		Result:      result,
@@ -283,6 +324,9 @@ func (c *baseConnection) sendSessionResponse(result msgLp2pSessionResult) error 
 	c.log.Debug("send", "msg", msgName(resp), "result", result)
 	if err := writeMessage(resp, s.stream); err != nil {
 		return err
+	}
+	if !final {
+		return nil
 	}
 	// Both agents end their side of the stream.
 	if err := s.stream.Close(); err != nil {
@@ -296,28 +340,76 @@ func (c *baseConnection) sendSessionResponse(result msgLp2pSessionResult) error 
 	return nil
 }
 
-// RequestingOrigin returns the requesting origin hint the client sent in its
-// lp2p-session-request, on a connection accepted by a listener with the
-// session extension. It is the ASCII serialization of an origin as asserted
-// by the client's user agent: parse it, and treat a value that doesn't
-// parse as an opaque origin, which matches nothing.
+// RequestSession sends the lp2p-session-request with the origin given to
+// DialSession, on the client. The server's certificate must be verified
+// first, by AuthenticatePSK or TrustPeer (ErrSessionNotVerified otherwise).
+// It fails with ErrSessionUnsupported if the agent lists neither
+// data-channels nor quic-transport. Then follow the server's cues with
+// AwaitSession.
+func (c *UnauthenticatedConnection) RequestSession(ctx context.Context) error {
+	b := c.base
+	if b.session == nil || b.agentRole != AgentRoleClient {
+		return errors.New("not a client with the session extension")
+	}
+	return b.requestSession(ctx)
+}
+
+// RequestingOrigin returns the requesting origin the client sent in its
+// lp2p-session-request, on the server, once the client's certificate is
+// verified: before, it isn't looked at. It is the ASCII serialization of an
+// origin as asserted by the client's user agent: parse it, and treat a value
+// that doesn't parse as an opaque origin, which matches nothing.
 func (c *UnauthenticatedConnection) RequestingOrigin() (origin string, ok bool) {
-	if c.base.session == nil {
+	b := c.base
+	if b.session == nil || b.agentRole != AgentRoleServer || !b.remoteAgent.Authenticated() {
 		return "", false
 	}
-	return c.base.session.requestedOrigin()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.session.isRequested() {
+		return "", false
+	}
+	return b.session.origin, true
+}
+
+// RequireAuthentication answers the lp2p-session-request with the
+// provisional authentication-required, on a server that hasn't verified the
+// client's certificate. The client then starts SPAKE2: wait for
+// SessionCueAuthenticate with AwaitSession and run AcceptAuthenticate and
+// AuthenticatePSK.
+func (c *UnauthenticatedConnection) RequireAuthentication() error {
+	b := c.base
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.session == nil || b.agentRole != AgentRoleServer {
+		return errors.New("not a server with the session extension")
+	}
+	if !b.session.isRequested() {
+		return fmt.Errorf("%w: no lp2p-session-request received", ErrSessionProtocol)
+	}
+	if b.session.authRequiredSent {
+		return nil
+	}
+	b.session.authRequiredSent = true
+	return b.sendSessionResponse(LP2PSessionResultAuthenticationRequired)
 }
 
 // RefuseSession refuses the session on the server: it answers the
-// lp2p-session-request with permanent-error and closes the connection. Call
-// it before any trust ceremony or prompt when no receiver allows the
-// requesting origin, or when the user declines.
+// lp2p-session-request with permanent-error and closes the connection once
+// the client ended its side of the stream, or after a short wait. Call it
+// when no receiver allows the requesting origin, or when the user declines.
 func (c *UnauthenticatedConnection) RefuseSession() error {
 	b := c.base
 	b.mu.Lock()
 	if b.session == nil || b.agentRole != AgentRoleServer {
 		b.mu.Unlock()
 		return errors.New("not a server with the session extension")
+	}
+	if !b.session.isRequested() {
+		b.mu.Unlock()
+		b.shutdown(ErrSessionRefused)
+		b.wg.Wait()
+		return nil
 	}
 	err := b.sendSessionResponse(LP2PSessionResultPermanentError)
 	stream := b.session.stream
@@ -360,46 +452,48 @@ func (c *baseConnection) closeAfterRefusal(stream ApplicationStream, cause error
 	c.shutdown(cause)
 }
 
-// RequestAuthentication asks the client to authenticate, on the server with
-// the session extension: it sends auth-capabilities, the cue for the client
-// to start SPAKE2. Call it after checking the requesting origin, when the
-// client's certificate isn't trusted yet; then run AcceptAuthenticate and
-// AuthenticatePSK as usual. The server never initiates SPAKE2.
-func (c *UnauthenticatedConnection) RequestAuthentication() error {
-	b := c.base
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.session == nil || b.agentRole != AgentRoleServer {
-		return errors.New("not a server with the session extension")
-	}
-	if !b.sessionRequested() {
-		return fmt.Errorf("%w: no lp2p-session-request received", ErrSessionProtocol)
-	}
-	if b.session.authRequested {
-		return nil
-	}
-	b.session.authRequested = true
-	return b.sendAuthCapabilities()
-}
-
-// AwaitSession waits, on the client of a connection made with DialSession,
-// for the server's cue: SessionCueAuthenticate when it sends
-// auth-capabilities, SessionCueAccepted when it accepts the session right
-// away. It fails with ErrSessionRefused if the server refuses.
+// AwaitSession waits for the next cue of the session exchange.
+//
+// On the client, after RequestSession: SessionCueAuthenticate when the
+// server answers authentication-required, SessionCueAccepted when it
+// accepts. On the server, after Accept: SessionCueAuthenticate when the
+// client starts SPAKE2, SessionCueRequested when its lp2p-session-request
+// arrives. Each cue is reported once; it fails with ErrSessionRefused if the
+// server refuses, or with the close reason.
 func (c *UnauthenticatedConnection) AwaitSession(ctx context.Context) (SessionCue, error) {
 	b := c.base
-	if b.session == nil || b.agentRole != AgentRoleClient {
-		return 0, errors.New("not a client with the session extension")
+	if b.session == nil {
+		return 0, errors.New("connection without the session extension")
+	}
+	s := b.session
+	authCue := s.authRequired
+	if b.agentRole == AgentRoleServer {
+		authCue = s.authStarted
+	}
+	if s.authCues.Load() > 0 {
+		authCue = nil // Already reported.
+	}
+	var requested, accepted <-chan struct{}
+	if b.agentRole == AgentRoleServer {
+		if s.requestedCues.Load() == 0 {
+			requested = s.requested
+		}
+	} else {
+		accepted = s.accepted
 	}
 	select {
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	case <-b.ctx.Done():
 		return 0, b.err()
-	case <-b.session.accepted:
-		return SessionCueAccepted, nil
-	case <-b.authNotify:
+	case <-authCue:
+		s.authCues.Add(1)
 		return SessionCueAuthenticate, nil
+	case <-requested:
+		s.requestedCues.Add(1)
+		return SessionCueRequested, nil
+	case <-accepted:
+		return SessionCueAccepted, nil
 	}
 }
 
@@ -410,9 +504,7 @@ func (c *UnauthenticatedConnection) AwaitSession(ctx context.Context) (SessionCu
 // AuthenticatePSK, or because the caller trusts its fingerprint, see
 // TrustPeer) and the user granted the session.
 //
-// On the client it waits for the success response, if not received yet. The
-// caller must have verified the server's certificate first, by
-// AuthenticatePSK or because it trusts its fingerprint (TrustPeer).
+// On the client it waits for the success response, if not received yet.
 //
 // Until it returns, neither agent sends messages of the data channel or
 // WebTransport extensions.
@@ -440,6 +532,10 @@ func (c *UnauthenticatedConnection) CompleteSession(ctx context.Context) (*Conne
 		b.mu.Unlock()
 		return c.connection()
 	}
+	if b.agentRole == AgentRoleServer && !b.session.isRequested() {
+		b.mu.Unlock()
+		return nil, fmt.Errorf("%w: no lp2p-session-request received", ErrSessionProtocol)
+	}
 	b.session.completed = true
 	var err error
 	if b.agentRole == AgentRoleServer {
@@ -454,7 +550,6 @@ func (c *UnauthenticatedConnection) CompleteSession(ctx context.Context) (*Conne
 
 // TrustPeer marks the peer's certificate as verified without SPAKE2, because
 // its fingerprint (RemoteAgent().PeerID) is a trust anchor of the caller.
-// CompleteSession then hands the connection to the application protocol.
 func (c *UnauthenticatedConnection) TrustPeer() error {
 	c.base.remoteAgent.setAuthenticated()
 	return nil

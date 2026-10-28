@@ -56,6 +56,24 @@ type InteropQuirks struct {
 	// exchanged auth-capabilities. Older osp_demo builds implement neither.
 	TolerateMissingAgentInfo bool
 
+	// ConsumerInitiatesWithPublicValue makes a PSK consumer that initiates
+	// SPAKE2 send auth-spake2-handshake psk-needs-presentation with pA, as
+	// the current network.bs text says, which requires the consumer to know
+	// the PSK before the presenter showed it. Without it, the consumer's
+	// psk-needs-presentation carries no public-value: it asks the presenter
+	// to show the PSK and initiate with psk-shown. Chromium's openscreen
+	// never sends psk-needs-presentation but, when it presents, fails on one
+	// without pA unless it initiated first; enable this when osp_demo is the
+	// presenter (the osp-demo interop harness does with
+	// OSP_DEMO_EASE_OF_INPUT). Received psk-needs-presentation with pA is
+	// always answered.
+	//
+	// Violates the OSP fix local-peer-to-peer assumes: a consumer can't
+	// compute pA before it has the PSK, so network.bs "the PSK consumer
+	// sends ... psk-needs-presentation and the public-value field set to pA"
+	// is read as carrying no public-value.
+	ConsumerInitiatesWithPublicValue bool
+
 	// AllowSkipAuthentication enables
 	// UnauthenticatedConnection.SkipAuthentication, which hands the
 	// connection to the application protocol WITHOUT authenticating the

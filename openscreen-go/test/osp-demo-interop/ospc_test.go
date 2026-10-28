@@ -142,6 +142,8 @@ func newQuirkAgent(t *testing.T, name string, q ospc.InteropQuirks, logs *logBuf
 	// --spake2_suite=p256 (see demoAuthArgs). network.bs requires
 	// edwards25519, which neither side implements.
 	conf.InteropQuirks.Spake2SuiteP256 = true
+	// osp_demo, when it presents the PSK, needs pA in psk-needs-presentation.
+	conf.InteropQuirks.ConsumerInitiatesWithPublicValue = os.Getenv("OSP_DEMO_EASE_OF_INPUT") != ""
 	if ease := os.Getenv("OSP_GO_EASE_OF_INPUT"); ease != "" {
 		n, err := strconv.Atoi(ease)
 		if err != nil {
