@@ -32,4 +32,5 @@ build
 .claude/
 CLAUDE.md
 AGENTS.md
-docs/
+docs/*
+!docs/threat-model/
