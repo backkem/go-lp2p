@@ -114,8 +114,17 @@ type msgLp2pSessionRequest struct {
 // lp2p-session-response (type key 1111)
 type msgLp2pSessionResponse struct {
 	msgResponse
-	Result msgResult `cbor:"1,keyasint"`
+	Result msgLp2pSessionResult `cbor:"1,keyasint"`
 }
+
+// lp2p-session-result: the OSP result values plus authentication-required.
+type msgLp2pSessionResult uint64
+
+const (
+	LP2PSessionResultSuccess                                     = msgLp2pSessionResult(ResultSuccess)
+	LP2PSessionResultPermanentError                              = msgLp2pSessionResult(ResultPermanentError)
+	LP2PSessionResultAuthenticationRequired msgLp2pSessionResult = 1110
+)
 
 // data-transport-start-request (type key 1201)
 type msgDataTransportStartRequest struct {

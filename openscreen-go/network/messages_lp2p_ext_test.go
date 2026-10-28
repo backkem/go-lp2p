@@ -23,12 +23,16 @@ func TestLP2PExtensionMessageVectors(t *testing.T) {
 		hex: "4456" + "a2" + "0007" + "01" + "71" + hex.EncodeToString([]byte("https://a.example")),
 	}, {
 		name: "lp2p-session-response success",
-		msg:  &msgLp2pSessionResponse{msgResponse{7}, ResultSuccess},
+		msg:  &msgLp2pSessionResponse{msgResponse{7}, LP2PSessionResultSuccess},
 		hex:  "4457" + "a2" + "0007" + "0101",
 	}, {
 		name: "lp2p-session-response permanent-error",
-		msg:  &msgLp2pSessionResponse{msgResponse{7}, ResultPermanentError},
+		msg:  &msgLp2pSessionResponse{msgResponse{7}, LP2PSessionResultPermanentError},
 		hex:  "4457" + "a2" + "0007" + "01" + "1866", // 102
+	}, {
+		name: "lp2p-session-response authentication-required",
+		msg:  &msgLp2pSessionResponse{msgResponse{7}, LP2PSessionResultAuthenticationRequired},
+		hex:  "4457" + "a2" + "0007" + "01" + "190456", // 1110
 	}, {
 		name: "data-transport-start-request",
 		msg:  &msgDataTransportStartRequest{msgRequest: msgRequest{1}, ExchangeId: 2},

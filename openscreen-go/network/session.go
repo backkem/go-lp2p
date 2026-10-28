@@ -189,7 +189,7 @@ func (c *baseConnection) readSessionResponse(stream ApplicationStream) {
 		return
 	}
 	c.log.Debug("receive", "msg", msgName(resp), "result", resp.Result)
-	if resp.Result != ResultSuccess {
+	if resp.Result != LP2PSessionResultSuccess {
 		// Ending the stream tells the server the refusal arrived.
 		_ = stream.Close()
 		c.shutdown(fmt.Errorf("%w: result %d", ErrSessionRefused, resp.Result))
@@ -229,7 +229,7 @@ func (c *baseConnection) handleSessionRequest(req *incomingSessionRequest) error
 		}
 		err := writeMessage(&msgLp2pSessionResponse{
 			msgResponse: msgResponse{RequestId: req.msg.RequestId},
-			Result:      ResultPermanentError,
+			Result:      LP2PSessionResultPermanentError,
 		}, req.stream)
 		if err != nil || req.stream.Close() != nil {
 			return cause
@@ -270,7 +270,7 @@ func (c *baseConnection) sessionRequested() bool {
 // the first response is sent.
 //
 // Caller should hold connection lock.
-func (c *baseConnection) sendSessionResponse(result msgResult) error {
+func (c *baseConnection) sendSessionResponse(result msgLp2pSessionResult) error {
 	s := c.session
 	if s.responded {
 		return nil
@@ -288,7 +288,7 @@ func (c *baseConnection) sendSessionResponse(result msgResult) error {
 	if err := s.stream.Close(); err != nil {
 		return err
 	}
-	if result == ResultSuccess {
+	if result == LP2PSessionResultSuccess {
 		close(s.accepted)
 		stream := s.stream
 		c.goroutine(func() { c.expectSessionStreamEnd(stream) })
@@ -319,7 +319,7 @@ func (c *UnauthenticatedConnection) RefuseSession() error {
 		b.mu.Unlock()
 		return errors.New("not a server with the session extension")
 	}
-	err := b.sendSessionResponse(ResultPermanentError)
+	err := b.sendSessionResponse(LP2PSessionResultPermanentError)
 	stream := b.session.stream
 	b.mu.Unlock()
 	if err != nil {
@@ -443,7 +443,7 @@ func (c *UnauthenticatedConnection) CompleteSession(ctx context.Context) (*Conne
 	b.session.completed = true
 	var err error
 	if b.agentRole == AgentRoleServer {
-		err = b.sendSessionResponse(ResultSuccess)
+		err = b.sendSessionResponse(LP2PSessionResultSuccess)
 	}
 	b.mu.Unlock()
 	if err := b.failOnError(err); err != nil {
