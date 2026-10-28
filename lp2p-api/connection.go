@@ -134,8 +134,16 @@ func (c *LP2PConnection) isClosed() bool {
 	return c.closed
 }
 
+// acceptDataChannels delivers the peer's data channels, held until the
+// connection is exposed so that the page can set ondatachannel first, as
+// for incoming transports.
 func (c *LP2PConnection) acceptDataChannels() {
 	defer c.wg.Done()
+	select {
+	case <-c.exposed:
+	case <-c.ctx.Done():
+		return
+	}
 	for {
 		oDc, err := c.conn.AcceptDataChannel(c.ctx)
 		if err != nil {
