@@ -1,0 +1,30 @@
+{
+  "name": "osp-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Open Screen Protocol application protocol (presentation, remote playback, agent-info) over pluggable transports: RTCDataChannel-shaped and WebTransport-shaped. Zero runtime dependencies.",
+  "license": "ISC",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "build": "node scripts/build.mjs",
+    "check-dist": "node scripts/build.mjs && git diff --exit-code -- dist && test -z \"$(git status --porcelain -- dist)\"",
+    "test": "node --test test/*.test.ts",
+    "example": "node examples/node-inmemory.ts",
+    "serve": "node scripts/serve.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
