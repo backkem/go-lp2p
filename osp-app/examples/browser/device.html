@@ -1,0 +1,109 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osp-app device</title>
+<style>
+  body { margin: 0; padding: 10px 14px; font: 13px/1.4 system-ui, sans-serif; }
+  #log { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; border-top: 1px solid #ddd; margin-top: 8px; padding-top: 6px; }
+  #screen { min-height: 60px; border: 1px dashed #aaa; border-radius: 6px; padding: 8px; margin-top: 8px; }
+  button { margin: 2px 4px 2px 0; }
+</style>
+<h3 id="title"></h3>
+<div id="controls"></div>
+<div id="screen" hidden></div>
+<div id="log"></div>
+<!-- The shim installs LP2PReceiver, LP2PRequest, LP2PQuicTransport and lp2p on globalThis. -->
+<script src="../../../lp2p-shim/dist/lp2p-shim.js"></script>
+<script type="module">
+  import {
+    AgentCapability,
+    DataChannelTransport,
+    OspSession,
+    PresentationController,
+    PresentationReceiver,
+    WebTransportTransport,
+  } from "../../dist/index.js";
+
+  const params = new URLSearchParams(location.search);
+  const role = params.get("role") ?? "controller";
+  const name = params.get("name") ?? role;
+  const kind = params.get("transport") ?? "datachannel";
+  const $ = (id) => document.getElementById(id);
+  const log = (s) => ($("log").textContent += `${new Date().toLocaleTimeString()} ${s}\n`);
+  $("title").textContent = `${name} (${role}, ${kind})`;
+
+  if (!globalThis.LP2PShim) throw new Error("lp2p-shim did not load: use http://localhost (a secure context)");
+  LP2PShim.configure({
+    transport: new LP2PShim.PostMessageTransport({ channelName: `osp-app/${kind}` }),
+    ...(params.get("auto") === "1" ? { ui: new LP2PShim.AutoUI(), pairing: "none" } : {}),
+  });
+
+  const button = (label, fn) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.onclick = () => fn().catch((e) => log(`error: ${e.message}`));
+    $("controls").append(b);
+    return b;
+  };
+
+  if (role === "receiver") {
+    const receiver = new PresentationReceiver();
+    receiver.on("connection", (conn) => {
+      $("screen").hidden = false;
+      $("screen").textContent = `Presenting ${conn.url}`;
+      log(`connection ${conn.connectionId} to presentation ${conn.presentationId}`);
+      conn.on("message", (m) => {
+        $("screen").textContent = `Presenting ${conn.url}: ${m}`;
+        void conn.send(`shown "${m}"`);
+      });
+      conn.on("terminate", () => ($("screen").textContent = "Presentation terminated."));
+    });
+    const serve = (transport) => {
+      const session = new OspSession(transport, {
+        agentInfo: { displayName: name, modelName: "osp-app browser example", capabilities: [AgentCapability.receivePresentation], stateToken: "brws1234", locales: [navigator.language] },
+      });
+      receiver.attach(session);
+      session.on("close", (i) => log(`controller left (code ${i.code})`));
+      log("controller connected");
+    };
+    if (kind === "webtransport") {
+      // The shorthand: each incoming LP2PQuicTransport, already ready.
+      (async () => {
+        for await (const t of lp2p.makeDiscoverable({ nickname: name })) serve(new WebTransportTransport(t));
+      })();
+    } else {
+      const r = new LP2PReceiver({ nickname: name });
+      r.onconnection = (e) => (e.connection.ondatachannel = (ev) => serve(new DataChannelTransport(ev.channel)));
+      await r.start();
+    }
+    log("discoverable, waiting for a controller");
+  } else {
+    let controller = null;
+    let conn = null;
+    button("Connect", async () => {
+      let transport;
+      if (kind === "webtransport") {
+        transport = new WebTransportTransport(await lp2p.connect({ nickname: name }));
+      } else {
+        const connection = await new LP2PRequest({ nickname: name }).start();
+        transport = new DataChannelTransport(connection.createDataChannel("osp", { protocol: "osp-app" }));
+      }
+      const session = new OspSession(transport);
+      const info = await session.requestAgentInfo();
+      log(`connected to "${info.displayName}"`);
+      controller = new PresentationController(session);
+    });
+    button("Start presentation", async () => {
+      const url = "https://example.com/slides";
+      const [a] = (await controller.checkAvailability([url])).availabilities;
+      log(`${url}: availability ${a}`);
+      conn = await controller.start(url);
+      conn.on("message", (m) => log(`receiver says: ${m}`));
+      conn.on("terminate", () => log("terminated"));
+      log(`started ${conn.presentationId}, connection ${conn.connectionId}`);
+    });
+    let n = 1;
+    button("Next slide", () => conn.send(`slide ${n++}`));
+    button("Terminate", () => conn.terminate());
+  }
+</script>
